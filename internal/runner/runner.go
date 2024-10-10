@@ -1,16 +1,15 @@
 package runner
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm/pkg"
 	"github.com/projectdiscovery/pdtm/pkg/path"
+	"github.com/projectdiscovery/pdtm/pkg/tools"
 	"github.com/projectdiscovery/pdtm/pkg/types"
 	"github.com/projectdiscovery/pdtm/pkg/utils"
 	errorutil "github.com/projectdiscovery/utils/errors"
@@ -34,7 +33,7 @@ func NewRunner(options *Options) (*Runner, error) {
 // Run the instance
 func (r *Runner) Run() error {
 	// add default path to $PATH
-	if r.options.SetPath || r.options.Path == defaultPath {
+	if r.options.SetPath || r.options.Path == tools.DefaultPath {
 		if err := path.SetENV(r.options.Path); err != nil {
 			return errorutil.NewWithErr(err).Msgf(`Failed to set path: %s. Add it to $PATH and run again`, r.options.Path)
 		}
@@ -72,12 +71,12 @@ func (r *Runner) Run() error {
 	// else fetch from cache file
 	if toolList != nil {
 		go func() {
-			if err := UpdateCache(toolList); err != nil {
+			if err := tools.UpdateCache(toolList); err != nil {
 				gologger.Warning().Msgf("%s\n", err)
 			}
 		}()
 	} else {
-		toolList, err = FetchFromCache()
+		toolList, err = tools.FetchFromCache()
 		if err != nil {
 			return errors.New("pdtm api is down, please try again later")
 		}
@@ -106,7 +105,7 @@ func (r *Runner) Run() error {
 	gologger.Verbose().Msgf("using path %s", r.options.Path)
 
 	for _, toolName := range r.options.Install {
-		if !path.IsSubPath(homeDir, r.options.Path) {
+		if !path.IsSubPath(tools.HomeDir, r.options.Path) {
 			gologger.Error().Msgf("skipping install outside home folder: %s", toolName)
 			continue
 		}
@@ -135,7 +134,7 @@ func (r *Runner) Run() error {
 		}
 	}
 	for _, tool := range r.options.Update {
-		if !path.IsSubPath(homeDir, r.options.Path) {
+		if !path.IsSubPath(tools.HomeDir, r.options.Path) {
 			gologger.Error().Msgf("skipping update outside home folder: %s", tool)
 			continue
 		}
@@ -150,7 +149,7 @@ func (r *Runner) Run() error {
 		}
 	}
 	for _, tool := range r.options.Remove {
-		if !path.IsSubPath(homeDir, r.options.Path) {
+		if !path.IsSubPath(tools.HomeDir, r.options.Path) {
 			gologger.Error().Msgf("skipping remove outside home folder: %s", tool)
 			continue
 		}
@@ -187,28 +186,6 @@ func isGoInstalled() bool {
 		return false
 	}
 	return true
-}
-
-// UpdateCache creates/updates cache file
-func UpdateCache(toolList []types.Tool) error {
-	b, err := json.Marshal(toolList)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(cacheFile, b, os.ModePerm)
-}
-
-// FetchFromCache loads tool list from cache file
-func FetchFromCache() ([]types.Tool, error) {
-	b, err := os.ReadFile(cacheFile)
-	if err != nil {
-		return nil, err
-	}
-	var toolList []types.Tool
-	if err := json.Unmarshal(b, &toolList); err != nil {
-		return nil, err
-	}
-	return toolList, nil
 }
 
 // ListToolsAndEnv prints the list of tools

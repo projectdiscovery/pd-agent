@@ -2,30 +2,15 @@ package runner
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/formatter"
 	"github.com/projectdiscovery/gologger/levels"
+	"github.com/projectdiscovery/pdtm/pkg/tools"
 	fileutil "github.com/projectdiscovery/utils/file"
 	updateutils "github.com/projectdiscovery/utils/update"
-)
-
-var (
-	// retrieve home directory or fail
-	homeDir = func() string {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			gologger.Fatal().Msgf("Failed to get user home directory: %s", err)
-		}
-		return home
-	}()
-
-	defaultConfigLocation = filepath.Join(homeDir, ".config/pdtm/config.yaml")
-	cacheFile             = filepath.Join(homeDir, ".config/pdtm/cache.json")
-	defaultPath           = filepath.Join(homeDir, ".pdtm/go/bin")
 )
 
 var au *aurora.Aurora
@@ -63,8 +48,8 @@ func ParseOptions() *Options {
 	flagSet.SetDescription(`pdtm is a simple and easy-to-use golang based tool for managing open source projects from ProjectDiscovery`)
 
 	flagSet.CreateGroup("config", "Config",
-		flagSet.StringVar(&options.ConfigFile, "config", defaultConfigLocation, "cli flag configuration file"),
-		flagSet.StringVarP(&options.Path, "binary-path", "bp", defaultPath, "custom location to download project binary"),
+		flagSet.StringVar(&options.ConfigFile, "config", tools.DefaultConfigLocation, "cli flag configuration file"),
+		flagSet.StringVarP(&options.Path, "binary-path", "bp", tools.DefaultPath, "custom location to download project binary"),
 	)
 
 	flagSet.CreateGroup("install", "Install",
@@ -128,7 +113,7 @@ func ParseOptions() *Options {
 		}
 	}
 
-	if options.ConfigFile != defaultConfigLocation {
+	if options.ConfigFile != tools.DefaultConfigLocation {
 		_ = options.loadConfigFrom(options.ConfigFile)
 	}
 
