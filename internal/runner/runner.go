@@ -1,11 +1,14 @@
 package runner
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm/pkg"
@@ -13,8 +16,10 @@ import (
 	"github.com/projectdiscovery/pdtm/pkg/tools"
 	"github.com/projectdiscovery/pdtm/pkg/types"
 	"github.com/projectdiscovery/pdtm/pkg/utils"
+	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	stringsutil "github.com/projectdiscovery/utils/strings"
+	"github.com/tidwall/gjson"
 )
 
 var excludedToolList = []string{"nuclei-templates"}
@@ -164,16 +169,16 @@ func (r *Runner) Run() error {
 
 		}
 	}
-	if len(r.options.Install) == 0 && len(r.options.Update) == 0 && len(r.options.Remove) == 0 {
-		if err := r.ListToolsAndEnv(toolList); err != nil {
-			return err
-		}
-	}
 
 	if r.options.AgentMode {
 		gologger.Info().Msgf("running in agent mode with name %s", r.options.AgentName)
-		time.Sleep(10 * time.Minute)
+		return r.agentMode()
 	}
+
+	if len(r.options.Install) == 0 && len(r.options.Update) == 0 && len(r.options.Remove) == 0 {
+		return r.ListToolsAndEnv(toolList)
+	}
+
 	return nil
 }
 
@@ -215,3 +220,152 @@ func (r *Runner) ListToolsAndEnv(tools []types.Tool) error {
 
 // Close the runner instance
 func (r *Runner) Close() {}
+
+func (r *Runner) agentMode() error {
+	apiURL := fmt.Sprintf("%s/v1/scans", pdcpauth.DefaultApiServer)
+	client, err := r.createAuthenticatedClient()
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	// Send the request using the client with proxy and InsecureSkipVerify
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	// Use GJSON to parse the JSON response
+	result := gjson.ParseBytes(body)
+
+	fmt.Println("List of Scans:")
+	result.Get("data").ForEach(func(key, value gjson.Result) bool {
+		scanID := value.Get("scan_id").String()
+		fmt.Printf("ID: %s | Name: %s | Status: %s\n",
+			scanID,
+			value.Get("name").String(),
+			value.Get("status").String(),
+		)
+
+		// Fetch scan config for each scan
+		scanConfig, err := r.fetchScanConfig(scanID)
+		if err != nil {
+			gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
+		} else {
+			fmt.Printf("Scan Config: %s\n", scanConfig)
+		}
+
+		// Fetch assets if enumeration ID is defined
+		var enumerationIDs []string
+		gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
+			log.Printf("enumeration ID: %s", value.String())
+			id := value.Get("id").String()
+			if id != "" {
+				enumerationIDs = append(enumerationIDs, id)
+			}
+			return true // continue iterating
+		})
+		for _, enumerationID := range enumerationIDs {
+			asset, err := r.fetchAssets(enumerationID)
+			if err != nil {
+				gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+			} else {
+				fmt.Printf("Assets: %s\n", asset)
+			}
+		}
+
+		fmt.Println("---")
+		return true
+	})
+
+	return nil
+}
+
+func (r *Runner) fetchScanConfig(scanID string) (string, error) {
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pdcpauth.DefaultApiServer, scanID)
+	client, err := r.createAuthenticatedClient()
+	if err != nil {
+		return "", fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response: %v", err)
+	}
+
+	return string(body), nil
+}
+
+func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
+	client, err := r.createAuthenticatedClient()
+	if err != nil {
+		return nil, fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %v", err)
+	}
+
+	return body, nil
+}
+
+func (r *Runner) createAuthenticatedClient() (*http.Client, error) {
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	client := &http.Client{
+		Transport: transport,
+	}
+
+	// Create a custom RoundTripper to add headers to every request
+	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		req.Header.Set("X-Api-Key", PDCPApiKey)
+		req.Header.Set("X-Team-Id", r.options.TeamID)
+		return transport.RoundTrip(req)
+	})
+
+	return client, nil
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (rf roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return rf(req)
+}

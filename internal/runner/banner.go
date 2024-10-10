@@ -34,5 +34,5 @@ func GetUpdateCallback() func() {
 // AuthWithPDCP is used to authenticate with PDCP
 func AuthWithPDCP() {
 	showBanner()
-	pdcp.CheckNValidateCredentials("httpx")
+	pdcp.CheckNValidateCredentials("pdtm")
 }

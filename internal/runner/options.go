@@ -139,18 +139,18 @@ func ParseOptions() *Options {
 	}
 
 	// api key hierarchy: cli flag > env var > .pdcp/credential file
-	if options.PdcpAuth == "true" {
-		AuthWithPDCP()
-	} else if len(options.PdcpAuth) == 36 {
-		PDCPApiKey = options.PdcpAuth
-		ph := pdcpauth.PDCPCredHandler{}
-		if _, err := ph.GetCreds(); err == pdcpauth.ErrNoCreds {
-			apiServer := env.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
-			if validatedCreds, err := ph.ValidateAPIKey(PDCPApiKey, apiServer, "httpx"); err == nil {
-				_ = ph.SaveCreds(validatedCreds)
-			}
+	// use dev api
+	pdcpauth.DefaultApiServer = "https://api.dev.projectdiscovery.io"
+	h := &pdcpauth.PDCPCredHandler{}
+	creds, err := h.GetCreds()
+	if err != nil {
+		if err != pdcpauth.ErrNoCreds {
+			gologger.Verbose().Msgf("Could not get credentials for cloud upload: %s\n", err)
 		}
+		pdcpauth.CheckNValidateCredentials("pdtm")
+		return nil
 	}
+	PDCPApiKey = creds.APIKey
 
 	return options
 }
