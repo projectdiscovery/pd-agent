@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm/pkg"
@@ -25,9 +26,7 @@ type Runner struct {
 
 // NewRunner instance
 func NewRunner(options *Options) (*Runner, error) {
-	return &Runner{
-		options: options,
-	}, nil
+	return &Runner{options: options}, nil
 }
 
 // Run the instance
@@ -166,7 +165,14 @@ func (r *Runner) Run() error {
 		}
 	}
 	if len(r.options.Install) == 0 && len(r.options.Update) == 0 && len(r.options.Remove) == 0 {
-		return r.ListToolsAndEnv(toolList)
+		if err := r.ListToolsAndEnv(toolList); err != nil {
+			return err
+		}
+	}
+
+	if r.options.AgentMode {
+		gologger.Info().Msgf("running in agent mode with name %s", r.options.AgentName)
+		time.Sleep(10 * time.Minute)
 	}
 	return nil
 }

@@ -9,11 +9,18 @@ import (
 	"github.com/projectdiscovery/gologger/formatter"
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pdtm/pkg/tools"
+	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
+	"github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	updateutils "github.com/projectdiscovery/utils/update"
 )
 
 var au *aurora.Aurora
+
+var (
+	PDCPApiKey = ""
+	TeamIDEnv  = env.GetEnvOrDefault("PDCP_TEAM_ID", "")
+)
 
 // Options contains the configuration options for tuning the enumeration process.
 type Options struct {
@@ -38,6 +45,12 @@ type Options struct {
 	ShowPath           bool
 	DisableUpdateCheck bool
 	DisableChangeLog   bool
+
+	PdcpAuth         string
+	PdcpAuthCredFile string
+	TeamID           string
+	AgentMode        bool
+	AgentName        string
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -80,6 +93,14 @@ func ParseOptions() *Options {
 		flagSet.BoolVarP(&options.DisableChangeLog, "dc", "disable-changelog", false, "disable release changelog in output"),
 	)
 
+	flagSet.CreateGroup("cloud", "Cloud",
+		flagSet.DynamicVar(&options.PdcpAuth, "auth", "true", "configure projectdiscovery cloud (pdcp) api key"),
+		flagSet.StringVarP(&options.PdcpAuthCredFile, "auth-config", "ac", "", "configure projectdiscovery cloud (pdcp) api key credential file"),
+		flagSet.StringVarP(&options.TeamID, "team-id", "tid", TeamIDEnv, "upload asset results to given team id (optional)"),
+		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
+		flagSet.StringVar(&options.AgentName, "agent-name", "pdtm-agent", "specify the name for the agent"),
+	)
+
 	if err := flagSet.Parse(); err != nil {
 		gologger.Fatal().Msgf("%s\n", err)
 	}
@@ -115,6 +136,20 @@ func ParseOptions() *Options {
 
 	if options.ConfigFile != tools.DefaultConfigLocation {
 		_ = options.loadConfigFrom(options.ConfigFile)
+	}
+
+	// api key hierarchy: cli flag > env var > .pdcp/credential file
+	if options.PdcpAuth == "true" {
+		AuthWithPDCP()
+	} else if len(options.PdcpAuth) == 36 {
+		PDCPApiKey = options.PdcpAuth
+		ph := pdcpauth.PDCPCredHandler{}
+		if _, err := ph.GetCreds(); err == pdcpauth.ErrNoCreds {
+			apiServer := env.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
+			if validatedCreds, err := ph.ValidateAPIKey(PDCPApiKey, apiServer, "httpx"); err == nil {
+				_ = ph.SaveCreds(validatedCreds)
+			}
+		}
 	}
 
 	return options
