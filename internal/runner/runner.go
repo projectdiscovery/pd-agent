@@ -18,6 +18,7 @@ import (
 	"github.com/projectdiscovery/pdtm/pkg/utils"
 	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	errorutil "github.com/projectdiscovery/utils/errors"
+	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/tidwall/gjson"
 )
@@ -248,6 +249,7 @@ func (r *Runner) agentMode() error {
 	// Use GJSON to parse the JSON response
 	result := gjson.ParseBytes(body)
 
+	// todo: initial support only for nuclei scans
 	fmt.Println("List of Scans:")
 	result.Get("data").ForEach(func(key, value gjson.Result) bool {
 		scanID := value.Get("scan_id").String()
@@ -273,7 +275,7 @@ func (r *Runner) agentMode() error {
 			if id != "" {
 				enumerationIDs = append(enumerationIDs, id)
 			}
-			return true // continue iterating
+			return true
 		})
 		for _, enumerationID := range enumerationIDs {
 			asset, err := r.fetchAssets(enumerationID)
@@ -285,6 +287,44 @@ func (r *Runner) agentMode() error {
 		}
 
 		fmt.Println("---")
+
+		// todo: temporarily integrate with backend by adding agent_ids in scan_config and enumeration_config
+		// we are ignoring scan state as well for now
+		var agentIds []string
+
+		// todo: hardcoding agent_ids for now
+		agentIds = append(agentIds, r.options.AgentName)
+
+		gjson.Parse(scanConfig).Get("agent_ids").ForEach(func(key, value gjson.Result) bool {
+			log.Printf("agent ID: %s", value.String())
+			id := value.Get("id").String()
+			if id != "" {
+				agentIds = append(agentIds, id)
+			}
+			return true
+		})
+		// check if current agent is within the ids
+		if sliceutil.Contains(agentIds, r.options.AgentName) {
+			fmt.Println("Agent is within the list of agents for this scan")
+
+			// execute scan with templates and targets
+			fmt.Println("Executing nuclei scan with templates and targets")
+
+			task := &types.Task{
+				Tool: types.Nuclei,
+				Options: types.Options{
+					Hosts: []string{"http://192.168.5.32:8000"},
+				},
+			}
+			if err := pkg.Run(task); err != nil {
+				gologger.Error().Msgf("Error executing task: %v", err)
+			}
+
+			fmt.Println("Scan completed")
+		} else {
+			fmt.Println("Agent is not within the list of agents for this scan")
+		}
+
 		return true
 	})
 
