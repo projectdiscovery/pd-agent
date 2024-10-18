@@ -141,6 +141,8 @@ func ParseOptions() *Options {
 	// api key hierarchy: cli flag > env var > .pdcp/credential file
 	// use dev api
 	pdcpauth.DefaultApiServer = "https://api.dev.projectdiscovery.io"
+	pdcpauth.DashBoardURL = "https://cloud-dev.projectdiscovery.io"
+
 	h := &pdcpauth.PDCPCredHandler{}
 	creds, err := h.GetCreds()
 	if err != nil {

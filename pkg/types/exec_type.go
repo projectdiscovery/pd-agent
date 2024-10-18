@@ -42,4 +42,7 @@ type Options struct {
 
 	// - Nuclei
 	Templates []string
+
+	ScanID string
+	TeamID string
 }

@@ -222,6 +222,16 @@ func (r *Runner) ListToolsAndEnv(tools []types.Tool) error {
 // Close the runner instance
 func (r *Runner) Close() {}
 
+// todo: for the time being each single execution:
+// - will download the scan list
+// - execute scans without schedule or uploaded state
+// - execute schedules scans with time proximity
+// - Perform scan with:
+//   - templates
+//   - targets
+//   - todo: nuclei config
+//
+// - configure nuclei to upload results with scan id
 func (r *Runner) agentMode() error {
 	apiURL := fmt.Sprintf("%s/v1/scans", pdcpauth.DefaultApiServer)
 	client, err := r.createAuthenticatedClient()
@@ -277,6 +287,9 @@ func (r *Runner) agentMode() error {
 			}
 			return true
 		})
+
+		// gets assets from enumeration id
+		var assets []string
 		for _, enumerationID := range enumerationIDs {
 			asset, err := r.fetchAssets(enumerationID)
 			if err != nil {
@@ -284,7 +297,25 @@ func (r *Runner) agentMode() error {
 			} else {
 				fmt.Printf("Assets: %s\n", asset)
 			}
+			assets = append(assets, strings.Split(string(asset), "\n")...)
 		}
+		// gets assets from scan config
+		gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
+			assets = append(assets, value.String())
+			return true
+		})
+
+		var templates []string
+		value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
+			templates = append(templates, value.String())
+			return true
+		})
+
+		fmt.Printf("ID: %s | Name: %s | Status: %s\n",
+			scanID,
+			value.Get("name").String(),
+			value.Get("status").String(),
+		)
 
 		fmt.Println("---")
 
@@ -308,12 +339,22 @@ func (r *Runner) agentMode() error {
 			fmt.Println("Agent is within the list of agents for this scan")
 
 			// execute scan with templates and targets
-			fmt.Println("Executing nuclei scan with templates and targets")
+			fmt.Println("Executing nuclei scan with the following configuration")
+			fmt.Println("Templates:")
+			for _, template := range templates {
+				fmt.Printf("  - %s\n", template)
+			}
+			fmt.Println("Assets:")
+			for _, asset := range assets {
+				fmt.Printf("  - %s\n", asset)
+			}
 
 			task := &types.Task{
 				Tool: types.Nuclei,
 				Options: types.Options{
-					Hosts: []string{"http://192.168.5.32:8000"},
+					Hosts:     assets,
+					Templates: templates,
+					ScanID:    scanID,
 				},
 			}
 			if err := pkg.Run(task); err != nil {

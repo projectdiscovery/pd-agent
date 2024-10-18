@@ -28,8 +28,20 @@ func Run(task *types.Task) error {
 		return fmt.Errorf("tool '%s' not found", task.Tool.String())
 	}
 
+	args := []string{
+		task.Tool.String(),
+	}
+
+	if task.Options.ScanID != "" {
+		args = append(args, "-cloud-upload", task.Options.ScanID)
+	}
+
+	if task.Options.TeamID != "" {
+		args = append(args, "-team-id", task.Options.TeamID)
+	}
+
 	// Prepare the command
-	cmd := exec.Command(task.Tool.String())
+	cmd := exec.Command(args[0], args[1:]...)
 
 	// Set up stdin, stdout, and stderr pipes
 	stdin, err := cmd.StdinPipe()
