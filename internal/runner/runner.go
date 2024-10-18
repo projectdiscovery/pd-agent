@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm/pkg"
@@ -344,9 +345,17 @@ func (r *Runner) agentMode() error {
 
 			var skip bool
 			// perform time filtering
-			// skip scans with schedule (todo: add support for scheduled scans)
 			if hasScheduled {
-				skip = false
+				// extract the next execution time from the schedule and check if it's within the last +/-10 minutes
+				nextSchedule := gjson.Parse(schedule).Get("schedule_next_run").Time()
+				// Check if nextSchedule is within the past or next ten minutes range
+				now := time.Now()
+				tenMinutesAgo := now.Add(-10 * time.Minute)
+				tenMinutesFromNow := now.Add(10 * time.Minute)
+				isInTimeRange := nextSchedule.After(tenMinutesAgo) && nextSchedule.Before(tenMinutesFromNow)
+				if !isInTimeRange {
+					skip = true
+				}
 			}
 			// only consider queued, starting and automatic scans for immediate execution
 			if !stringsutil.EqualFoldAny(status, "queued", "starting", "automatic") {
