@@ -311,10 +311,14 @@ func (r *Runner) agentMode() error {
 			return true
 		})
 
+		status := value.Get("status").String()
+		schedule := value.Get("schedule").String()
+		hasScheduled := schedule != ""
+
 		fmt.Printf("ID: %s | Name: %s | Status: %s\n",
 			scanID,
 			value.Get("name").String(),
-			value.Get("status").String(),
+			status,
 		)
 
 		fmt.Println("---")
@@ -337,6 +341,22 @@ func (r *Runner) agentMode() error {
 		// check if current agent is within the ids
 		if sliceutil.Contains(agentIds, r.options.AgentName) {
 			fmt.Println("Agent is within the list of agents for this scan")
+
+			var skip bool
+			// perform time filtering
+			// skip scans with schedule (todo: add support for scheduled scans)
+			if hasScheduled {
+				skip = false
+			}
+			// only consider queued, starting and automatic scans for immediate execution
+			if !stringsutil.EqualFoldAny(status, "queued", "starting", "automatic") {
+				skip = true
+			}
+
+			if skip {
+				fmt.Println("Scan is not queued, starting or automatic. Skipping execution.")
+				return true
+			}
 
 			// execute scan with templates and targets
 			fmt.Println("Executing nuclei scan with the following configuration")
