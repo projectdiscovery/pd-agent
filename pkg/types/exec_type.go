@@ -44,6 +44,7 @@ type Options struct {
 	// - Nuclei
 	Templates []string
 
-	ScanID string
-	TeamID string
+	ScanID        string
+	EnumerationID string
+	TeamID        string
 }

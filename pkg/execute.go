@@ -32,8 +32,16 @@ func Run(task *types.Task) error {
 		task.Tool.String(),
 	}
 
-	if task.Options.ScanID != "" {
-		args = append(args, "-cloud-upload", task.Options.ScanID)
+	var id string
+	switch {
+	case task.Options.ScanID != "":
+		id = task.Options.ScanID
+	case task.Options.EnumerationID != "":
+		id = task.Options.EnumerationID
+	}
+
+	if id != "" {
+		args = append(args, "-cloud-upload", id)
 	}
 
 	if task.Options.TeamID != "" {
