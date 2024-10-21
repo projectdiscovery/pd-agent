@@ -38,7 +38,8 @@ type Task struct {
 
 type Options struct {
 	// Common options
-	Hosts []string
+	Hosts  []string
+	Silent bool
 
 	// - Nuclei
 	Templates []string

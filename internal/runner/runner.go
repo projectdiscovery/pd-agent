@@ -239,164 +239,188 @@ func (r *Runner) agentMode() error {
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
-	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
 
-	// Send the request using the client with proxy and InsecureSkipVerify
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
+	limit := 100 // Adjust this value as needed
+	offset := 0
+	totalPages := 1
+	currentPage := 1
 
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %v", err)
-	}
+	// todo: for testing purposes we handle scheduled only for now
+	status := "scheduled"
 
-	// Use GJSON to parse the JSON response
-	result := gjson.ParseBytes(body)
-
-	// todo: initial support only for nuclei scans
-	fmt.Println("List of Scans:")
-	result.Get("data").ForEach(func(key, value gjson.Result) bool {
-		scanID := value.Get("scan_id").String()
-		fmt.Printf("ID: %s | Name: %s | Status: %s\n",
-			scanID,
-			value.Get("name").String(),
-			value.Get("status").String(),
-		)
-
-		// Fetch scan config for each scan
-		scanConfig, err := r.fetchScanConfig(scanID)
+	for currentPage <= totalPages {
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&status=%s", apiURL, limit, offset, status)
+		req, err := http.NewRequest(http.MethodGet, paginatedURL, nil)
 		if err != nil {
-			gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
-		} else {
-			fmt.Printf("Scan Config: %s\n", scanConfig)
+			return fmt.Errorf("error creating request: %v", err)
 		}
 
-		// Fetch assets if enumeration ID is defined
-		var enumerationIDs []string
-		gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
-			log.Printf("enumeration ID: %s", value.String())
-			id := value.Get("id").String()
-			if id != "" {
-				enumerationIDs = append(enumerationIDs, id)
-			}
-			return true
-		})
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("error sending request: %v", err)
+		}
+		defer resp.Body.Close()
 
-		// gets assets from enumeration id
-		var assets []string
-		for _, enumerationID := range enumerationIDs {
-			asset, err := r.fetchAssets(enumerationID)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response: %v", err)
+		}
+
+		result := gjson.ParseBytes(body)
+
+		// Update totalPages on the first iteration
+		if currentPage == 1 {
+			totalPages = int(result.Get("total_pages").Int())
+			gologger.Info().Msgf("Total pages: %d", totalPages)
+		}
+
+		fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
+
+		// Process scans
+		result.Get("data").ForEach(func(key, value gjson.Result) bool {
+			scanID := value.Get("scan_id").String()
+			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
+				scanID,
+				value.Get("name").String(),
+				value.Get("status").String(),
+			)
+
+			// Fetch scan config for each scan
+			scanConfig, err := r.fetchScanConfig(scanID)
 			if err != nil {
-				gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
 			} else {
-				fmt.Printf("Assets: %s\n", asset)
+				fmt.Printf("Scan Config: %s\n", scanConfig)
 			}
-			assets = append(assets, strings.Split(string(asset), "\n")...)
-		}
-		// gets assets from scan config
-		gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
-			assets = append(assets, value.String())
-			return true
-		})
 
-		var templates []string
-		value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
-			templates = append(templates, value.String())
-			return true
-		})
+			// Fetch assets if enumeration ID is defined
+			var enumerationIDs []string
+			gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
+				log.Printf("enumeration ID: %s", value.String())
+				id := value.Get("id").String()
+				if id != "" {
+					enumerationIDs = append(enumerationIDs, id)
+				}
+				return true
+			})
 
-		status := value.Get("status").String()
-		schedule := value.Get("schedule").String()
-		hasScheduled := schedule != ""
-
-		fmt.Printf("ID: %s | Name: %s | Status: %s\n",
-			scanID,
-			value.Get("name").String(),
-			status,
-		)
-
-		fmt.Println("---")
-
-		// todo: temporarily integrate with backend by adding agent_ids in scan_config and enumeration_config
-		// we are ignoring scan state as well for now
-		var agentIds []string
-
-		// todo: hardcoding agent_ids for now
-		agentIds = append(agentIds, r.options.AgentName)
-
-		gjson.Parse(scanConfig).Get("agent_ids").ForEach(func(key, value gjson.Result) bool {
-			log.Printf("agent ID: %s", value.String())
-			id := value.Get("id").String()
-			if id != "" {
-				agentIds = append(agentIds, id)
+			// gets assets from enumeration id
+			var assets []string
+			for _, enumerationID := range enumerationIDs {
+				asset, err := r.fetchAssets(enumerationID)
+				if err != nil {
+					gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+				} else {
+					fmt.Printf("Assets: %s\n", asset)
+				}
+				assets = append(assets, strings.Split(string(asset), "\n")...)
 			}
-			return true
-		})
-		// check if current agent is within the ids
-		if sliceutil.Contains(agentIds, r.options.AgentName) {
-			fmt.Println("Agent is within the list of agents for this scan")
+			// gets assets from scan config
+			gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
+				assets = append(assets, value.String())
+				return true
+			})
 
-			var skip bool
-			// perform time filtering
-			if hasScheduled {
-				// extract the next execution time from the schedule and check if it's within the last +/-10 minutes
-				nextSchedule := gjson.Parse(schedule).Get("schedule_next_run").Time()
-				// Check if nextSchedule is within the past or next ten minutes range
-				now := time.Now()
-				tenMinutesAgo := now.Add(-10 * time.Minute)
-				tenMinutesFromNow := now.Add(10 * time.Minute)
-				isInTimeRange := nextSchedule.After(tenMinutesAgo) && nextSchedule.Before(tenMinutesFromNow)
-				if !isInTimeRange {
+			var templates []string
+			value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
+				templates = append(templates, value.String())
+				return true
+			})
+
+			status := value.Get("status").String()
+			schedule := value.Get("schedule").String()
+			hasScheduled := schedule != ""
+
+			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
+				scanID,
+				value.Get("name").String(),
+				status,
+			)
+
+			fmt.Println("---")
+
+			// todo: temporarily integrate with backend by adding agent_ids in scan_config and enumeration_config
+			// we are ignoring scan state as well for now
+			var agentIds []string
+
+			// todo: hardcoding agent_ids for now
+			agentIds = append(agentIds, r.options.AgentName)
+
+			gjson.Parse(scanConfig).Get("agent_ids").ForEach(func(key, value gjson.Result) bool {
+				log.Printf("agent ID: %s", value.String())
+				id := value.Get("id").String()
+				if id != "" {
+					agentIds = append(agentIds, id)
+				}
+				return true
+			})
+			// check if current agent is within the ids
+			if sliceutil.Contains(agentIds, r.options.AgentName) {
+				fmt.Println("Agent is within the list of agents for this scan")
+
+				var skip bool
+				// perform time filtering
+				if hasScheduled {
+					// extract the next execution time from the schedule and check if it's within the last +/-10 minutes
+					nextSchedule := gjson.Parse(schedule).Get("schedule_next_run").Time()
+					// Check if nextSchedule is within the past or next ten minutes range
+					now := time.Now()
+					tenMinutesAgo := now.Add(-10 * time.Minute)
+					tenMinutesFromNow := now.Add(10 * time.Minute)
+					isInTimeRange := nextSchedule.After(tenMinutesAgo) && nextSchedule.Before(tenMinutesFromNow)
+					if !isInTimeRange {
+						skip = true
+					}
+				}
+
+				// only consider queued, starting, scheduled and automatic scans for immediate execution
+				if !stringsutil.EqualFoldAny(status, "queued", "starting", "scheduled", "automatic") {
 					skip = true
 				}
-			}
-			// only consider queued, starting and automatic scans for immediate execution
-			if !stringsutil.EqualFoldAny(status, "queued", "starting", "automatic") {
-				skip = true
+
+				if skip {
+					fmt.Println("Scan is not queued, starting, scheduled or automatic. Skipping execution.")
+					return true
+				}
+
+				// execute scan with templates and targets
+				fmt.Println("Executing nuclei scan with the following configuration")
+				fmt.Println("Templates:")
+				for _, template := range templates {
+					fmt.Printf("  - %s\n", template)
+				}
+				fmt.Println("Assets:")
+				for _, asset := range assets {
+					fmt.Printf("  - %s\n", asset)
+				}
+
+				// todo: temporary patch for testing purposes pointing to simplehttpserver
+				assets = []string{"192.168.5.32:8000"}
+
+				task := &types.Task{
+					Tool: types.Nuclei,
+					Options: types.Options{
+						Hosts:     assets,
+						Templates: templates,
+						ScanID:    scanID,
+						Silent:    true,
+					},
+				}
+				if err := pkg.Run(task); err != nil {
+					gologger.Error().Msgf("Error executing task: %v", err)
+				}
+
+				fmt.Println("Scan completed")
+			} else {
+				fmt.Println("Agent is not within the list of agents for this scan")
 			}
 
-			if skip {
-				fmt.Println("Scan is not queued, starting or automatic. Skipping execution.")
-				return true
-			}
+			return true
+		})
 
-			// execute scan with templates and targets
-			fmt.Println("Executing nuclei scan with the following configuration")
-			fmt.Println("Templates:")
-			for _, template := range templates {
-				fmt.Printf("  - %s\n", template)
-			}
-			fmt.Println("Assets:")
-			for _, asset := range assets {
-				fmt.Printf("  - %s\n", asset)
-			}
-
-			task := &types.Task{
-				Tool: types.Nuclei,
-				Options: types.Options{
-					Hosts:     assets,
-					Templates: templates,
-					ScanID:    scanID,
-				},
-			}
-			if err := pkg.Run(task); err != nil {
-				gologger.Error().Msgf("Error executing task: %v", err)
-			}
-
-			fmt.Println("Scan completed")
-		} else {
-			fmt.Println("Agent is not within the list of agents for this scan")
-		}
-
-		return true
-	})
+		currentPage++
+		offset += limit
+	}
 
 	return nil
 }
