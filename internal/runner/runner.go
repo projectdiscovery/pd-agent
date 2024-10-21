@@ -1,13 +1,17 @@
 package runner
 
 import (
+	"bytes"
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -234,6 +238,11 @@ func (r *Runner) Close() {}
 //
 // - configure nuclei to upload results with scan id
 func (r *Runner) agentMode() error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Ensure we cancel the context when the function exits
+
+	go r.registerAgent(ctx)
+
 	apiURL := fmt.Sprintf("%s/v1/scans", pdcpauth.DefaultApiServer)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
@@ -502,4 +511,71 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (rf roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return rf(req)
+}
+
+// Agent defines model for Agent.
+type Agent struct {
+	AgentId      string    `json:"agent_id"`
+	AgentName    string    `json:"agent_name"`
+	Architecture string    `json:"architecture"`
+	LastSeen     time.Time `json:"last_seen"`
+	Os           string    `json:"os"`
+	PdtmVersion  string    `json:"pdtm_version"`
+}
+
+func (r *Runner) registerAgent(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute) // Register every 5 minutes
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := r.doRegisterAgent(); err != nil {
+				gologger.Error().Msgf("Failed to register agent: %v", err)
+			}
+		}
+	}
+}
+
+func (r *Runner) doRegisterAgent() error {
+	agent := Agent{
+		AgentId:      r.options.AgentName, // Assuming AgentName is unique
+		AgentName:    r.options.AgentName,
+		Architecture: runtime.GOARCH,
+		LastSeen:     time.Now(),
+		Os:           runtime.GOOS,
+	}
+
+	jsonData, err := json.Marshal(agent)
+	if err != nil {
+		return fmt.Errorf("error marshaling agent data: %v", err)
+	}
+
+	apiURL := fmt.Sprintf("%s/v1/agents", pdcpauth.DefaultApiServer)
+	client, err := r.createAuthenticatedClient()
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	gologger.Info().Msgf("Agent registered successfully")
+	return nil
 }
