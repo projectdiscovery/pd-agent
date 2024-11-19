@@ -7,7 +7,7 @@ import (
 	"syscall"
 
 	"github.com/projectdiscovery/gologger"
-	"github.com/projectdiscovery/pdtm/internal/runner"
+	"github.com/projectdiscovery/pdtm-agent/internal/runner"
 )
 
 func main() {

@@ -4,8 +4,8 @@ import (
 	"os"
 	"testing"
 
-	ospath "github.com/projectdiscovery/pdtm/pkg/path"
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	ospath "github.com/projectdiscovery/pdtm-agent/pkg/path"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	"github.com/stretchr/testify/require"
 )
 

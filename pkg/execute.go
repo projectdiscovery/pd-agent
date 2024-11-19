@@ -6,8 +6,8 @@ import (
 	"io"
 	"os/exec"
 
-	"github.com/projectdiscovery/pdtm/pkg/tools"
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 )
 
 func Run(task *types.Task) error {

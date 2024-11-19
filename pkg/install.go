@@ -19,8 +19,8 @@ import (
 	"github.com/google/go-github/github"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/projectdiscovery/gologger"
-	ospath "github.com/projectdiscovery/pdtm/pkg/path"
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	ospath "github.com/projectdiscovery/pdtm-agent/pkg/path"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	osutils "github.com/projectdiscovery/utils/os"
 	"github.com/projectdiscovery/utils/syscallutil"
 )

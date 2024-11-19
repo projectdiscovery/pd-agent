@@ -1,4 +1,4 @@
-module github.com/projectdiscovery/pdtm
+module github.com/projectdiscovery/pdtm-agent
 
 go 1.21
 

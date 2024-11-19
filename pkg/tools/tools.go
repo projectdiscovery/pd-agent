@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/projectdiscovery/gologger"
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 )
 
 var (

@@ -25,7 +25,7 @@ jobs:
 
       - name: Build
         run: go build .
-        working-directory: cmd/pdtm/
+        working-directory: cmd/pdtm-agent/
 
       - name: Test
         run: go test ./...
@@ -35,7 +35,7 @@ jobs:
         
       - name: Race Condition Tests
         run: go run -race .
-        working-directory: cmd/pdtm/
+        working-directory: cmd/pdtm-agent/
       
       - name: Test Example Code
         run: go run .
