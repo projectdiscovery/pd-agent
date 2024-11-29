@@ -10,7 +10,7 @@ import (
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
-	"github.com/projectdiscovery/utils/env"
+	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	updateutils "github.com/projectdiscovery/utils/update"
 )
@@ -18,8 +18,9 @@ import (
 var au *aurora.Aurora
 
 var (
-	PDCPApiKey = ""
-	TeamIDEnv  = env.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	PDCPApiKey    = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv     = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	PCDPApiServer = envutil.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
 )
 
 // Options contains the configuration options for tuning the enumeration process.
@@ -51,6 +52,7 @@ type Options struct {
 	TeamID           string
 	AgentMode        bool
 	AgentName        string
+	TodoUserId       string
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -99,8 +101,8 @@ func ParseOptions() *Options {
 		flagSet.StringVarP(&options.TeamID, "team-id", "tid", TeamIDEnv, "upload asset results to given team id (optional)"),
 		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "pdtm-agent", "specify the name for the agent"),
+		flagSet.StringVarP(&options.TodoUserId, "todo-user-id", "tuid", "1", "specify the user id for the todo agent"),
 	)
-
 	if err := flagSet.Parse(); err != nil {
 		gologger.Fatal().Msgf("%s\n", err)
 	}
@@ -152,7 +154,11 @@ func ParseOptions() *Options {
 		pdcpauth.CheckNValidateCredentials("pdtm")
 		return nil
 	}
-	PDCPApiKey = creds.APIKey
+	if apikey := os.Getenv("PDCP_API_KEY"); apikey != "" {
+		PDCPApiKey = apikey
+	} else {
+		PDCPApiKey = creds.APIKey
+	}
 
 	return options
 }

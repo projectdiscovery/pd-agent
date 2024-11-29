@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/projectdiscovery/gologger"
+	"github.com/projectdiscovery/pdtm-agent/global"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/path"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
@@ -23,7 +24,6 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
 	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	errorutil "github.com/projectdiscovery/utils/errors"
-	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/tidwall/gjson"
 )
@@ -227,7 +227,6 @@ func (r *Runner) ListToolsAndEnv(tools []types.Tool) error {
 // Close the runner instance
 func (r *Runner) Close() {}
 
-// todo: for the time being each single execution:
 // - will download the scan list
 // - execute scans without schedule or uploaded state
 // - execute schedules scans with time proximity
@@ -237,13 +236,15 @@ func (r *Runner) Close() {}
 //   - todo: nuclei config
 //
 // - configure nuclei to upload results with scan id
+// TODO. since it's unclear how pdtm-agent should interact with all the cloyd layers, for the time being we connect directly
+// with aurora api
 func (r *Runner) agentMode() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel() // Ensure we cancel the context when the function exits
 
 	go r.registerAgent(ctx)
 
-	apiURL := fmt.Sprintf("%s/v1/scans", pdcpauth.DefaultApiServer)
+	apiURL := fmt.Sprintf("%s/scans?user_id=%s", PCDPApiServer, r.options.TodoUserId)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
@@ -254,11 +255,8 @@ func (r *Runner) agentMode() error {
 	totalPages := 1
 	currentPage := 1
 
-	// todo: for testing purposes we handle scheduled only for now
-	status := "scheduled"
-
 	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&status=%s", apiURL, limit, offset, status)
+		paginatedURL := fmt.Sprintf("%s&limit=%d&offset=%d", apiURL, limit, offset)
 		req, err := http.NewRequest(http.MethodGet, paginatedURL, nil)
 		if err != nil {
 			return fmt.Errorf("error creating request: %v", err)
@@ -287,6 +285,16 @@ func (r *Runner) agentMode() error {
 
 		// Process scans
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
+			// filter out the scans not assigned to pdtm-agent
+			agentId := value.Get("pdtm_agent_id").String()
+			if agentId != r.options.AgentName {
+				fmt.Printf("skipping scan %s as it's not assigned to %s\n", agentId, r.options.AgentName)
+				// simulating scan execution via pdtm-agent
+				if !global.DEV {
+					return true
+				}
+			}
+
 			scanID := value.Get("scan_id").String()
 			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
 				scanID,
@@ -295,12 +303,14 @@ func (r *Runner) agentMode() error {
 			)
 
 			// Fetch scan config for each scan
-			scanConfig, err := r.fetchScanConfig(scanID)
+			scanConfig, err := r.fetchScanConfig(scanID, r.options.TodoUserId)
 			if err != nil {
 				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
 			} else {
 				fmt.Printf("Scan Config: %s\n", scanConfig)
 			}
+
+			log.Printf("scan config: %s", scanConfig)
 
 			// Fetch assets if enumeration ID is defined
 			var enumerationIDs []string
@@ -337,9 +347,6 @@ func (r *Runner) agentMode() error {
 			})
 
 			status := value.Get("status").String()
-			schedule := value.Get("schedule").String()
-			hasScheduled := schedule != ""
-
 			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
 				scanID,
 				value.Get("name").String(),
@@ -348,81 +355,34 @@ func (r *Runner) agentMode() error {
 
 			fmt.Println("---")
 
-			// todo: temporarily integrate with backend by adding agent_ids in scan_config and enumeration_config
-			// we are ignoring scan state as well for now
-			var agentIds []string
-
-			// todo: hardcoding agent_ids for now
-			agentIds = append(agentIds, r.options.AgentName)
-
-			gjson.Parse(scanConfig).Get("agent_ids").ForEach(func(key, value gjson.Result) bool {
-				log.Printf("agent ID: %s", value.String())
-				id := value.Get("id").String()
-				if id != "" {
-					agentIds = append(agentIds, id)
-				}
-				return true
-			})
-			// check if current agent is within the ids
-			if sliceutil.Contains(agentIds, r.options.AgentName) {
-				fmt.Println("Agent is within the list of agents for this scan")
-
-				var skip bool
-				// perform time filtering
-				if hasScheduled {
-					// extract the next execution time from the schedule and check if it's within the last +/-10 minutes
-					nextSchedule := gjson.Parse(schedule).Get("schedule_next_run").Time()
-					// Check if nextSchedule is within the past or next ten minutes range
-					now := time.Now()
-					tenMinutesAgo := now.Add(-10 * time.Minute)
-					tenMinutesFromNow := now.Add(10 * time.Minute)
-					isInTimeRange := nextSchedule.After(tenMinutesAgo) && nextSchedule.Before(tenMinutesFromNow)
-					if !isInTimeRange {
-						skip = true
-					}
-				}
-
-				// only consider queued, starting, scheduled and automatic scans for immediate execution
-				if !stringsutil.EqualFoldAny(status, "queued", "starting", "scheduled", "automatic") {
-					skip = true
-				}
-
-				if skip {
-					fmt.Println("Scan is not queued, starting, scheduled or automatic. Skipping execution.")
-					return true
-				}
-
-				// execute scan with templates and targets
-				fmt.Println("Executing nuclei scan with the following configuration")
-				fmt.Println("Templates:")
-				for _, template := range templates {
-					fmt.Printf("  - %s\n", template)
-				}
-				fmt.Println("Assets:")
-				for _, asset := range assets {
-					fmt.Printf("  - %s\n", asset)
-				}
-
-				// todo: temporary patch for testing purposes pointing to simplehttpserver
-				assets = []string{"192.168.5.32:8000"}
-
-				task := &types.Task{
-					Tool: types.Nuclei,
-					Options: types.Options{
-						Hosts:     assets,
-						Templates: templates,
-						ScanID:    scanID,
-						Silent:    true,
-					},
-				}
-				if err := pkg.Run(task); err != nil {
-					gologger.Error().Msgf("Error executing task: %v", err)
-				}
-
-				fmt.Println("Scan completed")
-			} else {
-				fmt.Println("Agent is not within the list of agents for this scan")
+			// execute scan with templates and targets
+			fmt.Println("Executing nuclei scan with the following configuration")
+			fmt.Println("Templates:")
+			for _, template := range templates {
+				fmt.Printf("  - %s\n", template)
 			}
+			fmt.Println("Assets:")
+			for _, asset := range assets {
+				fmt.Printf("  - %s\n", asset)
+			}
+
+			// todo: temporary patch for testing purposes pointing to simplehttpserver
+			assets = []string{"192.168.189.2:8000"}
+
+			task := &types.Task{
+				Tool: types.Nuclei,
+				Options: types.Options{
+					Hosts:     assets,
+					Templates: templates,
+					ScanID:    scanID,
+					Silent:    true,
+				},
+			}
+			if err := pkg.Run(task); err != nil {
+				gologger.Error().Msgf("Error executing task: %v", err)
+			}
+
+			fmt.Println("Scan completed")
 
 			return true
 		})
@@ -434,8 +394,8 @@ func (r *Runner) agentMode() error {
 	return nil
 }
 
-func (r *Runner) fetchScanConfig(scanID string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pdcpauth.DefaultApiServer, scanID)
+func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
+	apiURL := fmt.Sprintf("%s/scans/%s/config?user_id=%s", PCDPApiServer, scanID, todoUserId)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
@@ -461,7 +421,7 @@ func (r *Runner) fetchScanConfig(scanID string) (string, error) {
 }
 
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
+	apiURL := fmt.Sprintf("%s/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)

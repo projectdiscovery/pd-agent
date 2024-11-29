@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	fileutil "github.com/projectdiscovery/utils/file"
 )
 
 func Run(task *types.Task) error {
@@ -32,16 +34,35 @@ func Run(task *types.Task) error {
 		task.Tool.String(),
 	}
 
+	var (
+		isScan bool // TODO: temporary helper boolean
+	)
+
 	var id string
 	switch {
 	case task.Options.ScanID != "":
 		id = task.Options.ScanID
+		isScan = true
 	case task.Options.EnumerationID != "":
 		id = task.Options.EnumerationID
 	}
 
 	if id != "" {
-		args = append(args, "-cloud-upload", id)
+		// disable clould upload as it's executed in dev environment
+		// args = append(args, "-cloud-upload", id)
+	}
+
+	if isScan && len(task.Options.Templates) > 0 {
+		var finalTemplatesList []string
+		// skip non existing templates
+		for _, template := range task.Options.Templates {
+			if fileutil.FileExists(template) {
+				finalTemplatesList = append(finalTemplatesList, template)
+			}
+		}
+		if len(finalTemplatesList) > 0 {
+			args = append(args, "-templates", strings.Join(finalTemplatesList, ","))
+		}
 	}
 
 	if task.Options.TeamID != "" {
