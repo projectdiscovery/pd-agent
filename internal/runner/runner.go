@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os/exec"
 	"runtime"
@@ -16,7 +15,6 @@ import (
 	"time"
 
 	"github.com/projectdiscovery/gologger"
-	"github.com/projectdiscovery/pdtm-agent/global"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/path"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
@@ -240,162 +238,145 @@ func (r *Runner) Close() {}
 // with aurora api
 func (r *Runner) agentMode() error {
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel() // Ensure we cancel the context when the function exits
+	defer cancel()
 
 	go r.registerAgent(ctx)
 
-	apiURL := fmt.Sprintf("%s/scans?user_id=%s", PCDPApiServer, r.options.TodoUserId)
-	client, err := r.createAuthenticatedClient()
-	if err != nil {
-		return fmt.Errorf("error creating authenticated client: %v", err)
-	}
+	for {
 
-	limit := 100 // Adjust this value as needed
-	offset := 0
-	totalPages := 1
-	currentPage := 1
+		apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
 
-	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s&limit=%d&offset=%d", apiURL, limit, offset)
-		req, err := http.NewRequest(http.MethodGet, paginatedURL, nil)
+		client, err := r.createAuthenticatedClient()
 		if err != nil {
-			return fmt.Errorf("error creating request: %v", err)
+			return fmt.Errorf("error creating authenticated client: %v", err)
 		}
 
-		resp, err := client.Do(req)
-		if err != nil {
-			return fmt.Errorf("error sending request: %v", err)
-		}
-		defer resp.Body.Close()
+		limit := 100 // Adjust this value as needed
+		offset := 0
+		totalPages := 1
+		currentPage := 1
 
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("error reading response: %v", err)
-		}
-
-		result := gjson.ParseBytes(body)
-
-		// Update totalPages on the first iteration
-		if currentPage == 1 {
-			totalPages = int(result.Get("total_pages").Int())
-			gologger.Info().Msgf("Total pages: %d", totalPages)
-		}
-
-		fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
-
-		// Process scans
-		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			// filter out the scans not assigned to pdtm-agent
-			agentId := value.Get("pdtm_agent_id").String()
-			if agentId != r.options.AgentName {
-				fmt.Printf("skipping scan %s as it's not assigned to %s\n", agentId, r.options.AgentName)
-				// simulating scan execution via pdtm-agent
-				if !global.DEV {
-					return true
-				}
-			}
-
-			scanID := value.Get("scan_id").String()
-			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
-				scanID,
-				value.Get("name").String(),
-				value.Get("status").String(),
-			)
-
-			// Fetch scan config for each scan
-			scanConfig, err := r.fetchScanConfig(scanID, r.options.TodoUserId)
+		for currentPage <= totalPages {
+			paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+			req, err := http.NewRequest(http.MethodGet, paginatedURL, nil)
 			if err != nil {
-				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
-			} else {
-				fmt.Printf("Scan Config: %s\n", scanConfig)
+				return fmt.Errorf("error creating request: %v", err)
 			}
 
-			log.Printf("scan config: %s", scanConfig)
+			resp, err := client.Do(req)
+			if err != nil {
+				return fmt.Errorf("error sending request: %v", err)
+			}
+			defer resp.Body.Close()
 
-			// Fetch assets if enumeration ID is defined
-			var enumerationIDs []string
-			gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
-				log.Printf("enumeration ID: %s", value.String())
-				id := value.Get("id").String()
-				if id != "" {
-					enumerationIDs = append(enumerationIDs, id)
-				}
-				return true
-			})
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("error reading response: %v", err)
+			}
 
-			// gets assets from enumeration id
-			var assets []string
-			for _, enumerationID := range enumerationIDs {
-				asset, err := r.fetchAssets(enumerationID)
-				if err != nil {
-					gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+			result := gjson.ParseBytes(body)
+
+			// Update totalPages on the first iteration
+			if currentPage == 1 {
+				totalPages = int(result.Get("total_pages").Int())
+				gologger.Info().Msgf("Total pages: %d", totalPages)
+			}
+
+			fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
+
+			// Process scans
+			result.Get("data").ForEach(func(key, value gjson.Result) bool {
+				// since we have no control over platform-backend or product evolution
+				// we use the scan name to contain the [pdtm-agent-id] temporarily
+				scanName := value.Get("name").String()
+				hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
+				agentId := value.Get("pdtm_agent_id").String()
+				isAssignedToagent := agentId == r.options.AgentName
+
+				if !isAssignedToagent && !hasScanNameTag {
+					fmt.Printf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+					// simulating scan execution via pdtm-agent
+					return true
 				} else {
-					fmt.Printf("Assets: %s\n", asset)
+					fmt.Printf("scan %s in progress...\n", scanName)
 				}
-				assets = append(assets, strings.Split(string(asset), "\n")...)
-			}
-			// gets assets from scan config
-			gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
-				assets = append(assets, value.String())
+
+				scanID := value.Get("scan_id").String()
+
+				// Fetch scan config for each scan
+				scanConfig, err := r.fetchScanConfig(scanID, r.options.TodoUserId)
+				if err != nil {
+					gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
+				}
+
+				// Fetch assets if enumeration ID is defined
+				var enumerationIDs []string
+				gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
+					//log.Printf("enumeration ID: %s", value.String())
+					id := value.Get("id").String()
+					if id != "" {
+						enumerationIDs = append(enumerationIDs, id)
+					}
+					return true
+				})
+
+				// gets assets from enumeration id
+				var assets []string
+				for _, enumerationID := range enumerationIDs {
+					asset, err := r.fetchAssets(enumerationID)
+					if err != nil {
+						gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+					}
+					assets = append(assets, strings.Split(string(asset), "\n")...)
+				}
+				// gets assets from scan config
+				gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
+					assets = append(assets, value.String())
+					return true
+				})
+
+				var templates []string
+				value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
+					templates = append(templates, value.String())
+					return true
+				})
+
+				status := value.Get("status").String()
+				_ = status
+
+				// todo: temporary patch for testing purposes pointing to simplehttpserver
+				assets = []string{"192.168.179.3:8000"}
+
+				task := &types.Task{
+					Tool: types.Nuclei,
+					Options: types.Options{
+						Hosts:     assets,
+						Templates: templates,
+						ScanID:    scanID,
+						Silent:    true,
+					},
+				}
+				if err := pkg.Run(task); err != nil {
+					gologger.Error().Msgf("Error executing task: %v", err)
+				}
+
+				fmt.Printf("Scan %s completed\n", scanName)
+
 				return true
 			})
 
-			var templates []string
-			value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
-				templates = append(templates, value.String())
-				return true
-			})
+			currentPage++
+			offset += limit
+		}
 
-			status := value.Get("status").String()
-			fmt.Printf("ID: %s | Name: %s | Status: %s\n",
-				scanID,
-				value.Get("name").String(),
-				status,
-			)
-
-			fmt.Println("---")
-
-			// execute scan with templates and targets
-			fmt.Println("Executing nuclei scan with the following configuration")
-			fmt.Println("Templates:")
-			for _, template := range templates {
-				fmt.Printf("  - %s\n", template)
-			}
-			fmt.Println("Assets:")
-			for _, asset := range assets {
-				fmt.Printf("  - %s\n", asset)
-			}
-
-			// todo: temporary patch for testing purposes pointing to simplehttpserver
-			assets = []string{"192.168.189.2:8000"}
-
-			task := &types.Task{
-				Tool: types.Nuclei,
-				Options: types.Options{
-					Hosts:     assets,
-					Templates: templates,
-					ScanID:    scanID,
-					Silent:    true,
-				},
-			}
-			if err := pkg.Run(task); err != nil {
-				gologger.Error().Msgf("Error executing task: %v", err)
-			}
-
-			fmt.Println("Scan completed")
-
-			return true
-		})
-
-		currentPage++
-		offset += limit
+		time.Sleep(5 * time.Minute)
 	}
 
 	return nil
 }
 
 func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/scans/%s/config?user_id=%s", PCDPApiServer, scanID, todoUserId)
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/config?user_id=%s", PCDPApiServer, scanID, todoUserId)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
@@ -421,7 +402,7 @@ func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
 }
 
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
+	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)
@@ -461,6 +442,9 @@ func (r *Runner) createAuthenticatedClient() (*http.Client, error) {
 	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		req.Header.Set("X-Api-Key", PDCPApiKey)
 		req.Header.Set("X-Team-Id", r.options.TeamID)
+		q := req.URL.Query()
+		q.Add("user_id", r.options.TodoUserId)
+		req.URL.RawQuery = q.Encode()
 		return transport.RoundTrip(req)
 	})
 
@@ -487,21 +471,26 @@ func (r *Runner) registerAgent(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute) // Register every 5 minutes
 	defer ticker.Stop()
 
+	doRegisterAgent := func() {
+		if err := r.doRegisterAgent(); err != nil {
+			gologger.Error().Msgf("Failed to register agent: %v", err)
+		}
+	}
+	doRegisterAgent()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := r.doRegisterAgent(); err != nil {
-				gologger.Error().Msgf("Failed to register agent: %v", err)
-			}
+			doRegisterAgent()
 		}
 	}
 }
 
 func (r *Runner) doRegisterAgent() error {
 	agent := Agent{
-		AgentId:      r.options.AgentName, // Assuming AgentName is unique
+		AgentId:      r.options.AgentName,
 		AgentName:    r.options.AgentName,
 		Architecture: runtime.GOARCH,
 		LastSeen:     time.Now(),
@@ -513,7 +502,8 @@ func (r *Runner) doRegisterAgent() error {
 		return fmt.Errorf("error marshaling agent data: %v", err)
 	}
 
-	apiURL := fmt.Sprintf("%s/v1/agents", pdcpauth.DefaultApiServer)
+	// TODO: change this to the actual api server
+	apiURL := fmt.Sprintf("%s/agents", PDCPDevApiServer)
 	client, err := r.createAuthenticatedClient()
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)

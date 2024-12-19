@@ -4,11 +4,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/utils/conversion"
 	fileutil "github.com/projectdiscovery/utils/file"
 )
 
@@ -47,11 +49,6 @@ func Run(task *types.Task) error {
 		id = task.Options.EnumerationID
 	}
 
-	if id != "" {
-		// disable clould upload as it's executed in dev environment
-		// args = append(args, "-cloud-upload", id)
-	}
-
 	if isScan && len(task.Options.Templates) > 0 {
 		var finalTemplatesList []string
 		// skip non existing templates
@@ -69,14 +66,35 @@ func Run(task *types.Task) error {
 		args = append(args, "-team-id", task.Options.TeamID)
 	}
 
+	tmpFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		return fmt.Errorf("failed to create temp file: %w", err)
+	}
+	allTargets := strings.Join(task.Options.Hosts, "\n")
+	os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm)
+	defer os.RemoveAll(tmpFile)
+
+	args = append(args, "-l", tmpFile)
+
+	var envs []string
+	if id != "" || task.Options.TeamID != "" {
+		envs = append(envs,
+			"PDCP_DASHBOARD_URL=https://cloud.projectdiscovery.io",
+			"PDCP_API_SERVER=https://api.dev.projectdiscovery.io",
+			"PDCP_API_KEY="+os.Getenv("PDCP_API_KEY"),
+			"PDCP_TEAM_ID="+task.Options.TeamID,
+		)
+		args = append(args, "-dashboard",
+			"-scan-id", id,
+		)
+	}
+
 	// Prepare the command
 	cmd := exec.Command(args[0], args[1:]...)
 
+	cmd.Env = append(cmd.Env, envs...)
+
 	// Set up stdin, stdout, and stderr pipes
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return fmt.Errorf("failed to create stdin pipe: %w", err)
-	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
@@ -90,14 +108,6 @@ func Run(task *types.Task) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to start tool '%s': %w", tool.Name, err)
 	}
-
-	// Write input to stdin if provided
-	for _, host := range task.Options.Hosts {
-		if _, err := stdin.Write([]byte(host + "\n")); err != nil {
-			return fmt.Errorf("failed to write to stdin: %w", err)
-		}
-	}
-	stdin.Close()
 
 	// Read stdout and stderr
 	stdoutOutput, err := io.ReadAll(stdout)

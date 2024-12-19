@@ -18,9 +18,10 @@ import (
 var au *aurora.Aurora
 
 var (
-	PDCPApiKey    = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv     = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	PCDPApiServer = envutil.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
+	PDCPApiKey       = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv        = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	PCDPApiServer    = envutil.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
+	PDCPDevApiServer = "http://127.0.0.1:8087"
 )
 
 // Options contains the configuration options for tuning the enumeration process.
