@@ -51,16 +51,7 @@ func Run(ctx context.Context, task *types.Task) error {
 	}
 
 	if isScan && len(task.Options.Templates) > 0 {
-		var finalTemplatesList []string
-		// skip non existing templates
-		for _, template := range task.Options.Templates {
-			if fileutil.FileExists(template) {
-				finalTemplatesList = append(finalTemplatesList, template)
-			}
-		}
-		if len(finalTemplatesList) > 0 {
-			args = append(args, "-templates", strings.Join(finalTemplatesList, ","))
-		}
+		args = append(args, "-templates", strings.Join(task.Options.Templates, ","))
 	}
 
 	if task.Options.TeamID != "" {

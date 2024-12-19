@@ -386,9 +386,6 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 				fmt.Printf("scan %s in progress...\n", scanName)
 
-				// todo: temporary patch for testing purposes pointing to simplehttpserver
-				assets = []string{"192.168.179.3:8000"}
-
 				task := &types.Task{
 					Tool: types.Nuclei,
 					Options: types.Options{
@@ -398,6 +395,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 						Silent:    true,
 					},
 				}
+
 				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
