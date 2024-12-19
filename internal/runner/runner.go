@@ -303,8 +303,46 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					fmt.Printf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
 					// simulating scan execution via pdtm-agent
 					return true
-				} else {
-					fmt.Printf("scan %s in progress...\n", scanName)
+				}
+
+				status := value.Get("status").String()
+				if stringsutil.EqualFoldAny(status, "finished") {
+					fmt.Printf("skipping scan %s as it's already completed\n", scanName)
+					return true
+				}
+
+				// Parse schedule and start time
+				var targetExecutionTime time.Time
+				startTime := value.Get("start_time").String()
+				if startTime != "" {
+					parsedStartTime, err := time.Parse(time.RFC3339, startTime)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing start time: %v", err)
+						return true
+					}
+					targetExecutionTime = parsedStartTime
+				}
+
+				if scheduleData := value.Get("schedule"); scheduleData.Exists() {
+					nextRun := scheduleData.Get("schedule_next_run").String()
+					if nextRun != "" {
+						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+						if err != nil {
+							gologger.Error().Msgf("Error parsing next run time: %v", err)
+							return true
+						}
+						if !targetExecutionTime.IsZero() {
+							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+						} else {
+							targetExecutionTime = nextRunTime
+						}
+					}
+				}
+
+				// Skip if the combined execution time is in the future
+				if !targetExecutionTime.IsZero() && time.Now().Before(targetExecutionTime) {
+					fmt.Printf("Skipping scan %s as it's scheduled for %s", scanName, targetExecutionTime)
+					return true
 				}
 
 				scanID := value.Get("scan_id").String()
@@ -318,7 +356,6 @@ func (r *Runner) agentMode(ctx context.Context) error {
 				// Fetch assets if enumeration ID is defined
 				var enumerationIDs []string
 				gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
-					//log.Printf("enumeration ID: %s", value.String())
 					id := value.Get("id").String()
 					if id != "" {
 						enumerationIDs = append(enumerationIDs, id)
@@ -347,8 +384,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					return true
 				})
 
-				status := value.Get("status").String()
-				_ = status
+				fmt.Printf("scan %s in progress...\n", scanName)
 
 				// todo: temporary patch for testing purposes pointing to simplehttpserver
 				assets = []string{"192.168.179.3:8000"}
