@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -27,7 +28,10 @@ func main() {
 		os.Exit(0)
 	}()
 
-	err = pdtmRunner.Run()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = pdtmRunner.Run(ctx)
 	if err != nil {
 		gologger.Fatal().Msgf("Could not run pdtm: %s\n", err)
 	}

@@ -39,7 +39,7 @@ func NewRunner(options *Options) (*Runner, error) {
 }
 
 // Run the instance
-func (r *Runner) Run() error {
+func (r *Runner) Run(ctx context.Context) error {
 	// add default path to $PATH
 	if r.options.SetPath || r.options.Path == tools.DefaultPath {
 		if err := path.SetENV(r.options.Path); err != nil {
@@ -176,7 +176,7 @@ func (r *Runner) Run() error {
 
 	if r.options.AgentMode {
 		gologger.Info().Msgf("running in agent mode with name %s", r.options.AgentName)
-		return r.agentMode()
+		return r.agentMode(ctx)
 	}
 
 	if len(r.options.Install) == 0 && len(r.options.Update) == 0 && len(r.options.Remove) == 0 {
@@ -236,13 +236,19 @@ func (r *Runner) Close() {}
 // - configure nuclei to upload results with scan id
 // TODO. since it's unclear how pdtm-agent should interact with all the cloyd layers, for the time being we connect directly
 // with aurora api
-func (r *Runner) agentMode() error {
-	ctx, cancel := context.WithCancel(context.Background())
+func (r *Runner) agentMode(ctx context.Context) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	go r.registerAgent(ctx)
 
 	for {
+
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
 
 		apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
 
@@ -356,7 +362,7 @@ func (r *Runner) agentMode() error {
 						Silent:    true,
 					},
 				}
-				if err := pkg.Run(task); err != nil {
+				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
 

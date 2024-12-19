@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +15,7 @@ import (
 	fileutil "github.com/projectdiscovery/utils/file"
 )
 
-func Run(task *types.Task) error {
+func Run(ctx context.Context, task *types.Task) error {
 	toolList, err := tools.FetchFromCache()
 	if err != nil {
 		return errors.New("pdtm api is down, please try again later")
@@ -92,7 +93,7 @@ func Run(task *types.Task) error {
 	}
 
 	// Prepare the command
-	cmd := exec.Command(args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
 	cmd.Env = append(cmd.Env, envs...)
 
