@@ -369,10 +369,8 @@ func (r *Runner) agentMode() error {
 			offset += limit
 		}
 
-		time.Sleep(5 * time.Minute)
+		time.Sleep(time.Minute)
 	}
-
-	return nil
 }
 
 func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {

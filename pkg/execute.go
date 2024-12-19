@@ -71,7 +71,9 @@ func Run(task *types.Task) error {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
 	allTargets := strings.Join(task.Options.Hosts, "\n")
-	os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm)
+	if err := os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to write to temp file: %w", err)
+	}
 	defer os.RemoveAll(tmpFile)
 
 	args = append(args, "-l", tmpFile)
