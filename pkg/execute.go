@@ -76,6 +76,7 @@ func Run(ctx context.Context, task *types.Task) error {
 			"PDCP_DASHBOARD_URL=https://cloud.projectdiscovery.io",
 			"PDCP_API_SERVER=https://api.dev.projectdiscovery.io",
 			"PDCP_API_KEY="+os.Getenv("PDCP_API_KEY"),
+			"HOME="+os.Getenv("HOME"),
 			"PDCP_TEAM_ID="+task.Options.TeamID,
 		)
 		args = append(args, "-dashboard",
