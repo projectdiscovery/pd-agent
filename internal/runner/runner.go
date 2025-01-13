@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Mzack9999/gcache"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/path"
@@ -248,6 +249,11 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 	go r.registerAgent(ctx)
 
+	cache := gcache.New[string, struct{}](1024).
+		LRU().
+		Expiration(time.Hour).
+		Build()
+
 	for {
 
 		select {
@@ -311,12 +317,6 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					return true
 				}
 
-				status := value.Get("status").String()
-				if stringsutil.EqualFoldAny(status, "finished") {
-					fmt.Printf("skipping scan %s as it's already completed\n", scanName)
-					return true
-				}
-
 				// Parse schedule and start time
 				var targetExecutionTime time.Time
 				startTime := value.Get("start_time").String()
@@ -329,31 +329,43 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					targetExecutionTime = parsedStartTime
 				}
 
-				if scheduleData := value.Get("schedule"); scheduleData.Exists() {
-					nextRun := scheduleData.Get("schedule_next_run").String()
-					if nextRun != "" {
-						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-						if err != nil {
-							gologger.Error().Msgf("Error parsing next run time: %v", err)
-							return true
-						}
-						if !targetExecutionTime.IsZero() {
-							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-						} else {
-							targetExecutionTime = nextRunTime
-						}
+				scheduleData := value.Get("schedule")
+				if !scheduleData.Exists() {
+					fmt.Printf("skipping scan %s as it has no schedule\n", scanName)
+					return true
+				}
+
+				nextRun := scheduleData.Get("schedule_next_run").String()
+				if nextRun != "" {
+					nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing next run time: %v", err)
+						return true
+					}
+					if !targetExecutionTime.IsZero() {
+						targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+					} else {
+						targetExecutionTime = nextRunTime
 					}
 				}
 
-				now := time.Now()
+				now := time.Now().UTC()
 
 				// Skip if the combined execution time is in the future
-				if !targetExecutionTime.IsZero() && now.Before(targetExecutionTime) {
+				// we accept up to 10 minutes before/after the scheduled time
+				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
+				if !targetExecutionTime.IsZero() && !isInRange {
 					fmt.Printf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 					return true
 				}
 
 				scanID := value.Get("scan_id").String()
+				scanMetaId := fmt.Sprintf("%s-%s", scanID, targetExecutionTime)
+
+				if cache.Has(scanMetaId) {
+					fmt.Printf("skipping scan %s as it's already completed in the last hour\n", scanName)
+					return true
+				}
 
 				// Fetch scan config for each scan
 				scanConfig, err := r.fetchScanConfig(scanID, r.options.TodoUserId)
@@ -409,6 +421,8 @@ func (r *Runner) agentMode(ctx context.Context) error {
 				}
 
 				fmt.Printf("Scan %s completed\n", scanName)
+
+				cache.Set(scanMetaId, struct{}{})
 
 				return true
 			})
