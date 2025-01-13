@@ -175,6 +175,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if r.options.AgentMode {
+		// recommend the time to use on platform dashboard to schedule the scans
+		gologger.Info().Msg("platform dashboard uses UTC timezone")
+		now := time.Now().UTC()
+		recommendedTime := now.Add(5 * time.Minute)
+		gologger.Info().Msgf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST"))
+
 		gologger.Info().Msgf("running in agent mode with name %s", r.options.AgentName)
 		return r.agentMode(ctx)
 	}
@@ -339,9 +345,11 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					}
 				}
 
+				now := time.Now()
+
 				// Skip if the combined execution time is in the future
-				if !targetExecutionTime.IsZero() && time.Now().Before(targetExecutionTime) {
-					fmt.Printf("Skipping scan %s as it's scheduled for %s", scanName, targetExecutionTime)
+				if !targetExecutionTime.IsZero() && now.Before(targetExecutionTime) {
+					fmt.Printf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 					return true
 				}
 
