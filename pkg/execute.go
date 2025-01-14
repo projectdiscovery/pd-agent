@@ -34,24 +34,39 @@ func Run(ctx context.Context, task *types.Task) error {
 		return fmt.Errorf("tool '%s' not found", task.Tool.String())
 	}
 
-	args := []string{
-		task.Tool.String(),
+	if task.Options.ScanID != "" {
+		envs, args, removeFunc, err := parseScanArgs(ctx, task)
+		if err != nil {
+			return err
+		}
+		defer removeFunc()
+		return runCommand(ctx, envs, args)
+	} else if task.Options.EnumerationID != "" {
+		// run: dnsx | naabu | httpx - for now execute all the tools in parallel
+		tools := []string{"dnsx", "naabu", "httpx"}
+		envs, args, removeFunc, err := parseGenericArgs(task)
+		if err != nil {
+			return err
+		}
+		defer removeFunc()
+		for _, tool := range tools {
+			args[0] = tool
+			if task.Options.Output != "" {
+				_ = fileutil.CreateFolder(task.Options.Output)
+				args = append(args, "-o", filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0])))
+			}
+			if err := runCommand(ctx, envs, args); err != nil {
+				return err
+			}
+		}
 	}
 
-	var (
-		isScan bool // TODO: temporary helper boolean
-	)
+	return nil
+}
 
-	var id string
-	switch {
-	case task.Options.ScanID != "":
-		id = task.Options.ScanID
-		isScan = true
-	case task.Options.EnumerationID != "":
-		id = task.Options.EnumerationID
-	}
-
-	if isScan && len(task.Options.Templates) > 0 {
+func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, removeFunc func(), err error) {
+	args = append(args, task.Tool.String())
+	if len(task.Options.Templates) > 0 {
 		args = append(args, "-templates", strings.Join(task.Options.Templates, ","))
 	}
 
@@ -59,40 +74,57 @@ func Run(ctx context.Context, task *types.Task) error {
 		args = append(args, "-team-id", task.Options.TeamID)
 	}
 
-	tmpFile, err := fileutil.GetTempFileName()
+	tmpFile, removeFunc, err := prepareInput(task)
 	if err != nil {
-		return fmt.Errorf("failed to create temp file: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	allTargets := strings.Join(task.Options.Hosts, "\n")
-	if err := os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
-		return fmt.Errorf("failed to write to temp file: %w", err)
-	}
-	defer os.RemoveAll(tmpFile)
 
 	args = append(args, "-l", tmpFile)
 
-	var envs []string
-	if id != "" || task.Options.TeamID != "" {
-		envs = append(envs,
-			"PDCP_DASHBOARD_URL=https://cloud.projectdiscovery.io",
-			"PDCP_API_SERVER=https://api.dev.projectdiscovery.io",
-			"PDCP_API_KEY="+os.Getenv("PDCP_API_KEY"),
-			"HOME="+os.Getenv("HOME"),
-			"PDCP_TEAM_ID="+task.Options.TeamID,
-		)
-		args = append(args, "-dashboard",
-			"-scan-id", id,
+	if task.Options.ScanID != "" || task.Options.TeamID != "" {
+		envs = getEnvs(task)
+		args = append(args,
+			"-dashboard",
+			"-scan-id", task.Options.ScanID,
 		)
 	}
 
 	if task.Options.Output != "" {
-		if isScan {
-			_ = fileutil.CreateFolder(task.Options.Output)
-			outputFile := filepath.Join(task.Options.Output, "nuclei.output")
-			args = append(args, "-o", outputFile)
-		}
+		_ = fileutil.CreateFolder(task.Options.Output)
+		outputFile := filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
+		args = append(args, "-o", outputFile)
 	}
 
+	return envs, args, removeFunc, nil
+}
+
+func prepareInput(task *types.Task) (string, func(), error) {
+	tmpFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	allTargets := strings.Join(task.Options.Hosts, "\n")
+	if err := os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
+		return "", nil, fmt.Errorf("failed to write to temp file: %w", err)
+	}
+	removeFunc := func() {
+		os.RemoveAll(tmpFile)
+	}
+	return tmpFile, removeFunc, nil
+}
+
+func getEnvs(task *types.Task) []string {
+	envs := []string{
+		"PDCP_DASHBOARD_URL=https://cloud.projectdiscovery.io",
+		"PDCP_API_SERVER=https://api.dev.projectdiscovery.io",
+		"PDCP_API_KEY=" + os.Getenv("PDCP_API_KEY"),
+		"HOME=" + os.Getenv("HOME"),
+		"PDCP_TEAM_ID=" + task.Options.TeamID,
+	}
+	return envs
+}
+
+func runCommand(ctx context.Context, envs, args []string) error {
 	// Prepare the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 
@@ -110,7 +142,7 @@ func Run(ctx context.Context, task *types.Task) error {
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start tool '%s': %w", tool.Name, err)
+		return fmt.Errorf("failed to start tool '%s': %w", args[0], err)
 	}
 
 	// Read stdout and stderr
@@ -125,7 +157,7 @@ func Run(ctx context.Context, task *types.Task) error {
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", tool.Name, err, string(stderrOutput))
+		return fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", args[0], err, string(stderrOutput))
 	}
 
 	// Print the output
@@ -135,4 +167,22 @@ func Run(ctx context.Context, task *types.Task) error {
 	fmt.Println(string(stderrOutput))
 
 	return nil
+}
+
+func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(), err error) {
+	envs = getEnvs(task)
+
+	args = append(args, task.Tool.String())
+
+	tmpFile, removeFunc, err := prepareInput(task)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	args = append(args,
+		"-silent",
+		"-l", tmpFile,
+	)
+
+	return envs, args, removeFunc, nil
 }

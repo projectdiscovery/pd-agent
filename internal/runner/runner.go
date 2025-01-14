@@ -234,7 +234,7 @@ func (r *Runner) ListToolsAndEnv(tools []types.Tool) error {
 
 // Close the runner instance
 func (r *Runner) Close() {
-	close(queuedScans)
+	close(queuedTasks)
 }
 
 // - will download the scan list
@@ -255,7 +255,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	go r.registerAgent(ctx)
 
 	go r.monitorScans(ctx)
-
+	go r.monitorEnumerations(ctx)
 	awg, err := syncutil.New(syncutil.WithSize(5))
 	if err != nil {
 		return errors.Join(err, errors.New("could not create worker group"))
@@ -268,7 +268,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case task := <-queuedScans:
+		case task := <-queuedTasks:
 			_ = awg.AddWithContext(ctx)
 
 			go func(task *types.Task) {
@@ -280,8 +280,8 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
 				fmt.Printf("scan %s completed\n", task.Id)
-				_ = completedScans.Set(task.Id, struct{}{})
-				pendingScans.Delete(task.Id)
+				_ = completedTasks.Set(task.Id, struct{}{})
+				pendingTasks.Delete(task.Id)
 			}(task)
 		}
 	}
@@ -443,12 +443,12 @@ func (r *Runner) doRegisterAgent() error {
 }
 
 var (
-	completedScans = gcache.New[string, struct{}](1024).
+	completedTasks = gcache.New[string, struct{}](1024).
 			LRU().
 			Expiration(time.Hour).
 			Build()
-	pendingScans = mapsutil.NewSyncLockMap[string, struct{}]()
-	queuedScans  = make(chan *types.Task, 1024)
+	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
+	queuedTasks  = make(chan *types.Task, 1024)
 )
 
 func (r *Runner) getScans(ctx context.Context) error {
@@ -498,6 +498,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
+			isEnumeration := strings.Contains(scanName, "[enumeration]")
 			agentId := value.Get("pdtm_agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentName
 
@@ -543,28 +544,28 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// Skip if the combined execution time is in the future
 			// we accept up to 10 minutes before/after the scheduled time
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-			if !targetExecutionTime.IsZero() && !isInRange {
+			if !targetExecutionTime.IsZero() && !isInRange && !isEnumeration {
 				fmt.Printf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 				return true
 			}
 
-			scanID := value.Get("scan_id").String()
-			scanMetaId := fmt.Sprintf("%s-%s", scanID, targetExecutionTime)
+			id := value.Get("scan_id").String()
+			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
-			if completedScans.Has(scanMetaId) {
+			if completedTasks.Has(metaId) {
 				fmt.Printf("skipping scan %s as it's already completed recently\n", scanName)
 				return true
 			}
 
-			if pendingScans.Has(scanMetaId) {
+			if pendingTasks.Has(metaId) {
 				fmt.Printf("skipping scan %s as it's already in progress\n", scanName)
 				return true
 			}
 
 			// Fetch scan config for each scan
-			scanConfig, err := r.fetchScanConfig(scanID, r.options.TodoUserId)
+			scanConfig, err := r.fetchScanConfig(id, r.options.TodoUserId)
 			if err != nil {
-				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
+				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
 			}
 
 			// Fetch assets if enumeration ID is defined
@@ -605,19 +606,24 @@ func (r *Runner) getScans(ctx context.Context) error {
 				Options: types.Options{
 					Hosts:     assets,
 					Templates: templates,
-					ScanID:    scanID,
 					Silent:    true,
 				},
-				Id: scanMetaId,
+				Id: metaId,
+			}
+
+			if isEnumeration {
+				task.Options.EnumerationID = id
+			} else {
+				task.Options.ScanID = id
 			}
 
 			if r.options.AgentOutput != "" {
-				task.Options.Output = filepath.Join(r.options.AgentOutput, scanMetaId)
+				task.Options.Output = filepath.Join(r.options.AgentOutput, metaId)
 			}
 
-			_ = pendingScans.Set(scanMetaId, struct{}{})
+			_ = pendingTasks.Set(metaId, struct{}{})
 
-			queuedScans <- task
+			queuedTasks <- task
 
 			return true
 		})
@@ -641,4 +647,24 @@ func (r *Runner) monitorScans(ctx context.Context) {
 			time.Sleep(time.Minute)
 		}
 	}
+}
+
+func (r *Runner) monitorEnumerations(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			if err := r.getEnumerations(ctx); err != nil {
+				gologger.Error().Msgf("Error getting enumerations: %v", err)
+			}
+			time.Sleep(time.Minute)
+		}
+	}
+}
+
+func (r *Runner) getEnumerations(_ context.Context) error {
+	// TODO: platform-backend api endpoint doesn't expose enumerations routes yet, hence we use the scans api
+	// with [enumeration] tag in the scan name to tell pdtm-agent that this is an enumeration
+	return nil
 }
