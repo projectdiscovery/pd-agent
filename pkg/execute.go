@@ -43,20 +43,37 @@ func Run(ctx context.Context, task *types.Task) error {
 		return runCommand(ctx, envs, args)
 	} else if task.Options.EnumerationID != "" {
 		// run: dnsx | naabu | httpx - for now execute all the tools in parallel
-		tools := []string{"dnsx", "naabu", "httpx"}
-		envs, args, removeFunc, err := parseGenericArgs(task)
-		if err != nil {
-			return err
-		}
-		defer removeFunc()
+		tools := []string{"dnsx", "naabu", "httpx", "tlsx"}
+		// track naabu output as input to next steps
+		var naabuOutput []string
 		for _, tool := range tools {
+			if len(naabuOutput) > 0 {
+				task.Options.Hosts = append(task.Options.Hosts, naabuOutput...)
+			}
+			envs, args, removeFunc, err := parseGenericArgs(task)
+			if err != nil {
+				return err
+			}
+			defer removeFunc()
 			args[0] = tool
+			var outputFile string
 			if task.Options.Output != "" {
 				_ = fileutil.CreateFolder(task.Options.Output)
-				args = append(args, "-o", filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0])))
+				outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
+				args = append(args, "-o", outputFile)
 			}
 			if err := runCommand(ctx, envs, args); err != nil {
 				return err
+			}
+			// if tool is naabu get the output for next steps
+			if args[0] == "naabu" && outputFile != "" {
+				c, err := fileutil.ReadFile(outputFile)
+				if err != nil {
+					return err
+				}
+				for line := range c {
+					naabuOutput = append(naabuOutput, line)
+				}
 			}
 		}
 	}
