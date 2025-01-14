@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
@@ -82,6 +83,14 @@ func Run(ctx context.Context, task *types.Task) error {
 		args = append(args, "-dashboard",
 			"-scan-id", id,
 		)
+	}
+
+	if task.Options.Output != "" {
+		if isScan {
+			_ = fileutil.CreateFolder(task.Options.Output)
+			outputFile := filepath.Join(task.Options.Output, "nuclei.output")
+			args = append(args, "-o", outputFile)
+		}
 	}
 
 	// Prepare the command

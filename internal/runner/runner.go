@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -608,6 +609,10 @@ func (r *Runner) getScans(ctx context.Context) error {
 					Silent:    true,
 				},
 				Id: scanMetaId,
+			}
+
+			if r.options.AgentOutput != "" {
+				task.Options.Output = filepath.Join(r.options.AgentOutput, scanMetaId)
 			}
 
 			_ = pendingScans.Set(scanMetaId, struct{}{})

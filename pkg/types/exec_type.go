@@ -49,4 +49,5 @@ type Options struct {
 	ScanID        string
 	EnumerationID string
 	TeamID        string
+	Output        string
 }
