@@ -34,6 +34,8 @@ func (t ToolType) String() string {
 type Task struct {
 	Tool    ToolType
 	Options Options
+
+	Id string
 }
 
 type Options struct {
