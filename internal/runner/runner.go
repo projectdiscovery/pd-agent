@@ -268,7 +268,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case task := <-queuedScans:
-			awg.AddWithContext(ctx)
+			_ = awg.AddWithContext(ctx)
 
 			go func(task *types.Task) {
 				defer awg.Done()
@@ -279,7 +279,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
 				fmt.Printf("scan %s completed\n", task.Id)
-				completedScans.Set(task.Id, struct{}{})
+				_ = completedScans.Set(task.Id, struct{}{})
 				pendingScans.Delete(task.Id)
 			}(task)
 		}
@@ -610,7 +610,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				Id: scanMetaId,
 			}
 
-			pendingScans.Set(scanMetaId, struct{}{})
+			_ = pendingScans.Set(scanMetaId, struct{}{})
 
 			queuedScans <- task
 
@@ -630,7 +630,9 @@ func (r *Runner) monitorScans(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
-			r.getScans(ctx)
+			if err := r.getScans(ctx); err != nil {
+				gologger.Error().Msgf("Error getting scans: %v", err)
+			}
 			time.Sleep(time.Minute)
 		}
 	}
