@@ -544,7 +544,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// Skip if the combined execution time is in the future
 			// we accept up to 10 minutes before/after the scheduled time
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-			if !targetExecutionTime.IsZero() && !isInRange && !isEnumeration {
+			if !targetExecutionTime.IsZero() && !isInRange {
 				fmt.Printf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 				return true
 			}
