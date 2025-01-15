@@ -721,7 +721,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 			// TODO: remove this
-			isInRange = true
+			// isInRange = true
 
 			if !targetExecutionTime.IsZero() && !isInRange {
 				fmt.Printf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
