@@ -42,12 +42,14 @@ type Options struct {
 	// Common options
 	Hosts  []string
 	Silent bool
+	TeamID string
+	Output string
 
 	// - Nuclei
+	ScanID    string
 	Templates []string
 
-	ScanID        string
+	// - Enumeration
 	EnumerationID string
-	TeamID        string
-	Output        string
+	Steps         []string
 }

@@ -3,7 +3,6 @@ package runner
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +17,7 @@ import (
 	"github.com/Mzack9999/gcache"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
+	"github.com/projectdiscovery/pdtm-agent/pkg/client"
 	"github.com/projectdiscovery/pdtm-agent/pkg/path"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
@@ -274,12 +274,12 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			go func(task *types.Task) {
 				defer awg.Done()
 
-				fmt.Printf("running scan %s\n", task.Id)
+				fmt.Printf("running task %s\n", task.Id)
 
 				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
-				fmt.Printf("scan %s completed\n", task.Id)
+				fmt.Printf("task %s completed\n", task.Id)
 				_ = completedTasks.Set(task.Id, struct{}{})
 				pendingTasks.Delete(task.Id)
 			}(task)
@@ -288,8 +288,8 @@ func (r *Runner) agentMode(ctx context.Context) error {
 }
 
 func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/config?user_id=%s", PCDPApiServer, scanID, todoUserId)
-	client, err := r.createAuthenticatedClient()
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/config?user_id=%s", pdcpauth.DefaultApiServer, scanID, todoUserId)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -315,7 +315,7 @@ func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
 
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
 	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
-	client, err := r.createAuthenticatedClient()
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -337,36 +337,6 @@ func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
 	}
 
 	return body, nil
-}
-
-func (r *Runner) createAuthenticatedClient() (*http.Client, error) {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	}
-
-	client := &http.Client{
-		Transport: transport,
-	}
-
-	// Create a custom RoundTripper to add headers to every request
-	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
-		req.Header.Set("X-Api-Key", PDCPApiKey)
-		req.Header.Set("X-Team-Id", r.options.TeamID)
-		q := req.URL.Query()
-		q.Add("user_id", r.options.TodoUserId)
-		req.URL.RawQuery = q.Encode()
-		return transport.RoundTrip(req)
-	})
-
-	return client, nil
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (rf roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
-	return rf(req)
 }
 
 // Agent defines model for Agent.
@@ -416,7 +386,7 @@ func (r *Runner) doRegisterAgent() error {
 
 	// TODO: change this to the actual api server
 	apiURL := fmt.Sprintf("%s/agents", PDCPDevApiServer)
-	client, err := r.createAuthenticatedClient()
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -454,7 +424,7 @@ var (
 func (r *Runner) getScans(ctx context.Context) error {
 	apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
 
-	client, err := r.createAuthenticatedClient()
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -498,7 +468,6 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
-			isEnumeration := strings.Contains(scanName, "[enumeration]")
 			agentId := value.Get("pdtm_agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentName
 
@@ -607,14 +576,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 					Hosts:     assets,
 					Templates: templates,
 					Silent:    true,
+					ScanID:    id,
 				},
 				Id: metaId,
-			}
-
-			if isEnumeration {
-				task.Options.EnumerationID = id
-			} else {
-				task.Options.ScanID = id
 			}
 
 			if r.options.AgentOutput != "" {
@@ -663,8 +627,197 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 	}
 }
 
-func (r *Runner) getEnumerations(_ context.Context) error {
-	// TODO: platform-backend api endpoint doesn't expose enumerations routes yet, hence we use the scans api
-	// with [enumeration] tag in the scan name to tell pdtm-agent that this is an enumeration
+func (r *Runner) getEnumerations(ctx context.Context) error {
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	limit := 100
+	offset := 0
+	totalPages := 1
+	currentPage := 1
+
+	for currentPage <= totalPages {
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, paginatedURL, nil)
+		if err != nil {
+			return fmt.Errorf("error creating request: %v", err)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("error sending request: %v", err)
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading response: %v", err)
+		}
+
+		result := gjson.ParseBytes(body)
+
+		// Update totalPages on the first iteration
+		if currentPage == 1 {
+			totalPages = int(result.Get("total_pages").Int())
+			gologger.Info().Msgf("Total pages: %d", totalPages)
+		}
+
+		fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
+
+		// Process scans
+		result.Get("data").ForEach(func(key, value gjson.Result) bool {
+			// since we have no control over platform-backend or product evolution
+			// we use the scan name to contain the [pdtm-agent-id] temporarily
+			scanName := value.Get("name").String()
+			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
+			agentId := value.Get("pdtm_agent_id").String()
+			isAssignedToagent := agentId == r.options.AgentName
+
+			if !isAssignedToagent && !hasScanNameTag {
+				fmt.Printf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+				return true
+			}
+
+			// Parse schedule and start time
+			var targetExecutionTime time.Time
+			startTime := value.Get("start_time").String()
+			if startTime != "" {
+				parsedStartTime, err := time.Parse(time.RFC3339, startTime)
+				if err != nil {
+					gologger.Error().Msgf("Error parsing start time: %v", err)
+					return true
+				}
+				targetExecutionTime = parsedStartTime
+			}
+
+			scheduleData := value.Get("schedule")
+			if !scheduleData.Exists() {
+				fmt.Printf("skipping enumeration %s as it has no schedule\n", scanName)
+				return true
+			}
+
+			nextRun := scheduleData.Get("schedule_next_run").String()
+			if nextRun != "" {
+				nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+				if err != nil {
+					gologger.Error().Msgf("Error parsing next run time: %v", err)
+					return true
+				}
+				if !targetExecutionTime.IsZero() {
+					targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+				} else {
+					targetExecutionTime = nextRunTime
+				}
+			}
+
+			now := time.Now().UTC()
+
+			// Skip if the combined execution time is in the future
+			// we accept up to 10 minutes before/after the scheduled time
+			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
+
+			// TODO: remove this
+			isInRange = true
+
+			if !targetExecutionTime.IsZero() && !isInRange {
+				fmt.Printf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
+				return true
+			}
+
+			id := value.Get("id").String()
+			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
+
+			if completedTasks.Has(metaId) {
+				fmt.Printf("skipping enumeration %s as it's already completed recently\n", scanName)
+				return true
+			}
+
+			if pendingTasks.Has(metaId) {
+				fmt.Printf("skipping enumeration %s as it's already in progress\n", scanName)
+				return true
+			}
+
+			// Fetch scan config for each scan
+			scanConfig, err := r.fetchEnumerationConfig(id, r.options.TodoUserId)
+			if err != nil {
+				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
+			}
+
+			// Fetch assets if enumeration ID is defined
+			// gets assets from enumeration id
+			var assets []string
+			gjson.Parse(scanConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
+				assets = append(assets, value.String())
+				return true
+			})
+			gjson.Parse(scanConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
+				assets = append(assets, value.String())
+				return true
+			})
+
+			var steps []string
+			gjson.Parse(scanConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
+				steps = append(steps, value.String())
+				return true
+			})
+
+			fmt.Printf("enumeration %s enqueued...\n", scanName)
+
+			task := &types.Task{
+				Tool: types.Nuclei,
+				Options: types.Options{
+					Hosts:         assets,
+					Silent:        true,
+					Steps:         steps,
+					EnumerationID: id,
+				},
+				Id: metaId,
+			}
+
+			if r.options.AgentOutput != "" {
+				task.Options.Output = filepath.Join(r.options.AgentOutput, metaId)
+			}
+
+			_ = pendingTasks.Set(metaId, struct{}{})
+
+			queuedTasks <- task
+
+			return true
+		})
+
+		currentPage++
+		offset += limit
+	}
+
 	return nil
+}
+
+func (r *Runner) fetchEnumerationConfig(enumerationId, todoUserId string) (string, error) {
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config?user_id=%s", pdcpauth.DefaultApiServer, enumerationId, todoUserId)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return "", fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("error reading response: %v", err)
+	}
+
+	return string(body), nil
 }
