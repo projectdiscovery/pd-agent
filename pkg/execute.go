@@ -96,11 +96,17 @@ func Run(ctx context.Context, task *types.Task) error {
 					naabuOutput = append(naabuOutput, line)
 				}
 				naabuOutputFile = outputFile
+				// attempt to update existing asset
 				// upload naabu output
-				if assetId, err := uploadToCloud(ctx, task, naabuOutputFile); err != nil {
-					return err
-				} else {
+				assetId, err := uploadToCloudWithId(ctx, task, naabuOutputFile, task.Options.EnumerationID)
+				// if updating fails, upload to a new manual asset
+				if err == nil {
 					manualAssetId = assetId
+				} else {
+					manualAssetId, err = uploadToCloud(ctx, task, naabuOutputFile)
+					if err != nil {
+						return err
+					}
 				}
 			}
 		}
@@ -157,6 +163,37 @@ func uploadToCloud(ctx context.Context, task *types.Task, outputFile string) (st
 	fmt.Println(string(body))
 	data := gjson.ParseBytes(body)
 	assetId := data.Get("asset_id").String()
+	return assetId, nil
+}
+
+func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, assetId string) (string, error) {
+	f, err := os.Open(outputFile)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", pdcpauth.DefaultApiServer, assetId)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, f)
+	if err != nil {
+		return "", err
+	}
+	defer req.Body.Close()
+
+	req.Header.Set("Content-Type", "application/octet-stream")
+
+	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), "", os.Getenv("PDCP_API_KEY"))
+	if err != nil {
+		return "", err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	fmt.Println(string(body))
 	return assetId, nil
 }
 
