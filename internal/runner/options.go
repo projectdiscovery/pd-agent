@@ -18,10 +18,12 @@ import (
 var au *aurora.Aurora
 
 var (
-	PDCPApiKey       = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv        = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	PCDPApiServer    = envutil.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
-	PDCPDevApiServer = "http://127.0.0.1:8087"
+	PDCPApiKey        = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv         = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	PCDPApiServer     = envutil.GetEnvOrDefault("PDCP_API_SERVER", pdcpauth.DefaultApiServer)
+	PDCPDevApiServer  = "http://127.0.0.1:8087"
+	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy-dev.projectdiscovery.io")
+	PunchHoleHTTPPort = envutil.GetEnvOrDefault("PUNCH_HOLE_HTTP_PORT", "8880")
 )
 
 // Options contains the configuration options for tuning the enumeration process.

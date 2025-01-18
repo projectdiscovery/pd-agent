@@ -1,17 +1,17 @@
 package runner
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mzack9999/gcache"
@@ -252,7 +252,15 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	go r.registerAgent(ctx)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		if err := r.In(ctx); err != nil {
+			log.Fatalf("error registering agent: %v", err)
+		}
+	}()
 
 	go r.monitorScans(ctx)
 	go r.monitorEnumerations(ctx)
@@ -261,7 +269,10 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		return errors.Join(err, errors.New("could not create worker group"))
 	}
 
-	defer awg.Wait()
+	defer func() {
+		wg.Wait()
+		awg.Wait()
+	}()
 
 	for {
 
@@ -269,7 +280,10 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case task := <-queuedTasks:
-			_ = awg.AddWithContext(ctx)
+			if task == nil {
+				continue
+			}
+			awg.Add()
 
 			go func(task *types.Task) {
 				defer awg.Done()
@@ -347,69 +361,6 @@ type Agent struct {
 	LastSeen     time.Time `json:"last_seen"`
 	Os           string    `json:"os"`
 	PdtmVersion  string    `json:"pdtm_version"`
-}
-
-func (r *Runner) registerAgent(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute) // Register every 5 minutes
-	defer ticker.Stop()
-
-	doRegisterAgent := func() {
-		if err := r.doRegisterAgent(); err != nil {
-			gologger.Error().Msgf("Failed to register agent: %v", err)
-		}
-	}
-	doRegisterAgent()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			doRegisterAgent()
-		}
-	}
-}
-
-func (r *Runner) doRegisterAgent() error {
-	agent := Agent{
-		AgentId:      r.options.AgentName,
-		AgentName:    r.options.AgentName,
-		Architecture: runtime.GOARCH,
-		LastSeen:     time.Now(),
-		Os:           runtime.GOOS,
-	}
-
-	jsonData, err := json.Marshal(agent)
-	if err != nil {
-		return fmt.Errorf("error marshaling agent data: %v", err)
-	}
-
-	// TODO: change this to the actual api server
-	apiURL := fmt.Sprintf("%s/agents", PDCPDevApiServer)
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
-	if err != nil {
-		return fmt.Errorf("error creating authenticated client: %v", err)
-	}
-
-	req, err := http.NewRequest(http.MethodPost, apiURL, bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
-	}
-
-	gologger.Info().Msgf("Agent registered successfully")
-	return nil
 }
 
 var (
@@ -820,4 +771,149 @@ func (r *Runner) fetchEnumerationConfig(enumerationId, todoUserId string) (strin
 	}
 
 	return string(body), nil
+}
+
+func (r *Runner) In(ctx context.Context) error {
+	ticker := time.NewTicker(time.Minute)
+	defer func() {
+		ticker.Stop()
+		if err := r.Out(context.TODO()); err != nil {
+			gologger.Warning().Msgf("error deregistering agent: %v", err)
+		} else {
+			gologger.Info().Msgf("deregistered agent")
+		}
+	}()
+
+	// Run first time to register
+	if err := r.inFunctionTickCallback(ctx, true); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := r.inFunctionTickCallback(ctx, false); err != nil {
+				return err
+			}
+		}
+	}
+}
+
+func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
+	endpoint := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		log.Printf("failed to create request: %v", err)
+		return err
+	}
+	q := req.URL.Query()
+	q.Add("os", runtime.GOOS)
+	q.Add("arch", runtime.GOARCH)
+	q.Add("id", r.options.AgentName)
+	q.Add("type", "agent")
+	req.URL.RawQuery = q.Encode()
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("failed to call /in endpoint: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("failed to read response body: %v", err)
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("unexpected status code from /in endpoint: %d, body: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", resp.StatusCode, string(body))
+	} else {
+		gologger.Info().Msgf("agent registered successfully")
+	}
+	time.Sleep(time.Second)
+	if first {
+		if r.options.AgentName != "" {
+			if err := r.renameAgent(ctx, r.options.AgentName); err != nil {
+				gologger.Error().Msgf("error renaming agent: %v", err)
+			}
+		}
+	}
+	return nil
+}
+
+func (r *Runner) Out(ctx context.Context) error {
+	endpoint := fmt.Sprintf("http://%s:%s/out", PunchHoleHost, PunchHoleHTTPPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		log.Printf("failed to create request: %v", err)
+		return err
+	}
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+	q := req.URL.Query()
+	q.Add("id", r.options.AgentName)
+	q.Add("type", "agent")
+	req.URL.RawQuery = q.Encode()
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("failed to call /out endpoint: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("failed to read response body: %v", err)
+		return err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code from /out endpoint: %v, body: %s", resp.StatusCode, string(body))
+	} else {
+		gologger.Info().Msgf("agent deregistered successfully")
+	}
+	return nil
+}
+
+func (r *Runner) renameAgent(ctx context.Context, name string) error {
+	endpoint := fmt.Sprintf("http://%s:%s/rename", PunchHoleHost, PunchHoleHTTPPort)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %v", err)
+	}
+
+	q := req.URL.Query()
+	q.Add("id", r.options.AgentName)
+	q.Add("name", name)
+	q.Add("type", "agent")
+	req.URL.RawQuery = q.Encode()
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to call /rename endpoint: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response body: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code from /rename endpoint: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
 }
