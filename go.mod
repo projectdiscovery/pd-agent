@@ -6,8 +6,8 @@ require (
 	github.com/charmbracelet/glamour v0.8.0
 	github.com/google/go-github v17.0.0+incompatible
 	github.com/projectdiscovery/goflags v0.1.64
-	github.com/projectdiscovery/gologger v1.1.39
-	github.com/projectdiscovery/utils v0.4.6
+	github.com/projectdiscovery/gologger v1.1.42
+	github.com/projectdiscovery/utils v0.4.7
 	github.com/stretchr/testify v1.9.0
 	golang.org/x/oauth2 v0.13.0
 	golang.org/x/sys v0.28.0
