@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
@@ -258,11 +259,7 @@ func getEnvs(task *types.Task) []string {
 }
 
 func runCommand(ctx context.Context, envs, args []string) error {
-
-	fmt.Printf(`
-		envs: %s
-		args: %s
-	`, envs, args)
+	gologger.Info().Msgf("Running:\nCMD: %s\nENVS: %s\nARGS: %s", args[0], envs, args)
 
 	// Prepare the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -299,11 +296,7 @@ func runCommand(ctx context.Context, envs, args []string) error {
 		return fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", args[0], err, string(stderrOutput))
 	}
 
-	// Print the output
-	fmt.Println("Stdout:")
-	fmt.Println(string(stdoutOutput))
-	fmt.Println("Stderr:")
-	fmt.Println(string(stderrOutput))
+	gologger.Info().Msgf("Stdout:\n%s\nStderr:\n%s", string(stdoutOutput), string(stderrOutput))
 
 	return nil
 }

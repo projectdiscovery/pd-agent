@@ -288,12 +288,12 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			go func(task *types.Task) {
 				defer awg.Done()
 
-				fmt.Printf("running task %s\n", task.Id)
+				gologger.Info().Msgf("Running task:\nId: %s\nTool: %s\nOptions: %+v\n", task.Id, task.Tool, task.Options)
 
 				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
-				fmt.Printf("task %s completed\n", task.Id)
+				gologger.Info().Msgf("Task %s completed\n", task.Id)
 				_ = completedTasks.Set(task.Id, struct{}{})
 				pendingTasks.Delete(task.Id)
 			}(task)
@@ -373,6 +373,7 @@ var (
 )
 
 func (r *Runner) getScans(ctx context.Context) error {
+	gologger.Verbose().Msg("Retrieving scans...")
 	apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
@@ -408,10 +409,10 @@ func (r *Runner) getScans(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			gologger.Info().Msgf("Total pages: %d", totalPages)
+			gologger.Verbose().Msgf("Total pages: %d", totalPages)
 		}
 
-		fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
+		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
 
 		// Process scans
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -423,7 +424,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			isAssignedToagent := agentId == r.options.AgentName
 
 			if !isAssignedToagent && !hasScanNameTag {
-				fmt.Printf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
 				return true
 			}
 
@@ -441,7 +442,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			scheduleData := value.Get("schedule")
 			if !scheduleData.Exists() {
-				fmt.Printf("skipping scan %s as it has no schedule\n", scanName)
+				gologger.Verbose().Msgf("skipping scan %s as it has no schedule\n", scanName)
 				return true
 			}
 
@@ -465,7 +466,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we accept up to 10 minutes before/after the scheduled time
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 			if !targetExecutionTime.IsZero() && !isInRange {
-				fmt.Printf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
+				gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 				return true
 			}
 
@@ -473,12 +474,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
 			if completedTasks.Has(metaId) {
-				fmt.Printf("skipping scan %s as it's already completed recently\n", scanName)
+				gologger.Verbose().Msgf("skipping scan %s as it's already completed recently\n", scanName)
 				return true
 			}
 
 			if pendingTasks.Has(metaId) {
-				fmt.Printf("skipping scan %s as it's already in progress\n", scanName)
+				gologger.Verbose().Msgf("skipping scan %s as it's already in progress\n", scanName)
 				return true
 			}
 
@@ -519,7 +520,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			})
 
-			fmt.Printf("scan %s enqueued...\n", scanName)
+			gologger.Info().Msgf("scan %s enqueued...\n", scanName)
 
 			task := &types.Task{
 				Tool: types.Nuclei,
@@ -579,6 +580,7 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 }
 
 func (r *Runner) getEnumerations(ctx context.Context) error {
+	gologger.Verbose().Msg("Retrieving enumerations...")
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
@@ -614,10 +616,10 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			gologger.Info().Msgf("Total pages: %d", totalPages)
+			gologger.Verbose().Msgf("Total pages: %d", totalPages)
 		}
 
-		fmt.Printf("Processing page %d of %d\n", currentPage, totalPages)
+		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
 
 		// Process scans
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -629,7 +631,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			isAssignedToagent := agentId == r.options.AgentName
 
 			if !isAssignedToagent && !hasScanNameTag {
-				fmt.Printf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
 				return true
 			}
 
@@ -647,7 +649,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			scheduleData := value.Get("schedule")
 			if !scheduleData.Exists() {
-				fmt.Printf("skipping enumeration %s as it has no schedule\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it has no schedule\n", scanName)
 				return true
 			}
 
@@ -675,7 +677,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			// isInRange = true
 
 			if !targetExecutionTime.IsZero() && !isInRange {
-				fmt.Printf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 				return true
 			}
 
@@ -683,12 +685,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
 			if completedTasks.Has(metaId) {
-				fmt.Printf("skipping enumeration %s as it's already completed recently\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", scanName)
 				return true
 			}
 
 			if pendingTasks.Has(metaId) {
-				fmt.Printf("skipping enumeration %s as it's already in progress\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's already in progress\n", scanName)
 				return true
 			}
 
@@ -716,7 +718,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				return true
 			})
 
-			fmt.Printf("enumeration %s enqueued...\n", scanName)
+			gologger.Info().Msgf("enumeration %s enqueued...\n", scanName)
 
 			task := &types.Task{
 				Tool: types.Nuclei,
@@ -801,6 +803,8 @@ func (r *Runner) In(ctx context.Context) error {
 	}
 }
 
+var isRegistered bool
+
 func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 	endpoint := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
@@ -835,7 +839,10 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 		log.Printf("unexpected status code from /in endpoint: %d, body: %s", resp.StatusCode, string(body))
 		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", resp.StatusCode, string(body))
 	} else {
-		gologger.Info().Msgf("agent registered successfully")
+		if !isRegistered {
+			gologger.Info().Msgf("agent registered successfully")
+			isRegistered = true
+		}
 	}
 	time.Sleep(time.Second)
 	if first {
@@ -877,7 +884,10 @@ func (r *Runner) Out(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("unexpected status code from /out endpoint: %v, body: %s", resp.StatusCode, string(body))
 	} else {
-		gologger.Info().Msgf("agent deregistered successfully")
+		if isRegistered {
+			gologger.Info().Msgf("agent deregistered successfully")
+			isRegistered = false
+		}
 	}
 	return nil
 }
