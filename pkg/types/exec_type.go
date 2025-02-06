@@ -48,6 +48,7 @@ type Options struct {
 	// - Nuclei
 	ScanID    string
 	Templates []string
+	Config    string
 
 	// - Enumeration
 	EnumerationID string

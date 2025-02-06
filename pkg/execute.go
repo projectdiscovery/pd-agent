@@ -134,7 +134,7 @@ func getToolsFromSteps(steps []string) []string {
 	return tools
 }
 
-func uploadToCloud(ctx context.Context, task *types.Task, outputFile string) (string, error) {
+func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
 	f, err := os.Open(outputFile)
 	if err != nil {
 		return "", err
@@ -208,12 +208,16 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 		args = append(args, "-team-id", task.Options.TeamID)
 	}
 
-	tmpFile, removeFunc, err := prepareInput(task)
+	tmpInputFile, tmpConfigFile, removeFunc, err := prepareInput(task)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
-	args = append(args, "-l", tmpFile)
+	args = append(args, "-l", tmpInputFile)
+
+	if tmpConfigFile != "" {
+		args = append(args, "-config", tmpConfigFile)
+	}
 
 	if task.Options.ScanID != "" || task.Options.TeamID != "" {
 		envs = getEnvs(task)
@@ -232,19 +236,39 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	return envs, args, removeFunc, nil
 }
 
-func prepareInput(task *types.Task) (string, func(), error) {
-	tmpFile, err := fileutil.GetTempFileName()
+func prepareInput(task *types.Task) (
+	string, // input list
+	string, // config
+	func(), // remove function
+	error, // error
+) {
+	tmpInputFile, err := fileutil.GetTempFileName()
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create temp file: %w", err)
+		return "", "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 	allTargets := strings.Join(task.Options.Hosts, "\n")
-	if err := os.WriteFile(tmpFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
-		return "", nil, fmt.Errorf("failed to write to temp file: %w", err)
+	if err := os.WriteFile(tmpInputFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
+		return "", "", nil, fmt.Errorf("failed to write to temp file: %w", err)
 	}
+
+	var tmpConfigFile string
+	if task.Options.Config != "" {
+		tmpConfigFile, err = fileutil.GetTempFileName()
+		if err != nil {
+			return "", "", nil, fmt.Errorf("failed to create temp file: %w", err)
+		}
+		if err := os.WriteFile(tmpConfigFile, conversion.Bytes(task.Options.Config), os.ModePerm); err != nil {
+			return "", "", nil, fmt.Errorf("failed to write to temp file: %w", err)
+		}
+	}
+
 	removeFunc := func() {
-		os.RemoveAll(tmpFile)
+		os.RemoveAll(tmpInputFile)
+		if tmpConfigFile != "" {
+			os.RemoveAll(tmpConfigFile)
+		}
 	}
-	return tmpFile, removeFunc, nil
+	return tmpInputFile, tmpConfigFile, removeFunc, nil
 }
 
 func getEnvs(task *types.Task) []string {
@@ -306,7 +330,7 @@ func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(),
 
 	args = append(args, task.Tool.String())
 
-	tmpFile, removeFunc, err := prepareInput(task)
+	tmpFile, _, removeFunc, err := prepareInput(task)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
