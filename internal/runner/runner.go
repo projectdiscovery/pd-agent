@@ -452,11 +452,11 @@ func (r *Runner) getScans(ctx context.Context) error {
 			isAssignedToagent := agentId == r.options.AgentName
 
 			// tmp
-			// isPatched := strings.EqualFold(scanName, "test1 [pdtm-agent]")
-			// if isPatched {
-			// 	isAssignedToagent = true
-			// 	hasScanNameTag = true
-			// }
+			isPatched := stringsutil.EqualFoldAny(scanName, "test1 [pdtm-agent]", "test2 [pdtm-agent]")
+			if isPatched {
+				isAssignedToagent = true
+				hasScanNameTag = true
+			}
 
 			if !isAssignedToagent && !hasScanNameTag {
 				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
@@ -501,9 +501,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we accept up to 10 minutes before/after the scheduled time
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
-			// if isPatched {
-			// 	isInRange = true
-			// }
+			if isPatched {
+				isInRange = true
+			}
 
 			if !targetExecutionTime.IsZero() && !isInRange {
 				gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
