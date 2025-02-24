@@ -1,5 +1,13 @@
 package types
 
+var AllTools = []ToolType{}
+
+func init() {
+	for i := 0; i < int(Katana); i++ {
+		AllTools = append(AllTools, ToolType(i))
+	}
+}
+
 // ToolType represents the type of tool to execute
 type ToolType int
 

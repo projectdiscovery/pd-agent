@@ -181,6 +181,26 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if r.options.AgentMode {
+		// automatically check and install required tools
+		for _, toolType := range types.AllTools {
+			toolName := toolType.String()
+			if i, ok := utils.Contains(toolList, toolName); ok {
+				// Check if tool is installed and up to date
+				if err := pkg.Update(r.options.Path, toolList[i], r.options.DisableChangeLog); err != nil {
+					if err == types.ErrIsUpToDate {
+						gologger.Info().Msgf("%s: %s", toolName, err)
+					} else {
+						// Try installing if update fails
+						if err := pkg.Install(r.options.Path, toolList[i]); err != nil {
+							gologger.Error().Msgf("Failed to install %s: %s", toolName, err)
+						}
+					}
+				}
+			} else {
+				gologger.Error().Msgf("Tool %s not found in available tools list", toolName)
+			}
+		}
+
 		// recommend the time to use on platform dashboard to schedule the scans
 		gologger.Info().Msg("platform dashboard uses UTC timezone")
 		now := time.Now().UTC()
