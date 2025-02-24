@@ -53,10 +53,12 @@ type Options struct {
 	PdcpAuth         string
 	PdcpAuthCredFile string
 	TeamID           string
-	AgentMode        bool
-	AgentName        string
-	TodoUserId       string
-	AgentOutput      string
+
+	AgentMode   bool
+	AgentName   string
+	AgentTags   goflags.StringSlice
+	TodoUserId  string
+	AgentOutput string
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -106,6 +108,7 @@ func ParseOptions() *Options {
 		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "pdtm-agent", "specify the name for the agent"),
+		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVarP(&options.TodoUserId, "todo-user-id", "tuid", "1", "specify the user id for the todo agent"),
 	)
 	if err := flagSet.Parse(); err != nil {

@@ -187,7 +187,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		recommendedTime := now.Add(5 * time.Minute)
 		gologger.Info().Msgf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST"))
 
-		gologger.Info().Msgf("running in agent mode with name %s", r.options.AgentName)
+		gologger.Info().Msgf("running in agent mode with name %s (tags: %s)", r.options.AgentName, strings.Join(r.options.AgentTags, ","))
 		return r.agentMode(ctx)
 	}
 
@@ -451,6 +451,15 @@ func (r *Runner) getScans(ctx context.Context) error {
 			agentId := value.Get("pdtm_agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentName
 
+			// we also check if it has any tag in name
+			var hasTagInName bool
+			for _, tag := range r.options.AgentTags {
+				if strings.Contains(scanName, "["+tag+"]") {
+					hasTagInName = true
+					break
+				}
+			}
+
 			// tmp
 			isPatched := stringsutil.EqualFoldAny(scanName, "test1 [pdtm-agent]", "test2 [pdtm-agent]")
 			if isPatched {
@@ -458,8 +467,8 @@ func (r *Runner) getScans(ctx context.Context) error {
 				hasScanNameTag = true
 			}
 
-			if !isAssignedToagent && !hasScanNameTag {
-				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
+				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentName)
 				return true
 			}
 
@@ -899,6 +908,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 	q.Add("arch", runtime.GOARCH)
 	q.Add("id", r.options.AgentName)
 	q.Add("type", "agent")
+	q.Add("tags", strings.Join(r.options.AgentTags, ","))
 	req.URL.RawQuery = q.Encode()
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
