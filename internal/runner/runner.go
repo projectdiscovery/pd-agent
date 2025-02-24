@@ -207,7 +207,19 @@ func (r *Runner) Run(ctx context.Context) error {
 		recommendedTime := now.Add(5 * time.Minute)
 		gologger.Info().Msgf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST"))
 
-		gologger.Info().Msgf("running in agent mode with name %s (tags: %s)", r.options.AgentName, strings.Join(r.options.AgentTags, ","))
+		var infoMessage strings.Builder
+		infoMessage.WriteString("running in agent mode")
+		if r.options.AgentName != "" {
+			infoMessage.WriteString(fmt.Sprintf(" with name %s", r.options.AgentName))
+		}
+		if len(r.options.AgentTags) > 0 {
+			infoMessage.WriteString(fmt.Sprintf(" (tags: %s)", strings.Join(r.options.AgentTags, ",")))
+		} else {
+			infoMessage.WriteString(" (no tags)")
+		}
+
+		gologger.Info().Msg(infoMessage.String())
+
 		return r.agentMode(ctx)
 	}
 
