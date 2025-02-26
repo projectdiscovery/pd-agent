@@ -19,6 +19,8 @@ type Authentication struct {
 	Protocol AuthenticationProtocol
 	Username string
 	Password string
+
+	PrivateKeyFile string
 }
 
 type TaskResult struct {
