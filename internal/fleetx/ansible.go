@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -14,14 +15,18 @@ const (
 	DefaultSSHPort     = 22
 )
 
-// ParseAnsibleInventory reads an Ansible inventory file and returns a list of Hosts
-func ParseAnsibleInventory(filename string) ([]Host, error) {
+func ParseAnsibleInventoryFile(filename string) ([]Host, error) {
 	file, err := os.Open(filename)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 
+	return ParseAnsibleInventory(file)
+}
+
+// ParseAnsibleInventory reads an Ansible inventory file and returns a list of Hosts
+func ParseAnsibleInventory(file io.Reader) ([]Host, error) {
 	var hosts []Host
 	scanner := bufio.NewScanner(file)
 
@@ -40,6 +45,10 @@ func ParseAnsibleInventory(filename string) ([]Host, error) {
 		}
 
 		hosts = append(hosts, parsedHosts...)
+	}
+
+	if len(hosts) == 0 {
+		return nil, errors.New("no hosts found in inventory")
 	}
 
 	return hosts, scanner.Err()
@@ -90,8 +99,9 @@ func parseHostLine(line string) ([]Host, error) {
 					for i := startNum; i <= endNum; i += increment {
 						address := fmt.Sprintf("%s%d%s", prefix, i, suffix)
 						host := Host{
-							Address: address,
-							Port:    DefaultSSHPort,
+							Name: address,
+							Host: address,
+							Port: DefaultSSHPort,
 							Authentication: Authentication{
 								Protocol: AuthenticationProtocolSSH,
 								Username: DefaultSSHUsername,
@@ -107,8 +117,9 @@ func parseHostLine(line string) ([]Host, error) {
 						for c := startChar; c <= endChar; c += uint8(increment) {
 							address := fmt.Sprintf("%s%c%s", prefix, c, suffix)
 							host := Host{
-								Address: address,
-								Port:    DefaultSSHPort,
+								Name: address,
+								Host: address,
+								Port: DefaultSSHPort,
 								Authentication: Authentication{
 									Protocol: AuthenticationProtocolSSH,
 									Username: DefaultSSHUsername,
@@ -125,8 +136,9 @@ func parseHostLine(line string) ([]Host, error) {
 	} else {
 		// Single host
 		host := Host{
-			Address: hostPattern,
-			Port:    DefaultSSHPort,
+			Name: hostPattern,
+			Host: hostPattern, // This will be overridden by ansible_host if present
+			Port: DefaultSSHPort,
 			Authentication: Authentication{
 				Protocol: AuthenticationProtocolSSH,
 				Username: DefaultSSHUsername,
@@ -136,6 +148,7 @@ func parseHostLine(line string) ([]Host, error) {
 	}
 
 	// Parse ansible_* variables if present
+	ansibleHostFound := false
 	if len(parts) > 1 {
 		vars := parts[1]
 		for _, v := range strings.Fields(vars) {
@@ -148,23 +161,30 @@ func parseHostLine(line string) ([]Host, error) {
 			value := strings.Trim(strings.TrimSpace(kv[1]), "'\"")
 
 			// Apply variables to all hosts in range
-			for _, host := range hosts {
+			for idx := range hosts {
 				switch key {
+				case "ansible_host":
+					hosts[idx].Host = value
+					ansibleHostFound = true
 				case "ansible_user":
-					host.Authentication.Username = value
+					hosts[idx].Authentication.Username = value
 				case "ansible_port":
 					port, err := strconv.Atoi(value)
 					if err != nil {
 						return nil, err
 					}
-					host.Port = port
+					hosts[idx].Port = port
 				case "ansible_ssh_private_key_file":
-					host.Authentication.PrivateKeyFile = value
+					hosts[idx].Authentication.PrivateKeyFile = value
 				case "ansible_password":
-					host.Authentication.Password = value
+					hosts[idx].Authentication.Password = value
 				}
 			}
 		}
+	}
+
+	if !ansibleHostFound {
+		return nil, fmt.Errorf("ansible_host is required but not provided for host(s): %s", parts[0])
 	}
 
 	return hosts, nil

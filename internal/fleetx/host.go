@@ -1,7 +1,8 @@
 package fleetx
 
 type Host struct {
-	Address        string
+	Name           string
+	Host           string
 	Port           int
 	Authentication Authentication
 }

@@ -71,7 +71,7 @@ func (r *Runner) RunTask(ctx context.Context, host Host, task Task) (*TaskResult
 }
 
 func (r *Runner) runSSHTask(ctx context.Context, host Host, task Task) (*TaskResult, error) {
-	hostPort := net.JoinHostPort(host.Address, strconv.Itoa(host.Port))
+	hostPort := net.JoinHostPort(host.Host, strconv.Itoa(host.Port))
 	sshClient, err := ssh.Dial("tcp", hostPort, &ssh.ClientConfig{
 		User:            host.Authentication.Username,
 		Auth:            []ssh.AuthMethod{ssh.Password(host.Authentication.Password)},
@@ -120,7 +120,7 @@ func (r *Runner) runSSHTask(ctx context.Context, host Host, task Task) (*TaskRes
 }
 
 func (r *Runner) runWinRMITask(ctx context.Context, host Host, task Task) (*TaskResult, error) {
-	endpoint := winrm.NewEndpoint(host.Address, host.Port, false, false, nil, nil, nil, 0)
+	endpoint := winrm.NewEndpoint(host.Host, host.Port, false, false, nil, nil, nil, 0)
 	client, err := winrm.NewClient(endpoint, host.Authentication.Username, host.Authentication.Password)
 	if err != nil {
 		return nil, err
