@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,8 @@ import (
 	"encoding/base64"
 
 	"github.com/Mzack9999/gcache"
+	"github.com/mark3labs/mcp-go/mcp"
+	"github.com/mark3labs/mcp-go/server"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
@@ -180,6 +183,20 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 	}
 
+	if r.options.MCPMode {
+		var wgMcp sync.WaitGroup
+		wgMcp.Add(1)
+		go func() {
+			defer wgMcp.Done()
+
+			if err := r.mcpMode(ctx); err != nil {
+				gologger.Error().Msgf("Error in MCP mode: %v", err)
+			}
+		}()
+
+		wgMcp.Wait()
+	}
+
 	if r.options.AgentMode {
 		// automatically check and install required tools
 		for _, toolType := range types.AllTools {
@@ -324,11 +341,14 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 				gologger.Info().Msgf("Running task:\nId: %s\nTool: %s\nOptions: %+v\n", task.Id, task.Tool, task.Options)
 
+				runningTasks.Set(task.Id, struct{}{})
+
 				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
 				}
 				gologger.Info().Msgf("Task %s completed\n", task.Id)
 				_ = completedTasks.Set(task.Id, struct{}{})
+				runningTasks.Delete(task.Id)
 				pendingTasks.Delete(task.Id)
 			}(task)
 		}
@@ -429,6 +449,7 @@ var (
 			Expiration(time.Hour).
 			Build()
 	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
+	runningTasks = mapsutil.NewSyncLockMap[string, struct{}]()
 	queuedTasks  = make(chan *types.Task, 1024)
 )
 
@@ -1050,4 +1071,125 @@ func (r *Runner) renameAgent(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+// mcpMode manages the Model Context Protocol mode of the runner
+func (r *Runner) mcpMode(ctx context.Context) error {
+	gologger.Info().Msg("Running in MCP mode...")
+
+	s := server.NewMCPServer("PDTM Agent", "1.0.0",
+		server.WithResourceCapabilities(true, true),
+	)
+
+	createEnumTool := mcp.NewTool("create-enumeration",
+		mcp.WithDescription("Create a new enumeration or scan"),
+		mcp.WithString("name",
+			mcp.Description("Name of the enumeration"),
+			mcp.Required(),
+		),
+	)
+
+	s.AddTool(createEnumTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("Not implemented yet"), nil
+	})
+
+	createScanTool := mcp.NewTool("create-scan",
+		mcp.WithDescription("Create a new scan"),
+		mcp.WithString("name",
+			mcp.Description("Name of the scan"),
+			mcp.Required(),
+		),
+	)
+
+	s.AddTool(createScanTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return mcp.NewToolResultText("Not implemented yet"), nil
+	})
+
+	statusResource := mcp.NewResource(
+		"status://tasks",
+		"Tasks Status",
+		mcp.WithResourceDescription("Show all tasks status"),
+		mcp.WithMIMEType("text/plain"),
+	)
+
+	s.AddResource(statusResource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]interface{}, error) {
+		var output strings.Builder
+		output.WriteString("Queued Tasks:\n\n")
+		pendingTasks.Iterate(func(k string, v struct{}) error {
+			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+			return nil
+		})
+		output.WriteString("\nCompleted Tasks:\n\n")
+		for k, v := range completedTasks.GetALL(true) {
+			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+		}
+		output.WriteString("\nRunning Tasks:\n\n")
+		runningTasks.Iterate(func(k string, v struct{}) error {
+			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+			return nil
+		})
+
+		return []interface{}{
+			mcp.TextResourceContents{
+				Text: output.String(),
+			},
+		}, nil
+	})
+
+	enumerationsResource := mcp.NewResource(
+		"enumerations://export",
+		"Enumerations Export",
+		mcp.WithResourceDescription("Export all enumerations for the current user"),
+		mcp.WithMIMEType("application/json"),
+	)
+
+	s.AddResource(enumerationsResource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]interface{}, error) {
+		enums, err := r.exportEnumerations(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		return []interface{}{
+			mcp.TextResourceContents{
+				Text: string(enums),
+			},
+		}, nil
+	})
+
+	stdioServer := server.NewStdioServer(s)
+	stdioServer.SetErrorLogger(log.New(os.Stderr, "", log.LstdFlags))
+
+	return stdioServer.Listen(ctx, os.Stdin, os.Stdout)
+}
+
+// exportEnumerations fetches all enumerations for the current user
+func (r *Runner) exportEnumerations(ctx context.Context) ([]byte, error) {
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/export", pdcpauth.DefaultApiServer)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	if err != nil {
+		return nil, fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return body, nil
 }

@@ -1,12 +1,16 @@
 module github.com/projectdiscovery/pdtm-agent
 
-go 1.21
+go 1.23
+
+toolchain go1.24.0
 
 require (
 	github.com/Mzack9999/gcache v0.0.0-20230410081825-519e28eab057
 	github.com/charmbracelet/glamour v0.8.0
 	github.com/google/go-github v17.0.0+incompatible
 	github.com/kr/pretty v0.1.0
+	github.com/mark3labs/mcp-go v0.8.5
+	github.com/masterzen/winrm v0.0.0-20240702205601-3fad6e106085
 	github.com/projectdiscovery/goflags v0.1.64
 	github.com/projectdiscovery/gologger v1.1.39
 	github.com/projectdiscovery/utils v0.4.6
@@ -47,7 +51,7 @@ require (
 	github.com/gofrs/uuid v4.4.0+incompatible // indirect
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
-	github.com/google/uuid v1.3.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-uuid v1.0.3 // indirect
 	github.com/jcmturner/aescts/v2 v2.0.0 // indirect
@@ -62,7 +66,6 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20211012122336-39d0f177ccd0 // indirect
 	github.com/masterzen/simplexml v0.0.0-20190410153822-31eea3082786 // indirect
-	github.com/masterzen/winrm v0.0.0-20240702205601-3fad6e106085 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect

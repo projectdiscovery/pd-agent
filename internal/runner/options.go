@@ -59,6 +59,8 @@ type Options struct {
 	AgentTags   goflags.StringSlice
 	TodoUserId  string
 	AgentOutput string
+
+	MCPMode bool
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -110,7 +112,9 @@ func ParseOptions() *Options {
 		flagSet.StringVar(&options.AgentName, "agent-name", "pdtm-agent", "specify the name for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVarP(&options.TodoUserId, "todo-user-id", "tuid", "1", "specify the user id for the todo agent"),
+		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
 	)
+
 	if err := flagSet.Parse(); err != nil {
 		gologger.Fatal().Msgf("%s\n", err)
 	}
