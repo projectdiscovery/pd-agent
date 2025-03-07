@@ -11,8 +11,8 @@ func main() {
 	session := fleetx.Session{
 		Hosts: []fleetx.Host{
 			{
-				Address: "127.0.0.1",
-				Port:    22222,
+				Host: "127.0.0.1",
+				Port: 22222,
 				Authentication: fleetx.Authentication{
 					Protocol: fleetx.AuthenticationProtocolSSH,
 					Username: "root",

@@ -331,7 +331,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 				gologger.Info().Msgf("Running task:\nId: %s\nTool: %s\nOptions: %+v\n", task.Id, task.Tool, task.Options)
 
-				runningTasks.Set(task.Id, struct{}{})
+				_ = runningTasks.Set(task.Id, struct{}{})
 
 				if err := pkg.Run(ctx, task); err != nil {
 					gologger.Error().Msgf("Error executing task: %v", err)
@@ -1067,7 +1067,7 @@ func (r *Runner) renameAgent(ctx context.Context, name string) error {
 func (r *Runner) buildStatusString() string {
 	var output strings.Builder
 	output.WriteString("Queued Tasks:\n\n")
-	pendingTasks.Iterate(func(k string, v struct{}) error {
+	_ = pendingTasks.Iterate(func(k string, v struct{}) error {
 		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
 		return nil
 	})
@@ -1076,7 +1076,7 @@ func (r *Runner) buildStatusString() string {
 		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
 	}
 	output.WriteString("\nRunning Tasks:\n\n")
-	runningTasks.Iterate(func(k string, v struct{}) error {
+	_ = runningTasks.Iterate(func(k string, v struct{}) error {
 		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
 		return nil
 	})
