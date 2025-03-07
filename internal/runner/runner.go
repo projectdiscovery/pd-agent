@@ -1,7 +1,10 @@
 package runner
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +16,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"encoding/base64"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -1082,6 +1083,23 @@ func (r *Runner) buildStatusString() string {
 	return output.String()
 }
 
+// Add this type at the top with other types
+type EnumerationRequest struct {
+	RootDomains    []string `json:"root_domains"`
+	Steps          []string `json:"steps"`
+	Name           string   `json:"name"`
+	ExcludeTargets []string `json:"exclude_targets,omitempty"`
+	Ports          string   `json:"enumeration_ports,omitempty"`
+	Targets        []string `json:"enrichment_inputs,omitempty"`
+}
+
+// Add this type at the top with other types
+type ScanRequest struct {
+	Targets   []string `json:"targets"`
+	Templates []string `json:"templates"`
+	Name      string   `json:"name"`
+}
+
 // startHTTPServer starts the HTTP server with Echo framework
 func (r *Runner) startHTTPServer(ctx context.Context) error {
 	e := echo.New()
@@ -1096,14 +1114,78 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 
 	// Create enumeration endpoint
 	e.POST("/enumerations", func(c echo.Context) error {
-		// TODO: Implement enumeration creation
-		return c.String(http.StatusNotImplemented, "Not implemented yet")
+		var req EnumerationRequest
+		if err := c.Bind(&req); err != nil {
+			return c.String(http.StatusBadRequest, err.Error())
+		}
+
+		apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
+		}
+
+		body, err := json.Marshal(req)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error marshaling request: %v", err))
+		}
+
+		httpReq, err := http.NewRequestWithContext(c.Request().Context(), http.MethodPost, apiURL, bytes.NewReader(body))
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating request: %v", err))
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error making request: %v", err))
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error reading response: %v", err))
+		}
+
+		return c.JSONBlob(resp.StatusCode, respBody)
 	})
 
 	// Create scan endpoint
 	e.POST("/scans", func(c echo.Context) error {
-		// TODO: Implement scan creation
-		return c.String(http.StatusNotImplemented, "Not implemented yet")
+		var req ScanRequest
+		if err := c.Bind(&req); err != nil {
+			return c.String(http.StatusBadRequest, err.Error())
+		}
+
+		apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
+		}
+
+		body, err := json.Marshal(req)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error marshaling request: %v", err))
+		}
+
+		httpReq, err := http.NewRequestWithContext(c.Request().Context(), http.MethodPost, apiURL, bytes.NewReader(body))
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating request: %v", err))
+		}
+		httpReq.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(httpReq)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error making request: %v", err))
+		}
+		defer resp.Body.Close()
+
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return c.String(http.StatusInternalServerError, fmt.Sprintf("error reading response: %v", err))
+		}
+
+		return c.JSONBlob(resp.StatusCode, respBody)
 	})
 
 	// Export enumerations endpoint
