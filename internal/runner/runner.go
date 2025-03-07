@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -17,9 +16,9 @@ import (
 
 	"encoding/base64"
 
-	"github.com/Mzack9999/gcache"
-	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
+	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
@@ -184,17 +183,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if r.options.MCPMode {
-		var wgMcp sync.WaitGroup
-		wgMcp.Add(1)
-		go func() {
-			defer wgMcp.Done()
-
-			if err := r.mcpMode(ctx); err != nil {
-				gologger.Error().Msgf("Error in MCP mode: %v", err)
-			}
-		}()
-
-		wgMcp.Wait()
+		return r.startHTTPServer(ctx)
 	}
 
 	if r.options.AgentMode {
@@ -1073,93 +1062,75 @@ func (r *Runner) renameAgent(ctx context.Context, name string) error {
 	return nil
 }
 
-// mcpMode manages the Model Context Protocol mode of the runner
-func (r *Runner) mcpMode(ctx context.Context) error {
-	gologger.Info().Msg("Running in MCP mode...")
+// buildStatusString builds the status string for both resource and tool
+func (r *Runner) buildStatusString() string {
+	var output strings.Builder
+	output.WriteString("Queued Tasks:\n\n")
+	pendingTasks.Iterate(func(k string, v struct{}) error {
+		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+		return nil
+	})
+	output.WriteString("\nCompleted Tasks:\n\n")
+	for k, v := range completedTasks.GetALL(true) {
+		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+	}
+	output.WriteString("\nRunning Tasks:\n\n")
+	runningTasks.Iterate(func(k string, v struct{}) error {
+		output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
+		return nil
+	})
+	return output.String()
+}
 
-	s := server.NewMCPServer("PDTM Agent", "1.0.0",
-		server.WithResourceCapabilities(true, true),
-	)
+// startHTTPServer starts the HTTP server with Echo framework
+func (r *Runner) startHTTPServer(ctx context.Context) error {
+	e := echo.New()
+	e.HideBanner = true
+	e.Use(middleware.Logger())
+	e.Use(middleware.Recover())
 
-	createEnumTool := mcp.NewTool("create-enumeration",
-		mcp.WithDescription("Create a new enumeration or scan"),
-		mcp.WithString("name",
-			mcp.Description("Name of the enumeration"),
-			mcp.Required(),
-		),
-	)
-
-	s.AddTool(createEnumTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("Not implemented yet"), nil
+	// Get status endpoint
+	e.GET("/status", func(c echo.Context) error {
+		return c.String(http.StatusOK, r.buildStatusString())
 	})
 
-	createScanTool := mcp.NewTool("create-scan",
-		mcp.WithDescription("Create a new scan"),
-		mcp.WithString("name",
-			mcp.Description("Name of the scan"),
-			mcp.Required(),
-		),
-	)
-
-	s.AddTool(createScanTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		return mcp.NewToolResultText("Not implemented yet"), nil
+	// Create enumeration endpoint
+	e.POST("/enumerations", func(c echo.Context) error {
+		// TODO: Implement enumeration creation
+		return c.String(http.StatusNotImplemented, "Not implemented yet")
 	})
 
-	statusResource := mcp.NewResource(
-		"status://tasks",
-		"Tasks Status",
-		mcp.WithResourceDescription("Show all tasks status"),
-		mcp.WithMIMEType("text/plain"),
-	)
-
-	s.AddResource(statusResource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]interface{}, error) {
-		var output strings.Builder
-		output.WriteString("Queued Tasks:\n\n")
-		pendingTasks.Iterate(func(k string, v struct{}) error {
-			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
-			return nil
-		})
-		output.WriteString("\nCompleted Tasks:\n\n")
-		for k, v := range completedTasks.GetALL(true) {
-			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
-		}
-		output.WriteString("\nRunning Tasks:\n\n")
-		runningTasks.Iterate(func(k string, v struct{}) error {
-			output.WriteString(fmt.Sprintf("Task %s: %s\n", k, v))
-			return nil
-		})
-
-		return []interface{}{
-			mcp.TextResourceContents{
-				Text: output.String(),
-			},
-		}, nil
+	// Create scan endpoint
+	e.POST("/scans", func(c echo.Context) error {
+		// TODO: Implement scan creation
+		return c.String(http.StatusNotImplemented, "Not implemented yet")
 	})
 
-	enumerationsResource := mcp.NewResource(
-		"enumerations://export",
-		"Enumerations Export",
-		mcp.WithResourceDescription("Export all enumerations for the current user"),
-		mcp.WithMIMEType("application/json"),
-	)
-
-	s.AddResource(enumerationsResource, func(ctx context.Context, request mcp.ReadResourceRequest) ([]interface{}, error) {
+	// Export enumerations endpoint
+	e.GET("/enumerations/export", func(c echo.Context) error {
 		enums, err := r.exportEnumerations(ctx)
 		if err != nil {
-			return nil, err
+			return c.String(http.StatusInternalServerError, err.Error())
 		}
-
-		return []interface{}{
-			mcp.TextResourceContents{
-				Text: string(enums),
-			},
-		}, nil
+		return c.JSONBlob(http.StatusOK, enums)
 	})
 
-	stdioServer := server.NewStdioServer(s)
-	stdioServer.SetErrorLogger(log.New(os.Stderr, "", log.LstdFlags))
+	// Start server
+	go func() {
+		if err := e.Start(":54321"); err != nil && err != http.ErrServerClosed {
+			gologger.Error().Msgf("Error starting server: %v", err)
+		}
+	}()
 
-	return stdioServer.Listen(ctx, os.Stdin, os.Stdout)
+	// Handle graceful shutdown
+	<-ctx.Done()
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := e.Shutdown(shutdownCtx); err != nil {
+		gologger.Error().Msgf("Error shutting down server: %v", err)
+	}
+
+	return nil
 }
 
 // exportEnumerations fetches all enumerations for the current user
