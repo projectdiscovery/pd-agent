@@ -10,12 +10,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"crypto/sha256"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -37,14 +41,130 @@ import (
 
 var excludedToolList = []string{"nuclei-templates"}
 
+// Add these types at the top with other types
+type ScanCache struct {
+	LastExecuted time.Time `json:"last_executed"`
+	ConfigHash   string    `json:"config_hash"`
+}
+
+type LocalCache struct {
+	Scans        map[string]ScanCache `json:"scans"`
+	Enumerations map[string]ScanCache `json:"enumerations"`
+	mutex        sync.RWMutex
+}
+
+// Add these functions after the existing types
+func NewLocalCache() *LocalCache {
+	return &LocalCache{
+		Scans:        make(map[string]ScanCache),
+		Enumerations: make(map[string]ScanCache),
+	}
+}
+
+func (c *LocalCache) Save() error {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	data, err := json.Marshal(c)
+	if err != nil {
+		return fmt.Errorf("error marshaling cache: %v", err)
+	}
+
+	cacheDir := filepath.Join(tools.HomeDir, ".pdtm-agent")
+	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+		return fmt.Errorf("error creating cache directory: %v", err)
+	}
+
+	cacheFile := filepath.Join(cacheDir, "execution-cache.json")
+	return os.WriteFile(cacheFile, data, 0644)
+}
+
+func (c *LocalCache) Load() error {
+	cacheFile := filepath.Join(tools.HomeDir, ".pdtm-agent", "execution-cache.json")
+	data, err := os.ReadFile(cacheFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // No cache file yet, that's ok
+		}
+		return fmt.Errorf("error reading cache file: %v", err)
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	return json.Unmarshal(data, c)
+}
+
+func (c *LocalCache) HasScanBeenExecuted(id string, configHash string) bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if cache, exists := c.Scans[id]; exists {
+		return cache.ConfigHash == configHash
+	}
+	return false
+}
+
+func (c *LocalCache) HasEnumerationBeenExecuted(id string, configHash string) bool {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+
+	if cache, exists := c.Enumerations[id]; exists {
+		return cache.ConfigHash == configHash
+	}
+	return false
+}
+
+func (c *LocalCache) MarkScanExecuted(id string, configHash string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.Scans[id] = ScanCache{
+		LastExecuted: time.Now().UTC(),
+		ConfigHash:   configHash,
+	}
+	// Async save
+	go func() {
+		if err := c.Save(); err != nil {
+			gologger.Warning().Msgf("error saving cache: %v", err)
+		}
+	}()
+}
+
+func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	c.Enumerations[id] = ScanCache{
+		LastExecuted: time.Now().UTC(),
+		ConfigHash:   configHash,
+	}
+	// Async save
+	go func() {
+		if err := c.Save(); err != nil {
+			gologger.Warning().Msgf("error saving cache: %v", err)
+		}
+	}()
+}
+
 // Runner contains the internal logic of the program
 type Runner struct {
-	options *Options
+	options    *Options
+	localCache *LocalCache
 }
 
 // NewRunner instance
 func NewRunner(options *Options) (*Runner, error) {
-	return &Runner{options: options}, nil
+	r := &Runner{
+		options:    options,
+		localCache: NewLocalCache(),
+	}
+
+	if err := r.localCache.Load(); err != nil {
+		gologger.Warning().Msgf("error loading cache: %v", err)
+	}
+
+	return r, nil
 }
 
 // Run the instance
@@ -184,7 +304,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if r.options.MCPMode {
-		return r.startHTTPServer(ctx)
+		go r.startHTTPServer(ctx)
 	}
 
 	if r.options.AgentMode {
@@ -504,7 +624,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			// tmp
-			isPatched := stringsutil.EqualFoldAny(scanName, "test1 [pdtm-agent]", "test2 [pdtm-agent]")
+			isPatched := stringsutil.EqualFoldAny(scanName,
+				"claude [pdtm-agent]",
+			)
 			if isPatched {
 				isAssignedToagent = true
 				hasScanNameTag = true
@@ -528,7 +650,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			scheduleData := value.Get("schedule")
-			if !scheduleData.Exists() {
+			if !isPatched && !scheduleData.Exists() {
 				gologger.Verbose().Msgf("skipping scan %s as it has no schedule\n", scanName)
 				return true
 			}
@@ -565,6 +687,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			id := value.Get("scan_id").String()
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
+			// First check completed and pending tasks
 			if completedTasks.Has(metaId) {
 				gologger.Verbose().Msgf("skipping scan %s as it's already completed recently\n", scanName)
 				return true
@@ -575,15 +698,14 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			}
 
-			// Fetch scan config for each scan
+			// Fetch minimal config first to compute hash
 			scanConfig, err := r.fetchScanConfig(id, r.options.TodoUserId)
 			if err != nil {
 				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
+				return true
 			}
 
-			// Fetch each single scan configuration
-			// - Templates
-			// - Scan Configuration (Headers, Variables, Interactsh)
+			// Continue with full config processing
 			scanConfigIds := make(map[string]string)
 			gjson.Parse(scanConfig).Get("scan_config_ids").ForEach(func(key, value gjson.Result) bool {
 				id := value.Get("id").String()
@@ -653,6 +775,15 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			})
 
+			// Compute hash of the entire configuration
+			configHash := computeScanConfigHash(finalConfig, templates, assets)
+
+			// Skip if this exact configuration was already executed
+			if r.localCache.HasScanBeenExecuted(id, configHash) && !scheduleData.Exists() {
+				gologger.Verbose().Msgf("skipping scan %s as it was already executed with same configuration\n", scanName)
+				return true
+			}
+
 			gologger.Info().Msgf("scan %s enqueued...\n", scanName)
 
 			task := &types.Task{
@@ -674,6 +805,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 			_ = pendingTasks.Set(metaId, struct{}{})
 
 			queuedTasks <- task
+
+			// After queueing the task, mark it as executed
+			r.localCache.MarkScanExecuted(id, configHash)
 
 			return true
 		})
@@ -764,7 +898,26 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			agentId := value.Get("pdtm_agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentName
 
-			if !isAssignedToagent && !hasScanNameTag {
+			// we also check if it has any tag in name
+			var hasTagInName bool
+			for _, tag := range r.options.AgentTags {
+				if strings.Contains(scanName, "["+tag+"]") {
+					hasTagInName = true
+					break
+				}
+			}
+
+			// tmp
+			isPatched := stringsutil.EqualFoldAny(scanName,
+				"claude [pdtm-agent]",
+			)
+
+			if isPatched {
+				isAssignedToagent = true
+				hasScanNameTag = true
+			}
+
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
 				return true
 			}
@@ -782,7 +935,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			}
 
 			scheduleData := value.Get("schedule")
-			if !scheduleData.Exists() {
+			if !isPatched && !scheduleData.Exists() {
 				gologger.Verbose().Msgf("skipping enumeration %s as it has no schedule\n", scanName)
 				return true
 			}
@@ -807,8 +960,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			// we accept up to 10 minutes before/after the scheduled time
 			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
-			// TODO: remove this
-			// isInRange = true
+			if isPatched {
+				isInRange = true
+			}
 
 			if !targetExecutionTime.IsZero() && !isInRange {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
@@ -818,6 +972,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			id := value.Get("id").String()
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
+			// First check completed and pending tasks
 			if completedTasks.Has(metaId) {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", scanName)
 				return true
@@ -828,14 +983,14 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				return true
 			}
 
-			// Fetch scan config for each scan
+			// Fetch minimal config first
 			scanConfig, err := r.fetchEnumerationConfig(id, r.options.TodoUserId)
 			if err != nil {
-				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
+				gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", id, err)
+				return true
 			}
 
-			// Fetch assets if enumeration ID is defined
-			// gets assets from enumeration id
+			// Get basic info needed for hash
 			var assets []string
 			gjson.Parse(scanConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
 				assets = append(assets, value.String())
@@ -852,8 +1007,18 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				return true
 			})
 
+			// Compute hash early
+			configHash := computeEnumerationConfigHash(scanConfig, steps, assets)
+
+			// Check cache before proceeding
+			if r.localCache.HasEnumerationBeenExecuted(id, configHash) && !scheduleData.Exists() {
+				gologger.Verbose().Msgf("skipping enumeration %s as it was already executed with same configuration\n", scanName)
+				return true
+			}
+
 			gologger.Info().Msgf("enumeration %s enqueued...\n", scanName)
 
+			// Continue with task creation
 			task := &types.Task{
 				Tool: types.Nuclei,
 				Options: types.Options{
@@ -872,6 +1037,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			_ = pendingTasks.Set(metaId, struct{}{})
 
 			queuedTasks <- task
+
+			// After queueing the task, mark it as executed
+			r.localCache.MarkEnumerationExecuted(id, configHash)
 
 			return true
 		})
@@ -1085,8 +1253,8 @@ func (r *Runner) buildStatusString() string {
 
 // Add this type at the top with other types
 type EnumerationRequest struct {
-	RootDomains    []string `json:"root_domains"`
-	Steps          []string `json:"steps"`
+	RootDomains    []string `json:"root_domains,omitempty"`
+	Steps          []string `json:"steps,omitempty"`
 	Name           string   `json:"name"`
 	ExcludeTargets []string `json:"exclude_targets,omitempty"`
 	Ports          string   `json:"enumeration_ports,omitempty"`
@@ -1197,22 +1365,31 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 		return c.JSONBlob(http.StatusOK, enums)
 	})
 
-	// Start server
+	// Create a channel to signal server errors
+	serverErr := make(chan error, 1)
+
+	// Start server in a goroutine
 	go func() {
-		if err := e.Start(":54321"); err != nil && err != http.ErrServerClosed {
-			gologger.Error().Msgf("Error starting server: %v", err)
+		if err := e.Start("localhost:54321"); err != nil && err != http.ErrServerClosed {
+			serverErr <- err
 		}
 	}()
 
-	// Handle graceful shutdown
-	<-ctx.Done()
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := e.Shutdown(shutdownCtx); err != nil {
-		gologger.Error().Msgf("Error shutting down server: %v", err)
-	}
+	// Wait for either context cancellation or server error
+	select {
+	case err := <-serverErr:
+		return fmt.Errorf("server error: %v", err)
+	case <-ctx.Done():
+		// Context was cancelled, shutdown gracefully
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 
-	return nil
+		if err := e.Shutdown(shutdownCtx); err != nil {
+			return fmt.Errorf("error during server shutdown: %v", err)
+		}
+		gologger.Info().Msg("HTTP server shutdown gracefully")
+		return nil
+	}
 }
 
 // exportEnumerations fetches all enumerations for the current user
@@ -1245,4 +1422,35 @@ func (r *Runner) exportEnumerations(ctx context.Context) ([]byte, error) {
 	}
 
 	return body, nil
+}
+
+// Add these functions to compute config hashes
+func computeScanConfigHash(scanConfig string, templates []string, assets []string) string {
+	h := sha256.New()
+
+	// Sort arrays to ensure consistent hashing
+	sort.Strings(templates)
+	sort.Strings(assets)
+
+	// Write all components to hash
+	h.Write([]byte(scanConfig))
+	h.Write([]byte(strings.Join(templates, ",")))
+	h.Write([]byte(strings.Join(assets, ",")))
+
+	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+func computeEnumerationConfigHash(scanConfig string, steps []string, assets []string) string {
+	h := sha256.New()
+
+	// Sort arrays to ensure consistent hashing
+	sort.Strings(steps)
+	sort.Strings(assets)
+
+	// Write all components to hash
+	h.Write([]byte(scanConfig))
+	h.Write([]byte(strings.Join(steps, ",")))
+	h.Write([]byte(strings.Join(assets, ",")))
+
+	return fmt.Sprintf("%x", h.Sum(nil))
 }

@@ -128,28 +128,40 @@ func main() {
 				for contentType, mediaType := range operation.RequestBody.Value.Content {
 					if strings.Contains(contentType, "json") && mediaType.Schema != nil && mediaType.Schema.Value != nil {
 						for propName, prop := range mediaType.Schema.Value.Properties {
+							log.Printf("processing body parameter: %s", propName)
 							if prop.Value != nil {
-								switch prop.Value.Type {
-								case "string":
-									toolOpts = append(toolOpts, mcp.WithString(propName,
+								var toolOpt mcp.ToolOption
+								switch {
+								case prop.Value.Type == "array" && prop.Value.Items != nil && prop.Value.Items.Value.Type == "string":
+									// Handle arrays as comma-separated strings
+									toolOpt = mcp.WithString(propName,
+										mcp.Description(prop.Value.Description+" (comma-separated list)"),
+										mcp.Required(),
+									)
+								case prop.Value.Type == "string":
+									toolOpt = mcp.WithString(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
-									))
-								case "integer", "number":
-									toolOpts = append(toolOpts, mcp.WithNumber(propName,
+									)
+								case prop.Value.Type == "integer" || prop.Value.Type == "number":
+									toolOpt = mcp.WithNumber(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
-									))
-								case "boolean":
-									toolOpts = append(toolOpts, mcp.WithString(propName,
+									)
+								case prop.Value.Type == "boolean":
+									toolOpt = mcp.WithString(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
-									))
+									)
 								}
-								toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %s",
-									propName,
-									prop.Value.Description,
-									prop.Value.Type))
+								if toolOpt != nil {
+									toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %s | Required: %v",
+										propName,
+										prop.Value.Description,
+										prop.Value.Type,
+										prop.Value.Required))
+									toolOpts = append(toolOpts, toolOpt)
+								}
 							}
 						}
 					}
@@ -183,7 +195,26 @@ func main() {
 
 				// If this is a POST/PUT/PATCH, add request body
 				if operation.RequestBody != nil && (method == "POST" || method == "PUT" || method == "PATCH") {
-					body, err := json.Marshal(request.Params.Arguments)
+					requestBody := make(map[string]interface{})
+					for key, value := range request.Params.Arguments {
+						// Check if this parameter is defined as an array in the schema
+						if strValue, ok := value.(string); ok {
+							if mediaType := operation.RequestBody.Value.Content["application/json"]; mediaType != nil {
+								if prop, ok := mediaType.Schema.Value.Properties[key]; ok && prop.Value.Type == "array" {
+									// Split comma-separated string into array, trimming spaces
+									values := strings.Split(strValue, ",")
+									for i := range values {
+										values[i] = strings.TrimSpace(values[i])
+									}
+									requestBody[key] = values
+									continue
+								}
+							}
+						}
+						requestBody[key] = value
+					}
+
+					body, err := json.Marshal(requestBody)
 					if err != nil {
 						return mcp.NewToolResultError(fmt.Sprintf("Failed to marshal request body: %v", err)), nil
 					}

@@ -3,3 +3,7 @@ dist/
 .idea
 .vscode
 .devcontainer
+
+cmd/openapi-mcp/openapi-mcp
+cmd/fleetx/fleetx
+cmd/pdtm-agent/pdtm-agent
