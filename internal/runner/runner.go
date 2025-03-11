@@ -304,7 +304,11 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 
 	if r.options.MCPMode {
-		go r.startHTTPServer(ctx)
+		go func() {
+			if err := r.startHTTPServer(ctx); err != nil {
+				gologger.Error().Msgf("error starting http server: %v", err)
+			}
+		}()
 	}
 
 	if r.options.AgentMode {
