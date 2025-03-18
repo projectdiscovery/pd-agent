@@ -14,7 +14,7 @@ Run pdtm-agent from https://github.com/projectdiscovery/pdtm-agent/pull/1 in mcp
 PDCP_API_KEY=xxx PDCP_TEAM_ID=yyy PDCP_API_SERVER=https://api.dev.projectdiscovery.io PUNCH_HOLE_HOST=127.0.0.1 PUNCH_HOLE_HTTP_PORT=8880 go run . -agent -agent-output test -mcp
 ```
 
-## Claude Setup
+## Claude Destkop Setup
 - Edit if existing or create `claude_desktop_config.json` in `/Users/<username>/Library/Application Support/Claude`
 
 Compile `openapi-mcp` in `cmd/openapi-mcp`
@@ -39,7 +39,49 @@ Adjust the path of `command` and `open-api` config file in the json:
 }
 ```
 
-## Example dialogues with Claude:
+## Claude Code CLI Setup
+From shell run:
+
+```
+$ claude mcp add
+```
+
+Insert the mcp name `openapi-mcp` then hit enter.
+Insert the full absolute path of the binary `/path/to/openapi-mcp` then hit enter.
+Insert the full command line args as follows then hit enter:
+```
+-openapi "/path/to/open-api/yaml/openapi-pdtm.yaml" -url http://localhost:54321
+```
+Set the scope as global and hit enter.
+
+If you run:
+```
+claude mcp list you should get the following:
+```
+mzack@MacBookPro pdtm-agent % claude mcp list
+openapi-mcp: /Users/mzack/go/src/github.com/projectdiscovery/pdtm-agent/cmd/openapi-mcp/openapi-mcp -openapi /Users/mzack/go/src/github.com/projectdiscovery/pdtm-agent/cmd/openapi-mcp/openapi-pdtm.yaml -url http://localhost:54321
+```
+
+Example interaction:
+```
+mzack@MacBookPro pdtm-agent % claude "can you tell me the pdtm tasks statuses via openapi-mcp?"
+⏺ I'll use the configured OpenAPI MCP endpoint to get the status.
+
+⏺ openapi-mcp:get-status (MCP)
+  ⎿  Queued Tasks:
+
+
+     Completed Tasks:
+
+     Task cu3ar3q4cd5s738tqof0-2025-03-18 18:40:00 +0000 UTC: {}
+     Task cv84dtpp47mc7383jj6g-0001-01-01 00:00:00 +0000 UTC: {}
+     Task cv83km1p47mc7383jj5g-0001-01-01 00:00:00 +0000 UTC: {}
+
+     Running Tasks:
+```
+
+
+## Example dialogues with Claude Desktop:
 ```
 Prompt:
 I want to make a scan of targets:
