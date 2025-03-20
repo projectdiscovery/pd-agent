@@ -13,6 +13,7 @@ import (
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	updateutils "github.com/projectdiscovery/utils/update"
+	"github.com/rs/xid"
 )
 
 var au *aurora.Aurora
@@ -55,7 +56,7 @@ type Options struct {
 	TeamID           string
 
 	AgentMode   bool
-	AgentName   string
+	AgentId     string
 	AgentTags   goflags.StringSlice
 	TodoUserId  string
 	AgentOutput string
@@ -109,7 +110,7 @@ func ParseOptions() *Options {
 		flagSet.StringVarP(&options.TeamID, "team-id", "tid", TeamIDEnv, "upload asset results to given team id (optional)"),
 		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
-		flagSet.StringVar(&options.AgentName, "agent-name", "pdtm-agent", "specify the name for the agent"),
+		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVarP(&options.TodoUserId, "todo-user-id", "tuid", "1", "specify the user id for the todo agent"),
 		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
@@ -170,6 +171,10 @@ func ParseOptions() *Options {
 		PDCPApiKey = apikey
 	} else {
 		PDCPApiKey = creds.APIKey
+	}
+
+	if options.AgentId == "" {
+		options.AgentId = xid.New().String()
 	}
 
 	return options

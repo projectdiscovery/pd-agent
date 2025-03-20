@@ -17,6 +17,7 @@ require (
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.46
 	github.com/projectdiscovery/utils v0.4.13
+	github.com/rs/xid v1.5.0
 	github.com/stretchr/testify v1.10.0
 	github.com/tidwall/gjson v1.14.3
 	golang.org/x/crypto v0.31.0

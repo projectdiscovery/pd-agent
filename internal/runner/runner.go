@@ -340,8 +340,8 @@ func (r *Runner) Run(ctx context.Context) error {
 
 		var infoMessage strings.Builder
 		infoMessage.WriteString("running in agent mode")
-		if r.options.AgentName != "" {
-			infoMessage.WriteString(fmt.Sprintf(" with name %s", r.options.AgentName))
+		if r.options.AgentId != "" {
+			infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
 		}
 		if len(r.options.AgentTags) > 0 {
 			infoMessage.WriteString(fmt.Sprintf(" (tags: %s)", strings.Join(r.options.AgentTags, ",")))
@@ -614,9 +614,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// since we have no control over platform-backend or product evolution
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
+			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
 			agentId := value.Get("pdtm_agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentName
+			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
 			var hasTagInName bool
@@ -637,7 +637,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
-				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentName)
+				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
 				return true
 			}
 
@@ -898,9 +898,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			// since we have no control over platform-backend or product evolution
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentName+"]")
+			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
 			agentId := value.Get("pdtm_agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentName
+			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
 			var hasTagInName bool
@@ -922,7 +922,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			}
 
 			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
 				return true
 			}
 
@@ -1121,7 +1121,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 	q := req.URL.Query()
 	q.Add("os", runtime.GOOS)
 	q.Add("arch", runtime.GOARCH)
-	q.Add("id", r.options.AgentName)
+	q.Add("id", r.options.AgentId)
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(r.options.AgentTags, ","))
 	req.URL.RawQuery = q.Encode()
@@ -1153,8 +1153,8 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 	}
 	time.Sleep(time.Second)
 	if first {
-		if r.options.AgentName != "" {
-			if err := r.renameAgent(ctx, r.options.AgentName); err != nil {
+		if r.options.AgentId != "" {
+			if err := r.renameAgent(ctx, r.options.AgentId); err != nil {
 				gologger.Error().Msgf("error renaming agent: %v", err)
 			}
 		}
@@ -1174,7 +1174,7 @@ func (r *Runner) Out(ctx context.Context) error {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
 	q := req.URL.Query()
-	q.Add("id", r.options.AgentName)
+	q.Add("id", r.options.AgentId)
 	q.Add("type", "agent")
 	req.URL.RawQuery = q.Encode()
 	resp, err := client.Do(req)
@@ -1207,7 +1207,7 @@ func (r *Runner) renameAgent(ctx context.Context, name string) error {
 	}
 
 	q := req.URL.Query()
-	q.Add("id", r.options.AgentName)
+	q.Add("id", r.options.AgentId)
 	q.Add("name", name)
 	q.Add("type", "agent")
 	req.URL.RawQuery = q.Encode()
