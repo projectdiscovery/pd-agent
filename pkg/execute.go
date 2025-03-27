@@ -149,7 +149,7 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), "", os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
 	if err != nil {
 		return "", err
 	}
@@ -182,7 +182,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), "", os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
 	if err != nil {
 		return "", err
 	}

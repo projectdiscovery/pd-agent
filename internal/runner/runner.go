@@ -469,9 +469,9 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	}
 }
 
-func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/config?user_id=%s", pdcpauth.DefaultApiServer, scanID, todoUserId)
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+func (r *Runner) fetchScanConfig(scanID string) (string, error) {
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pdcpauth.DefaultApiServer, scanID)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -497,7 +497,7 @@ func (r *Runner) fetchScanConfig(scanID, todoUserId string) (string, error) {
 
 func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
 	apiURL := fmt.Sprintf("%s/v1/scans/config/%s", pdcpauth.DefaultApiServer, scanConfigId)
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -523,7 +523,7 @@ func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
 
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
 	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -571,7 +571,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving scans...")
 	apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -615,7 +615,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("pdtm_agent_id").String()
+			agentId := value.Get("worker_id").String()
 			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
@@ -625,15 +625,6 @@ func (r *Runner) getScans(ctx context.Context) error {
 					hasTagInName = true
 					break
 				}
-			}
-
-			// tmp
-			isPatched := stringsutil.EqualFoldAny(scanName,
-				"claude [pdtm-agent]",
-			)
-			if isPatched {
-				isAssignedToagent = true
-				hasScanNameTag = true
 			}
 
 			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
@@ -654,38 +645,31 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			scheduleData := value.Get("schedule")
-			if !isPatched && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping scan %s as it has no schedule\n", scanName)
-				return true
-			}
+			if scheduleData.Exists() {
+				nextRun := scheduleData.Get("schedule_next_run").String()
+				if nextRun != "" {
+					nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing next run time: %v", err)
+						return true
+					}
+					if !targetExecutionTime.IsZero() {
+						targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+					} else {
+						targetExecutionTime = nextRunTime
+					}
+				}
 
-			nextRun := scheduleData.Get("schedule_next_run").String()
-			if nextRun != "" {
-				nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-				if err != nil {
-					gologger.Error().Msgf("Error parsing next run time: %v", err)
+				now := time.Now().UTC()
+
+				// Skip if the combined execution time is in the future
+				// we accept up to 10 minutes before/after the scheduled time
+				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
+
+				if !targetExecutionTime.IsZero() && !isInRange {
+					gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 					return true
 				}
-				if !targetExecutionTime.IsZero() {
-					targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-				} else {
-					targetExecutionTime = nextRunTime
-				}
-			}
-
-			now := time.Now().UTC()
-
-			// Skip if the combined execution time is in the future
-			// we accept up to 10 minutes before/after the scheduled time
-			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-			if isPatched {
-				isInRange = true
-			}
-
-			if !targetExecutionTime.IsZero() && !isInRange {
-				gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
-				return true
 			}
 
 			id := value.Get("scan_id").String()
@@ -703,7 +687,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			// Fetch minimal config first to compute hash
-			scanConfig, err := r.fetchScanConfig(id, r.options.TodoUserId)
+			scanConfig, err := r.fetchScanConfig(id)
 			if err != nil {
 				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
 				return true
@@ -855,7 +839,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving enumerations...")
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -899,7 +883,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("pdtm_agent_id").String()
+			agentId := value.Get("worker_id").String()
 			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
@@ -909,16 +893,6 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					hasTagInName = true
 					break
 				}
-			}
-
-			// tmp
-			isPatched := stringsutil.EqualFoldAny(scanName,
-				"claude [pdtm-agent]",
-			)
-
-			if isPatched {
-				isAssignedToagent = true
-				hasScanNameTag = true
 			}
 
 			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
@@ -939,38 +913,31 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			}
 
 			scheduleData := value.Get("schedule")
-			if !isPatched && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping enumeration %s as it has no schedule\n", scanName)
-				return true
-			}
+			if scheduleData.Exists() {
+				nextRun := scheduleData.Get("schedule_next_run").String()
+				if nextRun != "" {
+					nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing next run time: %v", err)
+						return true
+					}
+					if !targetExecutionTime.IsZero() {
+						targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+					} else {
+						targetExecutionTime = nextRunTime
+					}
+				}
 
-			nextRun := scheduleData.Get("schedule_next_run").String()
-			if nextRun != "" {
-				nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-				if err != nil {
-					gologger.Error().Msgf("Error parsing next run time: %v", err)
+				now := time.Now().UTC()
+
+				// Skip if the combined execution time is in the future
+				// we accept up to 10 minutes before/after the scheduled time
+				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
+
+				if !targetExecutionTime.IsZero() && !isInRange {
+					gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 					return true
 				}
-				if !targetExecutionTime.IsZero() {
-					targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-				} else {
-					targetExecutionTime = nextRunTime
-				}
-			}
-
-			now := time.Now().UTC()
-
-			// Skip if the combined execution time is in the future
-			// we accept up to 10 minutes before/after the scheduled time
-			isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-			if isPatched {
-				isInRange = true
-			}
-
-			if !targetExecutionTime.IsZero() && !isInRange {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
-				return true
 			}
 
 			id := value.Get("id").String()
@@ -988,7 +955,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			}
 
 			// Fetch minimal config first
-			scanConfig, err := r.fetchEnumerationConfig(id, r.options.TodoUserId)
+			scanConfig, err := r.fetchEnumerationConfig(id)
 			if err != nil {
 				gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", id, err)
 				return true
@@ -1055,9 +1022,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) fetchEnumerationConfig(enumerationId, todoUserId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config?user_id=%s", pdcpauth.DefaultApiServer, enumerationId, todoUserId)
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config", pdcpauth.DefaultApiServer, enumerationId)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -1093,7 +1060,7 @@ func (r *Runner) In(ctx context.Context) error {
 	}()
 
 	// Run first time to register
-	if err := r.inFunctionTickCallback(ctx, true); err != nil {
+	if err := r.inFunctionTickCallback(ctx); err != nil {
 		return err
 	}
 
@@ -1102,7 +1069,7 @@ func (r *Runner) In(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if err := r.inFunctionTickCallback(ctx, false); err != nil {
+			if err := r.inFunctionTickCallback(ctx); err != nil {
 				return err
 			}
 		}
@@ -1111,7 +1078,7 @@ func (r *Runner) In(ctx context.Context) error {
 
 var isRegistered bool
 
-func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
+func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	endpoint := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
@@ -1126,7 +1093,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 	q.Add("tags", strings.Join(r.options.AgentTags, ","))
 	req.URL.RawQuery = q.Encode()
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -1151,14 +1118,6 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context, first bool) error {
 			isRegistered = true
 		}
 	}
-	time.Sleep(time.Second)
-	if first {
-		if r.options.AgentId != "" {
-			if err := r.renameAgent(ctx, r.options.AgentId); err != nil {
-				gologger.Error().Msgf("error renaming agent: %v", err)
-			}
-		}
-	}
 	return nil
 }
 
@@ -1169,7 +1128,7 @@ func (r *Runner) Out(ctx context.Context) error {
 		log.Printf("failed to create request: %v", err)
 		return err
 	}
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -1212,7 +1171,7 @@ func (r *Runner) renameAgent(ctx context.Context, name string) error {
 	q.Add("type", "agent")
 	req.URL.RawQuery = q.Encode()
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return fmt.Errorf("error creating authenticated client: %v", err)
 	}
@@ -1292,7 +1251,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 		}
 
 		apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
-		client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
 		}
@@ -1330,7 +1289,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 		}
 
 		apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
-		client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
 		}
@@ -1400,7 +1359,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 func (r *Runner) exportEnumerations(ctx context.Context) ([]byte, error) {
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/export", pdcpauth.DefaultApiServer)
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, r.options.TodoUserId, PDCPApiKey)
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)
 	}

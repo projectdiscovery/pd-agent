@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-func CreateAuthenticatedClient(teamID, userId, pdcpApiKey string) (*http.Client, error) {
+func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) {
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -20,9 +20,6 @@ func CreateAuthenticatedClient(teamID, userId, pdcpApiKey string) (*http.Client,
 	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		req.Header.Set("X-Api-Key", pdcpApiKey)
 		req.Header.Set("X-Team-Id", teamID)
-		q := req.URL.Query()
-		q.Add("user_id", userId)
-		req.URL.RawQuery = q.Encode()
 		return transport.RoundTrip(req)
 	})
 

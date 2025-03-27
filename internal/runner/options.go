@@ -58,7 +58,6 @@ type Options struct {
 	AgentMode   bool
 	AgentId     string
 	AgentTags   goflags.StringSlice
-	TodoUserId  string
 	AgentOutput string
 
 	MCPMode bool
@@ -112,7 +111,6 @@ func ParseOptions() *Options {
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
-		flagSet.StringVarP(&options.TodoUserId, "todo-user-id", "tuid", "1", "specify the user id for the todo agent"),
 		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
 	)
 
