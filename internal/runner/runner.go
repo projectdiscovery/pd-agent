@@ -31,7 +31,6 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
-	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	stringsutil "github.com/projectdiscovery/utils/strings"
@@ -470,7 +469,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 }
 
 func (r *Runner) fetchScanConfig(scanID string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pdcpauth.DefaultApiServer, scanID)
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pkg.PCDPApiServer, scanID)
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
@@ -496,7 +495,7 @@ func (r *Runner) fetchScanConfig(scanID string) (string, error) {
 }
 
 func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/config/%s", pdcpauth.DefaultApiServer, scanConfigId)
+	apiURL := fmt.Sprintf("%s/v1/scans/config/%s", pkg.PCDPApiServer, scanConfigId)
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
@@ -522,7 +521,7 @@ func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
 }
 
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pdcpauth.DefaultApiServer, enumerationID)
+	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pkg.PCDPApiServer, enumerationID)
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return nil, fmt.Errorf("error creating authenticated client: %v", err)
@@ -569,7 +568,7 @@ var (
 
 func (r *Runner) getScans(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving scans...")
-	apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
+	apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -743,6 +742,8 @@ func (r *Runner) getScans(ctx context.Context) error {
 			})
 
 			// gets assets from enumeration id
+
+			// first gets asset with generic scan config
 			var assets []string
 			for _, enumerationID := range enumerationIDs {
 				asset, err := r.fetchAssets(enumerationID)
@@ -751,6 +752,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				}
 				assets = append(assets, strings.Split(string(asset), "\n")...)
 			}
+
 			// gets assets from scan config
 			gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
 				assets = append(assets, value.String())
@@ -837,7 +839,7 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 
 func (r *Runner) getEnumerations(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving enumerations...")
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -1023,7 +1025,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 }
 
 func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config", pdcpauth.DefaultApiServer, enumerationId)
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config", pkg.PCDPApiServer, enumerationId)
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
 		return "", fmt.Errorf("error creating authenticated client: %v", err)
@@ -1250,7 +1252,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 			return c.String(http.StatusBadRequest, err.Error())
 		}
 
-		apiURL := fmt.Sprintf("%s/v1/asset/enumerate", PCDPApiServer)
+		apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
 		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
@@ -1288,7 +1290,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 			return c.String(http.StatusBadRequest, err.Error())
 		}
 
-		apiURL := fmt.Sprintf("%s/v1/scans", PCDPApiServer)
+		apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
 		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error creating client: %v", err))
@@ -1357,7 +1359,7 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 
 // exportEnumerations fetches all enumerations for the current user
 func (r *Runner) exportEnumerations(ctx context.Context) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/export", pdcpauth.DefaultApiServer)
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/export", pkg.PCDPApiServer)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {

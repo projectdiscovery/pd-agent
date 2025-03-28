@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -15,8 +16,8 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
-	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
 	"github.com/projectdiscovery/utils/conversion"
+	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	"github.com/tidwall/gjson"
@@ -135,12 +136,13 @@ func getToolsFromSteps(steps []string) []string {
 }
 
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
+	log.Printf("uploading to cloud: %s", outputFile)
 	f, err := os.Open(outputFile)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	apiURL := fmt.Sprintf("%s/v1/assets", pdcpauth.DefaultApiServer)
+	apiURL := fmt.Sprintf("%s/v1/assets", PCDPApiServer)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, f)
 	if err != nil {
 		return "", err
@@ -173,7 +175,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 		return "", err
 	}
 	defer f.Close()
-	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", pdcpauth.DefaultApiServer, assetId)
+	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", PCDPApiServer, assetId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, f)
 	if err != nil {
 		return "", err
@@ -202,6 +204,8 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	args = append(args, task.Tool.String())
 	if len(task.Options.Templates) > 0 {
 		args = append(args, "-templates", strings.Join(task.Options.Templates, ","))
+		// ODO: temporary to have some results
+		// args = append(args, "-id", "http-missing-security-headers")
 	}
 
 	if task.Options.TeamID != "" {
@@ -220,7 +224,7 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	}
 
 	if task.Options.ScanID != "" || task.Options.TeamID != "" {
-		envs = getEnvs(task)
+		envs = getEnvs()
 		args = append(args,
 			"-dashboard",
 			"-scan-id", task.Options.ScanID,
@@ -271,10 +275,12 @@ func prepareInput(task *types.Task) (
 	return tmpInputFile, tmpConfigFile, removeFunc, nil
 }
 
-func getEnvs(task *types.Task) []string {
+func getEnvs() []string {
+	defaultPDCPDashboardURL := envutil.GetEnvOrDefault("PDCP_DASHBOARD_URL", "https://cloud.projectdiscovery.io")
+	defaultPDCPAPIServer := envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
 	envs := []string{
-		"PDCP_DASHBOARD_URL=https://cloud.projectdiscovery.io",
-		"PDCP_API_SERVER=https://api.dev.projectdiscovery.io",
+		"PDCP_DASHBOARD_URL=" + defaultPDCPDashboardURL,
+		"PDCP_API_SERVER=" + defaultPDCPAPIServer,
 		"PDCP_API_KEY=" + os.Getenv("PDCP_API_KEY"),
 		"HOME=" + os.Getenv("HOME"),
 		"PDCP_TEAM_ID=" + os.Getenv("PDCP_TEAM_ID"),
@@ -326,7 +332,7 @@ func runCommand(ctx context.Context, envs, args []string) error {
 }
 
 func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(), err error) {
-	envs = getEnvs(task)
+	envs = getEnvs()
 
 	args = append(args, task.Tool.String())
 
