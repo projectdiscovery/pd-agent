@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
@@ -290,6 +291,10 @@ func getEnvs() []string {
 
 func runCommand(ctx context.Context, envs, args []string) error {
 	gologger.Info().Msgf("Running:\nCMD: %s\nENVS: %s\nARGS: %s", args[0], envs, args)
+
+	time.Sleep(time.Second * 5)
+
+	return nil
 
 	// Prepare the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)

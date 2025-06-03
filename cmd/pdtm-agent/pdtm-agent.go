@@ -28,6 +28,7 @@ func main() {
 	go func() {
 		<-c
 		fmt.Println("\r- Ctrl+C pressed in Terminal, Exiting...")
+		os.Exit(0)
 		pdtmRunner.Close()
 		cancel()
 	}()
