@@ -33,6 +33,7 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
+	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	syncutil "github.com/projectdiscovery/utils/sync"
 	"github.com/tidwall/gjson"
@@ -626,7 +627,18 @@ func (r *Runner) getScans(ctx context.Context) error {
 				}
 			}
 
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
+			// we check if worker tag matches
+			var hasWorkerTag bool
+			if value.Get("worker_tags").Exists() {
+				value.Get("worker_tags").ForEach(func(key, value gjson.Result) bool {
+					if sliceutil.Contains(r.options.AgentTags, value.String()) {
+						hasWorkerTag = true
+					}
+					return true
+				})
+			}
+
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag {
 				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
 				return true
 			}
