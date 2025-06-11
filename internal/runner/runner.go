@@ -777,6 +777,11 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			})
 
+			workerBehavior := value.Get("worker_behavior").String()
+			isDistributed := workerBehavior == "distribute"
+
+			log.Printf("isDistributed: %v", isDistributed)
+
 			// Compute hash of the entire configuration
 			configHash := computeScanConfigHash(finalConfig, templates, assets)
 
@@ -806,7 +811,102 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
-			queuedTasks <- task
+			if isDistributed {
+				// start pulling chunks and elaborate them sequentially
+				chunkCount := 0
+				gologger.Info().Msgf("Starting distributed scan processing for scan ID: %s", id)
+				for {
+					chunkCount++
+					gologger.Info().Msgf("Fetching chunk #%d for scan ID: %s", chunkCount, id)
+
+					scanChunk, err := r.getScanChunk(ctx, id, false)
+					if err != nil {
+						gologger.Error().Msgf("Error getting scan chunk for ID %s: %v - likely the scan is done", id, err)
+						time.Sleep(time.Second * 5) // Add delay before retry
+						break
+					}
+
+					if scanChunk == nil {
+						gologger.Info().Msgf("No more chunks available for scan ID: %s", id)
+						break
+					}
+
+					gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets and %d templates",
+						chunkCount,
+						scanChunk.ChunkID,
+						len(scanChunk.Targets),
+						len(scanChunk.PublicTemplates))
+
+					scanChunkTask := &types.Task{
+						Tool: types.Nuclei,
+						Options: types.Options{
+							Hosts:     scanChunk.Targets,
+							Templates: scanChunk.PublicTemplates,
+							Silent:    true,
+							ScanID:    id,
+							Config:    finalConfig,
+						},
+						Id: metaId,
+					}
+
+					// Set initial status to in progress
+					if err := r.UpdateScanChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, ScanChunkStatusInProgress); err != nil {
+						gologger.Error().Msgf("Error updating scan chunk status: %v", err)
+					} else {
+						gologger.Info().Msgf("Updated chunk %s status to in_progress", scanChunk.ChunkID)
+					}
+
+					// Start a goroutine to periodically update status
+					timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+					go func(ctx context.Context, scanID, chunkID string) {
+						ticker := time.NewTicker(10 * time.Second)
+						defer ticker.Stop()
+
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if err := r.UpdateScanChunkStatus(ctx, scanID, chunkID, ScanChunkStatusInProgress); err != nil {
+									gologger.Error().Msgf("Error updating scan chunk status: %v", err)
+								} else {
+									gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+								}
+							}
+						}
+					}(timerCtx, scanChunk.ScanID, scanChunk.ChunkID)
+
+					gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
+					queuedTasks <- scanChunkTask
+
+					// stops the timer
+					timerCtxCancel()
+					gologger.Debug().Msgf("Stopped status update timer for chunk %s", scanChunk.ChunkID)
+
+					// wait 1 second
+					time.Sleep(time.Second)
+
+					// mark the chunk as completed with ACK
+					if err := r.UpdateScanChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, ScanChunkStatusAck); err != nil {
+						gologger.Error().Msgf("Error updating scan chunk status to ACK: %v", err)
+					} else {
+						gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, scanChunk.ChunkID)
+					}
+
+					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
+					time.Sleep(time.Second * 10)
+				}
+				gologger.Info().Msgf("Completed processing all chunks for scan ID: %s (total chunks: %d)", id, chunkCount)
+
+				// mark the scan as done
+				_, err := r.getScanChunk(ctx, id, true)
+				if err != nil {
+					gologger.Error().Msgf("Error getting scan chunk for ID %s: %v", id, err)
+				}
+			} else {
+				// enqueue the entire scan
+				queuedTasks <- task
+			}
 
 			// After queueing the task, mark it as executed
 			r.localCache.MarkScanExecuted(id, configHash)
@@ -1245,6 +1345,80 @@ type ScanRequest struct {
 	Name      string   `json:"name"`
 }
 
+// ScanChunk represents a chunk of scan data from the API
+type ScanChunk struct {
+	ScanID               string   `json:"scan_id"`
+	TemplateRequestCount int      `json:"template_request_count"`
+	Targets              []string `json:"targets"`
+	PublicTemplates      []string `json:"public_templates"`
+	PrivateTemplates     []string `json:"private_templates"`
+	UserID               int64    `json:"user_id"`
+	ChunkID              string   `json:"chunk_id"`
+	ScanConfiguration    string   `json:"scan_configuration"`
+	PublicWorkflows      []string `json:"public_workflows"`
+	PrivateWorkflows     []string `json:"private_workflows"`
+	WorkflowsURLs        []string `json:"workflows_urls"`
+	Status               string   `json:"status"`
+}
+
+// ScanChunkStatus represents the possible status values for a scan chunk
+type ScanChunkStatus string
+
+const (
+	ScanChunkStatusAck        ScanChunkStatus = "ack"
+	ScanChunkStatusNack       ScanChunkStatus = "nack"
+	ScanChunkStatusInProgress ScanChunkStatus = "in_progress"
+)
+
+// UpdateScanChunkStatus updates the status of a scan chunk
+func (r *Runner) UpdateScanChunkStatus(ctx context.Context, scanID, chunkID string, status ScanChunkStatus) error {
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/chunk/%s", pkg.PCDPApiServer, scanID, chunkID)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	// Add status query parameter
+	q := req.URL.Query()
+	q.Add("status", string(status))
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response to check if ok is true
+	var response struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	if !response.OK {
+		return fmt.Errorf("server returned ok=false")
+	}
+
+	return nil
+}
+
 // startHTTPServer starts the HTTP server with Echo framework
 func (r *Runner) startHTTPServer(ctx context.Context) error {
 	e := echo.New()
@@ -1430,4 +1604,45 @@ func computeEnumerationConfigHash(scanConfig string, steps []string, assets []st
 	h.Write([]byte(strings.Join(assets, ",")))
 
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// get a scan chunk from scanid
+func (r *Runner) getScanChunk(ctx context.Context, scanID string, done bool) (*ScanChunk, error) {
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/chunk", pkg.PCDPApiServer, scanID)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+	if err != nil {
+		return nil, fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	if done {
+		apiURL = fmt.Sprintf("%s?done=true", apiURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var scanChunk ScanChunk
+	if err := json.Unmarshal(body, &scanChunk); err != nil {
+		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	return &scanChunk, nil
 }
