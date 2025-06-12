@@ -846,7 +846,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 							ScanID:    id,
 							Config:    finalConfig,
 						},
-						Id: metaId,
+						Id: scanChunk.ChunkID,
 					}
 
 					// Set initial status to in progress
@@ -903,6 +903,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 				if err != nil {
 					gologger.Error().Msgf("Error getting scan chunk for ID %s: %v", id, err)
 				}
+
+				// remove the scan from pending taks
+				pendingTasks.Delete(metaId)
 			} else {
 				// enqueue the entire scan
 				queuedTasks <- task
