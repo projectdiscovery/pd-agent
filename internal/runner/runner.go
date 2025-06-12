@@ -819,7 +819,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					chunkCount++
 					gologger.Info().Msgf("Fetching chunk #%d for scan ID: %s", chunkCount, id)
 
-					scanChunk, err := r.getScanChunk(ctx, id, false)
+					scanChunk, err := r.getTaskChunk(ctx, id, false)
 					if err != nil {
 						gologger.Error().Msgf("Error getting scan chunk for ID %s: %v - likely the scan is done", id, err)
 						time.Sleep(time.Second * 5) // Add delay before retry
@@ -850,7 +850,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					}
 
 					// Set initial status to in progress
-					if err := r.UpdateScanChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, ScanChunkStatusInProgress); err != nil {
+					if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
 						gologger.Error().Msgf("Error updating scan chunk status: %v", err)
 					} else {
 						gologger.Info().Msgf("Updated chunk %s status to in_progress", scanChunk.ChunkID)
@@ -867,7 +867,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 							case <-ctx.Done():
 								return
 							case <-ticker.C:
-								if err := r.UpdateScanChunkStatus(ctx, scanID, chunkID, ScanChunkStatusInProgress); err != nil {
+								if err := r.UpdateTaskChunkStatus(ctx, scanID, chunkID, TaskChunkStatusInProgress); err != nil {
 									gologger.Error().Msgf("Error updating scan chunk status: %v", err)
 								} else {
 									gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
@@ -887,7 +887,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					time.Sleep(time.Second)
 
 					// mark the chunk as completed with ACK
-					if err := r.UpdateScanChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, ScanChunkStatusAck); err != nil {
+					if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusAck); err != nil {
 						gologger.Error().Msgf("Error updating scan chunk status to ACK: %v", err)
 					} else {
 						gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, scanChunk.ChunkID)
@@ -899,7 +899,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				gologger.Info().Msgf("Completed processing all chunks for scan ID: %s (total chunks: %d)", id, chunkCount)
 
 				// mark the scan as done
-				_, err := r.getScanChunk(ctx, id, true)
+				_, err := r.getTaskChunk(ctx, id, true)
 				if err != nil {
 					gologger.Error().Msgf("Error getting scan chunk for ID %s: %v", id, err)
 				}
@@ -1375,8 +1375,8 @@ type ScanRequest struct {
 	Name      string   `json:"name"`
 }
 
-// ScanChunk represents a chunk of scan data from the API
-type ScanChunk struct {
+// TaskChunk represents a chunk of scan data from the API
+type TaskChunk struct {
 	ScanID               string   `json:"scan_id"`
 	TemplateRequestCount int      `json:"template_request_count"`
 	Targets              []string `json:"targets"`
@@ -1391,18 +1391,18 @@ type ScanChunk struct {
 	Status               string   `json:"status"`
 }
 
-// ScanChunkStatus represents the possible status values for a scan chunk
-type ScanChunkStatus string
+// TaskChunkStatus represents the possible status values for a task chunk
+type TaskChunkStatus string
 
 const (
-	ScanChunkStatusAck        ScanChunkStatus = "ack"
-	ScanChunkStatusNack       ScanChunkStatus = "nack"
-	ScanChunkStatusInProgress ScanChunkStatus = "in_progress"
+	TaskChunkStatusAck        TaskChunkStatus = "ack"
+	TaskChunkStatusNack       TaskChunkStatus = "nack"
+	TaskChunkStatusInProgress TaskChunkStatus = "in_progress"
 )
 
 // UpdateScanChunkStatus updates the status of a scan chunk
-func (r *Runner) UpdateScanChunkStatus(ctx context.Context, scanID, chunkID string, status ScanChunkStatus) error {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/chunk/%s", pkg.PCDPApiServer, scanID, chunkID)
+func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskId, chunkID string, status TaskChunkStatus) error {
+	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk/%s", pkg.PCDPApiServer, taskId, chunkID)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -1636,9 +1636,9 @@ func computeEnumerationConfigHash(scanConfig string, steps []string, assets []st
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// get a scan chunk from scanid
-func (r *Runner) getScanChunk(ctx context.Context, scanID string, done bool) (*ScanChunk, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/chunk", pkg.PCDPApiServer, scanID)
+// get a task chunk from taskid
+func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*TaskChunk, error) {
+	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk", pkg.PCDPApiServer, taskID)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -1669,12 +1669,12 @@ func (r *Runner) getScanChunk(ctx context.Context, scanID string, done bool) (*S
 		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	var scanChunk ScanChunk
-	if err := json.Unmarshal(body, &scanChunk); err != nil {
+	var taskChunk TaskChunk
+	if err := json.Unmarshal(body, &taskChunk); err != nil {
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
 	}
 
-	return &scanChunk, nil
+	return &taskChunk, nil
 }
 
 // getAutoDiscoveredTargets gets the auto discovered targets from the system (only ipv4)
