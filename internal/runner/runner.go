@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,6 +34,7 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
+	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	syncutil "github.com/projectdiscovery/utils/sync"
@@ -780,8 +782,6 @@ func (r *Runner) getScans(ctx context.Context) error {
 			workerBehavior := value.Get("worker_behavior").String()
 			isDistributed := workerBehavior == "distribute"
 
-			log.Printf("isDistributed: %v", isDistributed)
-
 			// Compute hash of the entire configuration
 			configHash := computeScanConfigHash(finalConfig, templates, assets)
 
@@ -1012,7 +1012,18 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				}
 			}
 
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName {
+			// we check if worker tag matches
+			var hasWorkerTag bool
+			if value.Get("worker_tags").Exists() {
+				value.Get("worker_tags").ForEach(func(key, value gjson.Result) bool {
+					if sliceutil.Contains(r.options.AgentTags, value.String()) {
+						hasWorkerTag = true
+					}
+					return true
+				})
+			}
+
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
 				return true
 			}
@@ -1122,9 +1133,25 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				task.Options.Output = filepath.Join(r.options.AgentOutput, metaId)
 			}
 
+			workerBehavior := value.Get("worker_behavior").String()
+			isDistributed := workerBehavior == "distribute"
+
+			hasAutoDiscovery := value.Get("worker_auto_discover").Bool()
+			if hasAutoDiscovery {
+				autoDiscoveredTargets := r.getAutoDiscoveredTargets()
+
+				log.Printf("adding auto discovered targets: %s", strings.Join(autoDiscoveredTargets, ","))
+				task.Options.Hosts = append(task.Options.Hosts, autoDiscoveredTargets...)
+			}
+
 			_ = pendingTasks.Set(metaId, struct{}{})
 
-			queuedTasks <- task
+			if isDistributed {
+				// for now chunking is not supported for enumerations
+				queuedTasks <- task // same code as scan
+			} else {
+				queuedTasks <- task
+			}
 
 			// After queueing the task, mark it as executed
 			r.localCache.MarkEnumerationExecuted(id, configHash)
@@ -1648,4 +1675,94 @@ func (r *Runner) getScanChunk(ctx context.Context, scanID string, done bool) (*S
 	}
 
 	return &scanChunk, nil
+}
+
+// getAutoDiscoveredTargets gets the auto discovered targets from the system (only ipv4)
+func (r *Runner) getAutoDiscoveredTargets() []string {
+	var targets []string
+	seen := make(map[string]struct{})
+
+	// Helper function to add CIDR if it's a private IP
+	addPrivateCIDR := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		// Convert to IPv4 if it's an IPv4-mapped IPv6 address
+		if ip.To4() != nil {
+			ip = ip.To4()
+		}
+		// Check if it's a private IP
+		if ip.IsPrivate() {
+			// Create /24 CIDR
+			mask := net.CIDRMask(24, 32)
+			cidr := &net.IPNet{
+				IP:   ip.Mask(mask),
+				Mask: mask,
+			}
+			cidrStr := cidr.String()
+			if _, exists := seen[cidrStr]; !exists {
+				seen[cidrStr] = struct{}{}
+				targets = append(targets, cidrStr)
+			}
+		}
+	}
+
+	// Get network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		gologger.Error().Msgf("Error getting network interfaces: %v", err)
+	} else {
+		for _, iface := range interfaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				switch v := addr.(type) {
+				case *net.IPNet:
+					addPrivateCIDR(v.IP)
+				case *net.IPAddr:
+					addPrivateCIDR(v.IP)
+				}
+			}
+		}
+	}
+
+	// Read hosts file
+	hostsFile := "/etc/hosts"
+	if osutils.IsWindows() {
+		systemRoot := os.Getenv("SystemRoot")
+		if systemRoot == "" {
+			systemRoot = "C:\\Windows" // fallback
+		}
+		hostsFile = filepath.Join(systemRoot, "System32", "drivers", "etc", "hosts")
+	}
+
+	content, err := os.ReadFile(hostsFile)
+	if err != nil {
+		gologger.Error().Msgf("Error reading hosts file: %v", err)
+	} else {
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			// Skip comments and empty lines
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+
+			// Split line into IP and hostnames
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
+
+			// Parse IP address
+			ip := net.ParseIP(fields[0])
+			if ip != nil {
+				addPrivateCIDR(ip)
+			}
+		}
+	}
+
+	return targets
 }
