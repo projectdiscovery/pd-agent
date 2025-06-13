@@ -1137,19 +1137,121 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			isDistributed := workerBehavior == "distribute"
 
 			hasAutoDiscovery := value.Get("worker_auto_discover").Bool()
+			var autoDiscoveredTargets []string
 			if hasAutoDiscovery {
-				autoDiscoveredTargets := r.getAutoDiscoveredTargets()
-
+				autoDiscoveredTargets = r.getAutoDiscoveredTargets()
 				log.Printf("adding auto discovered targets: %s", strings.Join(autoDiscoveredTargets, ","))
-				task.Options.Hosts = append(task.Options.Hosts, autoDiscoveredTargets...)
 			}
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
+			var addAutoDiscoveredTargetsOnce sync.Once
+
 			if isDistributed {
-				// for now chunking is not supported for enumerations
-				queuedTasks <- task // same code as scan
+				// start pulling chunks and elaborate them sequentially
+				chunkCount := 0
+				gologger.Info().Msgf("Starting distributed enumeration processing for enumeration ID: %s", id)
+				for {
+					chunkCount++
+					gologger.Info().Msgf("Fetching chunk #%d for enumeration ID: %s", chunkCount, id)
+
+					enumChunk, err := r.getTaskChunk(ctx, id, false)
+					if err != nil {
+						gologger.Error().Msgf("Error getting enumeration chunk for ID %s: %v - likely the enumeration is done", id, err)
+						time.Sleep(time.Second * 5) // Add delay before retry
+						break
+					}
+
+					if enumChunk == nil {
+						gologger.Info().Msgf("No more chunks available for enumeration ID: %s", id)
+						break
+					}
+
+					if hasAutoDiscovery {
+						addAutoDiscoveredTargetsOnce.Do(func() {
+							enumChunk.Targets = append(enumChunk.Targets, autoDiscoveredTargets...)
+						})
+					}
+
+					gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
+						chunkCount,
+						enumChunk.ChunkID,
+						len(enumChunk.Targets))
+
+					enumChunkTask := &types.Task{
+						Tool: types.Nuclei,
+						Options: types.Options{
+							Hosts:         enumChunk.Targets,
+							Silent:        true,
+							Steps:         steps,
+							EnumerationID: id,
+						},
+						Id: enumChunk.ChunkID,
+					}
+
+					// Set initial status to in progress
+					if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
+						gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
+					} else {
+						gologger.Info().Msgf("Updated chunk %s status to in_progress", enumChunk.ChunkID)
+					}
+
+					// Start a goroutine to periodically update status
+					timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+					go func(ctx context.Context, enumID, chunkID string) {
+						ticker := time.NewTicker(10 * time.Second)
+						defer ticker.Stop()
+
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							case <-ticker.C:
+								if err := r.UpdateTaskChunkStatus(ctx, enumID, chunkID, TaskChunkStatusInProgress); err != nil {
+									gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
+								} else {
+									gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+								}
+							}
+						}
+					}(timerCtx, id, enumChunk.ChunkID)
+
+					gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
+					queuedTasks <- enumChunkTask
+
+					// stops the timer
+					timerCtxCancel()
+					gologger.Debug().Msgf("Stopped status update timer for chunk %s", enumChunk.ChunkID)
+
+					// wait 1 second
+					time.Sleep(time.Second)
+
+					// mark the chunk as completed with ACK
+					if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusAck); err != nil {
+						gologger.Error().Msgf("Error updating enumeration chunk status to ACK: %v", err)
+					} else {
+						gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, enumChunk.ChunkID)
+					}
+
+					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
+					time.Sleep(time.Second * 10)
+				}
+				gologger.Info().Msgf("Completed processing all chunks for enumeration ID: %s (total chunks: %d)", id, chunkCount)
+
+				// mark the enumeration as done
+				_, err := r.getTaskChunk(ctx, id, true)
+				if err != nil {
+					gologger.Error().Msgf("Error getting enumeration chunk for ID %s: %v", id, err)
+				}
+
+				// remove the enumeration from pending tasks
+				pendingTasks.Delete(metaId)
 			} else {
+				if hasAutoDiscovery {
+					addAutoDiscoveredTargetsOnce.Do(func() {
+						task.Options.Hosts = append(task.Options.Hosts, autoDiscoveredTargets...)
+					})
+				}
 				queuedTasks <- task
 			}
 
