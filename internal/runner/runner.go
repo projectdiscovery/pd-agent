@@ -819,10 +819,32 @@ func (r *Runner) getScans(ctx context.Context) error {
 					chunkCount++
 					gologger.Info().Msgf("Fetching chunk #%d for scan ID: %s", chunkCount, id)
 
-					scanChunk, err := r.getTaskChunk(ctx, id, false)
+					var scanChunk *TaskChunk
+					var err error
+					maxRetries := 5
+					retryCount := 0
+					lastErr := ""
+
+					for retryCount < maxRetries {
+						scanChunk, err = r.getTaskChunk(ctx, id, false)
+						if err == nil {
+							break
+						}
+						currentErr := err.Error()
+						if currentErr == lastErr {
+							// If we get the same error multiple times, likely the scan is complete
+							gologger.Info().Msgf("Scan ID %s completed successfully", id)
+							goto ScanComplete
+						}
+						lastErr = currentErr
+						retryCount++
+						if retryCount < maxRetries {
+							time.Sleep(time.Second * 3)
+						}
+					}
+
 					if err != nil {
-						gologger.Error().Msgf("Error getting scan chunk for ID %s: %v - likely the scan is done", id, err)
-						time.Sleep(time.Second * 5) // Add delay before retry
+						gologger.Error().Msgf("Failed to get chunk after %d retries: %v", maxRetries, err)
 						break
 					}
 
@@ -896,15 +918,14 @@ func (r *Runner) getScans(ctx context.Context) error {
 					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
 					time.Sleep(time.Second * 10)
 				}
+
+			ScanComplete:
 				gologger.Info().Msgf("Completed processing all chunks for scan ID: %s (total chunks: %d)", id, chunkCount)
 
 				// mark the scan as done
-				_, err := r.getTaskChunk(ctx, id, true)
-				if err != nil {
-					gologger.Error().Msgf("Error getting scan chunk for ID %s: %v", id, err)
-				}
+				_, _ = r.getTaskChunk(ctx, id, true)
 
-				// remove the scan from pending taks
+				// remove the scan from pending tasks
 				pendingTasks.Delete(metaId)
 			} else {
 				// enqueue the entire scan
@@ -1083,7 +1104,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			}
 
 			// Fetch minimal config first
-			scanConfig, err := r.fetchEnumerationConfig(id)
+			enumerationConfig, err := r.fetchEnumerationConfig(id)
 			if err != nil {
 				gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", id, err)
 				return true
@@ -1091,23 +1112,22 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			// Get basic info needed for hash
 			var assets []string
-			gjson.Parse(scanConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
+			gjson.Parse(enumerationConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
 				assets = append(assets, value.String())
 				return true
 			})
-			gjson.Parse(scanConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
+			gjson.Parse(enumerationConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
 				assets = append(assets, value.String())
 				return true
 			})
 
 			var steps []string
-			gjson.Parse(scanConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
+			gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
 				steps = append(steps, value.String())
 				return true
 			})
 
-			// Compute hash early
-			configHash := computeEnumerationConfigHash(scanConfig, steps, assets)
+			configHash := computeEnumerationConfigHash(steps, assets)
 
 			// Check cache before proceeding
 			if r.localCache.HasEnumerationBeenExecuted(id, configHash) && !scheduleData.Exists() {
@@ -1155,10 +1175,32 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					chunkCount++
 					gologger.Info().Msgf("Fetching chunk #%d for enumeration ID: %s", chunkCount, id)
 
-					enumChunk, err := r.getTaskChunk(ctx, id, false)
+					var enumChunk *TaskChunk
+					var err error
+					maxRetries := 5
+					retryCount := 0
+					lastErr := ""
+
+					for retryCount < maxRetries {
+						enumChunk, err = r.getTaskChunk(ctx, id, false)
+						if err == nil {
+							break
+						}
+						currentErr := err.Error()
+						if currentErr == lastErr {
+							// If we get the same error multiple times, likely the enumeration is complete
+							gologger.Info().Msgf("Enumeration ID %s completed successfully", id)
+							goto EnumerationComplete
+						}
+						lastErr = currentErr
+						retryCount++
+						if retryCount < maxRetries {
+							time.Sleep(time.Second * 3)
+						}
+					}
+
 					if err != nil {
-						gologger.Error().Msgf("Error getting enumeration chunk for ID %s: %v - likely the enumeration is done", id, err)
-						time.Sleep(time.Second * 5) // Add delay before retry
+						gologger.Error().Msgf("Failed to get chunk after %d retries: %v", maxRetries, err)
 						break
 					}
 
@@ -1173,7 +1215,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 						})
 					}
 
-					gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
+					gologger.Info().Msgf("Processing chunk # %d (ID: %s) with %d targets",
 						chunkCount,
 						enumChunk.ChunkID,
 						len(enumChunk.Targets))
@@ -1236,13 +1278,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
 					time.Sleep(time.Second * 10)
 				}
+
+			EnumerationComplete:
 				gologger.Info().Msgf("Completed processing all chunks for enumeration ID: %s (total chunks: %d)", id, chunkCount)
 
 				// mark the enumeration as done
-				_, err := r.getTaskChunk(ctx, id, true)
-				if err != nil {
-					gologger.Error().Msgf("Error getting enumeration chunk for ID %s: %v", id, err)
-				}
+				_, _ = r.getTaskChunk(ctx, id, true)
 
 				// remove the enumeration from pending tasks
 				pendingTasks.Delete(metaId)
@@ -1715,7 +1756,6 @@ func computeScanConfigHash(scanConfig string, templates []string, assets []strin
 	sort.Strings(templates)
 	sort.Strings(assets)
 
-	// Write all components to hash
 	h.Write([]byte(scanConfig))
 	h.Write([]byte(strings.Join(templates, ",")))
 	h.Write([]byte(strings.Join(assets, ",")))
@@ -1723,15 +1763,13 @@ func computeScanConfigHash(scanConfig string, templates []string, assets []strin
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func computeEnumerationConfigHash(scanConfig string, steps []string, assets []string) string {
+func computeEnumerationConfigHash(steps []string, assets []string) string {
 	h := sha256.New()
 
 	// Sort arrays to ensure consistent hashing
 	sort.Strings(steps)
 	sort.Strings(assets)
 
-	// Write all components to hash
-	h.Write([]byte(scanConfig))
 	h.Write([]byte(strings.Join(steps, ",")))
 	h.Write([]byte(strings.Join(assets, ",")))
 
