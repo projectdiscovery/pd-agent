@@ -493,7 +493,9 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			go func(task *types.Task) {
 				defer awg.Done()
 
-				r.processTask(ctx, task)
+				if err := r.processTask(ctx, task); err != nil {
+					gologger.Error().Msgf("error processing task: %v", err)
+				}
 			}(task)
 		}
 	}
@@ -515,7 +517,9 @@ func (r *Runner) fetchScanConfig(scanID string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -541,7 +545,9 @@ func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -567,7 +573,9 @@ func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -622,7 +630,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("error sending request: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -933,7 +943,9 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 						gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
 
-						r.processTask(ctx, scanChunkTask)
+						if err := r.processTask(ctx, scanChunkTask); err != nil {
+							gologger.Error().Msgf("error processing chunk: %v", err)
+						}
 
 						// stops the timer
 						timerCtxCancel()
@@ -1034,7 +1046,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("error sending request: %v", err)
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -1301,7 +1315,9 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 						gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
 
-						r.processTask(ctx, enumChunkTask)
+						if err := r.processTask(ctx, enumChunkTask); err != nil {
+							gologger.Error().Msgf("error processing chunk: %v", err)
+						}
 
 						// stops the timer
 						timerCtxCancel()
@@ -1367,7 +1383,9 @@ func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1432,7 +1450,9 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		log.Printf("failed to call /in endpoint: %v", err)
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("failed to read response body: %v", err)
@@ -1470,7 +1490,9 @@ func (r *Runner) Out(ctx context.Context) error {
 		log.Printf("failed to call /out endpoint: %v", err)
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("failed to read response body: %v", err)
@@ -1487,41 +1509,41 @@ func (r *Runner) Out(ctx context.Context) error {
 	return nil
 }
 
-func (r *Runner) renameAgent(ctx context.Context, name string) error {
-	endpoint := fmt.Sprintf("http://%s:%s/rename", PunchHoleHost, PunchHoleHTTPPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create request: %v", err)
-	}
+// func (r *Runner) renameAgent(ctx context.Context, name string) error {
+// 	endpoint := fmt.Sprintf("http://%s:%s/rename", PunchHoleHost, PunchHoleHTTPPort)
+// 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to create request: %v", err)
+// 	}
 
-	q := req.URL.Query()
-	q.Add("id", r.options.AgentId)
-	q.Add("name", name)
-	q.Add("type", "agent")
-	req.URL.RawQuery = q.Encode()
+// 	q := req.URL.Query()
+// 	q.Add("id", r.options.AgentId)
+// 	q.Add("name", name)
+// 	q.Add("type", "agent")
+// 	req.URL.RawQuery = q.Encode()
 
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
-	if err != nil {
-		return fmt.Errorf("error creating authenticated client: %v", err)
-	}
+// 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+// 	if err != nil {
+// 		return fmt.Errorf("error creating authenticated client: %v", err)
+// 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to call /rename endpoint: %v", err)
-	}
-	defer resp.Body.Close()
+// 	resp, err := client.Do(req)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to call /rename endpoint: %v", err)
+// 	}
+// 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read response body: %v", err)
-	}
+// 	body, err := io.ReadAll(resp.Body)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to read response body: %v", err)
+// 	}
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code from /rename endpoint: %d, body: %s", resp.StatusCode, string(body))
-	}
+// 	if resp.StatusCode != http.StatusOK {
+// 		return fmt.Errorf("unexpected status code from /rename endpoint: %d, body: %s", resp.StatusCode, string(body))
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 // buildStatusString builds the status string for both resource and tool
 func (r *Runner) buildStatusString() string {
@@ -1608,7 +1630,9 @@ func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskId, chunkID stri
 	if err != nil {
 		return fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1674,7 +1698,9 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error making request: %v", err))
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -1712,7 +1738,9 @@ func (r *Runner) startHTTPServer(ctx context.Context) error {
 		if err != nil {
 			return c.String(http.StatusInternalServerError, fmt.Sprintf("error making request: %v", err))
 		}
-		defer resp.Body.Close()
+		defer func() {
+			_ = resp.Body.Close()
+		}()
 
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -1776,7 +1804,9 @@ func (r *Runner) exportEnumerations(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -1840,7 +1870,9 @@ func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*T
 	if err != nil {
 		return nil, fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {

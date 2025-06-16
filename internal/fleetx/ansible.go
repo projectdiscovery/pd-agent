@@ -20,7 +20,9 @@ func ParseAnsibleInventoryFile(filename string) ([]Host, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		_ = file.Close()
+	}()
 
 	return ParseAnsibleInventory(file)
 }

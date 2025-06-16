@@ -30,7 +30,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create runner: %v", err)
 	}
-	defer runner.Close(context.Background())
+	defer func() {
+		_ = runner.Close(context.Background())
+	}()
 
 	err = runner.Run(context.Background(), session)
 	if err != nil {

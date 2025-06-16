@@ -230,7 +230,9 @@ func main() {
 					log.Printf("Request failed: %v", err)
 					return mcp.NewToolResultError(fmt.Sprintf("Request failed: %v", err)), nil
 				}
-				defer resp.Body.Close()
+				defer func() {
+					_ = resp.Body.Close()
+				}()
 
 				// Read response body
 				respBody, err := io.ReadAll(resp.Body)

@@ -40,7 +40,9 @@ func FetchToolList() ([]types.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(resp.Body)
@@ -64,7 +66,9 @@ func fetchTool(toolName string) (types.Tool, error) {
 	if err != nil {
 		return tool, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(resp.Body)
@@ -146,6 +150,6 @@ func isOsAvailable(tool types.Tool) bool {
 // GenerateRandomString generates a random string of specified length
 func GenerateRandomString(length int) string {
 	b := make([]byte, length)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return base64.URLEncoding.EncodeToString(b)[:length]
 }

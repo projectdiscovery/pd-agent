@@ -137,7 +137,7 @@ func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
 			if parts := strings.Split(host, ":"); len(parts) > 0 {
 				host = parts[0]
 			}
-			UnresponsiveHosts.Set(host, struct{}{})
+			_ = UnresponsiveHosts.Set(host, struct{}{})
 		}
 	}
 }
@@ -166,13 +166,17 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 	apiURL := fmt.Sprintf("%s/v1/assets", PCDPApiServer)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, f)
 	if err != nil {
 		return "", err
 	}
-	defer req.Body.Close()
+	defer func() {
+		_ = req.Body.Close()
+	}()
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
@@ -199,13 +203,17 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Close()
+	}()
 	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", PCDPApiServer, assetId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, f)
 	if err != nil {
 		return "", err
 	}
-	defer req.Body.Close()
+	defer func() {
+		_ = req.Body.Close()
+	}()
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
@@ -308,9 +316,9 @@ func prepareInput(task *types.Task) (
 	}
 
 	removeFunc := func() {
-		os.RemoveAll(tmpInputFile)
+		_ = os.RemoveAll(tmpInputFile)
 		if tmpConfigFile != "" {
-			os.RemoveAll(tmpConfigFile)
+			_ = os.RemoveAll(tmpConfigFile)
 		}
 	}
 	return tmpInputFile, tmpConfigFile, removeFunc, nil
