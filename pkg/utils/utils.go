@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -139,4 +141,11 @@ func isOsAvailable(tool types.Tool) bool {
 		}
 	}
 	return false
+}
+
+// GenerateRandomString generates a random string of specified length
+func GenerateRandomString(length int) string {
+	b := make([]byte, length)
+	rand.Read(b)
+	return base64.URLEncoding.EncodeToString(b)[:length]
 }

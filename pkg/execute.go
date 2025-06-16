@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
@@ -20,14 +19,16 @@ import (
 	"github.com/projectdiscovery/utils/conversion"
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
+	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
+	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/tidwall/gjson"
 )
 
-func Run(ctx context.Context, task *types.Task) error {
+func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 	toolList, err := tools.FetchFromCache()
 	if err != nil {
-		return errors.New("pdtm api is down, please try again later")
+		return nil, errors.New("pdtm api is down, please try again later")
 	}
 
 	var tool *types.Tool
@@ -39,16 +40,25 @@ func Run(ctx context.Context, task *types.Task) error {
 	}
 
 	if tool == nil {
-		return fmt.Errorf("tool '%s' not found", task.Tool.String())
+		return nil, fmt.Errorf("tool '%s' not found", task.Tool.String())
 	}
 
 	if task.Options.ScanID != "" {
 		envs, args, removeFunc, err := parseScanArgs(ctx, task)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer removeFunc()
-		return runCommand(ctx, envs, args)
+
+		taskResult, err := runCommand(ctx, envs, args)
+		if err != nil {
+			log.Fatal(err)
+			return nil, err
+		}
+
+		ExtractUnresponsiveHosts(taskResult)
+
+		return taskResult, nil
 	} else if task.Options.EnumerationID != "" {
 		// run: dnsx | naabu | httpx - for now execute all the tools in parallel
 		// for the time being we ignore the steps from cloud
@@ -68,7 +78,7 @@ func Run(ctx context.Context, task *types.Task) error {
 			// task.Options.Hosts = []string{"192.168.179.2:8000"}
 			envs, args, removeFunc, err := parseGenericArgs(task)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			defer removeFunc()
 			args[0] = tool
@@ -86,14 +96,14 @@ func Run(ctx context.Context, task *types.Task) error {
 					"-asset-id", manualAssetId,
 				)
 			}
-			if err := runCommand(ctx, envs, args); err != nil {
-				return err
+			if _, err := runCommand(ctx, envs, args); err != nil {
+				return nil, err
 			}
 			// if tool is naabu get the output for next steps
 			if args[0] == "naabu" && outputFile != "" {
 				c, err := fileutil.ReadFile(outputFile)
 				if err != nil {
-					return err
+					return nil, err
 				}
 				for line := range c {
 					naabuOutput = append(naabuOutput, line)
@@ -108,14 +118,28 @@ func Run(ctx context.Context, task *types.Task) error {
 				} else {
 					manualAssetId, err = uploadToCloud(ctx, task, naabuOutputFile)
 					if err != nil {
-						return err
+						return nil, err
 					}
 				}
 			}
 		}
 	}
 
-	return nil
+	return nil, nil
+}
+
+func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
+	fields := strings.Fields(taskResult.Stdout + taskResult.Stderr)
+	for i := 0; i < len(fields)-1; i++ {
+		if stringsutil.EqualFoldAny(fields[i], "skipped") {
+			host := fields[i+1]
+			// Split host:port into host only since other templates will check the same combinations
+			if parts := strings.Split(host, ":"); len(parts) > 0 {
+				host = parts[0]
+			}
+			UnresponsiveHosts.Set(host, struct{}{})
+		}
+	}
 }
 
 func getToolsFromSteps(steps []string) []string {
@@ -241,6 +265,12 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	return envs, args, removeFunc, nil
 }
 
+var UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
+
+func init() {
+	UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
+}
+
 func prepareInput(task *types.Task) (
 	string, // input list
 	string, // config
@@ -251,7 +281,17 @@ func prepareInput(task *types.Task) (
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
-	allTargets := strings.Join(task.Options.Hosts, "\n")
+
+	var filteredHosts []string
+	for _, host := range task.Options.Hosts {
+		if UnresponsiveHosts.Has(host) {
+			continue
+		}
+
+		filteredHosts = append(filteredHosts, host)
+	}
+
+	allTargets := strings.Join(filteredHosts, "\n")
 	if err := os.WriteFile(tmpInputFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write to temp file: %w", err)
 	}
@@ -289,12 +329,8 @@ func getEnvs() []string {
 	return envs
 }
 
-func runCommand(ctx context.Context, envs, args []string) error {
+func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, error) {
 	gologger.Info().Msgf("Running:\nCMD: %s\nENVS: %s\nARGS: %s", args[0], envs, args)
-
-	time.Sleep(time.Second * 5)
-
-	return nil
 
 	// Prepare the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -304,36 +340,43 @@ func runCommand(ctx context.Context, envs, args []string) error {
 	// Set up stdin, stdout, and stderr pipes
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create stdout pipe: %w", err)
+		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("failed to create stderr pipe: %w", err)
+		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
 	}
 
 	// Start the command
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start tool '%s': %w", args[0], err)
+		return nil, fmt.Errorf("failed to start tool '%s': %w", args[0], err)
 	}
 
 	// Read stdout and stderr
 	stdoutOutput, err := io.ReadAll(stdout)
 	if err != nil {
-		return fmt.Errorf("failed to read stdout: %w", err)
+		return nil, fmt.Errorf("failed to read stdout: %w", err)
 	}
+
+	taskResult := &types.TaskResult{
+		Stdout: string(stdoutOutput),
+	}
+
 	stderrOutput, err := io.ReadAll(stderr)
 	if err != nil {
-		return fmt.Errorf("failed to read stderr: %w", err)
+		return taskResult, nil
 	}
+
+	taskResult.Stderr = string(stderrOutput)
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", args[0], err, string(stderrOutput))
+		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", args[0], err, string(stderrOutput))
 	}
 
 	gologger.Info().Msgf("Stdout:\n%s\nStderr:\n%s", string(stdoutOutput), string(stderrOutput))
 
-	return nil
+	return taskResult, nil
 }
 
 func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(), err error) {

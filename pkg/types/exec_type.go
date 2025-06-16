@@ -43,7 +43,15 @@ type Task struct {
 	Tool    ToolType
 	Options Options
 
+	Result *TaskResult
+
 	Id string
+}
+
+type TaskResult struct {
+	Stdout string
+	Stderr string
+	Error  error
 }
 
 type Options struct {

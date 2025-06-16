@@ -155,6 +155,25 @@ type Runner struct {
 	localCache *LocalCache
 }
 
+// Add these functions after the existing types
+func getStoredAgentID() string {
+	agentIDFile := filepath.Join(tools.HomeDir, ".pdtm-agent", "agent-id")
+	data, err := os.ReadFile(agentIDFile)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func storeAgentID(agentID string) error {
+	agentIDFile := filepath.Join(tools.HomeDir, ".pdtm-agent", "agent-id")
+	dir := filepath.Dir(agentIDFile)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("error creating directory: %v", err)
+	}
+	return os.WriteFile(agentIDFile, []byte(agentID), 0644)
+}
+
 // NewRunner instance
 func NewRunner(options *Options) (*Runner, error) {
 	r := &Runner{
@@ -164,6 +183,19 @@ func NewRunner(options *Options) (*Runner, error) {
 
 	if err := r.localCache.Load(); err != nil {
 		gologger.Warning().Msgf("error loading cache: %v", err)
+	}
+
+	// If no agent ID is provided, try to get the stored one or generate a new one
+	if r.options.AgentId == "" {
+		if storedID := getStoredAgentID(); storedID != "" {
+			r.options.AgentId = storedID
+		} else {
+			// Generate a new agent ID
+			r.options.AgentId = utils.GenerateRandomString(8)
+			if err := storeAgentID(r.options.AgentId); err != nil {
+				gologger.Warning().Msgf("error storing agent ID: %v", err)
+			}
+		}
 	}
 
 	return r, nil
@@ -404,6 +436,16 @@ func (r *Runner) Close() {
 	close(queuedTasks)
 }
 
+var awg *syncutil.AdaptiveWaitGroup
+
+func init() {
+	var err error
+	awg, err = syncutil.New(syncutil.WithSize(5))
+	if err != nil {
+		log.Fatalf("could not create worker group: %v", err)
+	}
+}
+
 // - will download the scan list
 // - execute scans without schedule or uploaded state
 // - execute schedules scans with time proximity
@@ -413,7 +455,7 @@ func (r *Runner) Close() {
 //   - todo: nuclei config
 //
 // - configure nuclei to upload results with scan id
-// TODO. since it's unclear how pdtm-agent should interact with all the cloyd layers, for the time being we connect directly
+// TODO. since it's unclear how pdtm-agent should interact with all the cloud layers, for the time being we connect directly
 // with aurora api
 func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -431,10 +473,6 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 	go r.monitorScans(ctx)
 	go r.monitorEnumerations(ctx)
-	awg, err := syncutil.New(syncutil.WithSize(5))
-	if err != nil {
-		return errors.Join(err, errors.New("could not create worker group"))
-	}
 
 	defer func() {
 		wg.Wait()
@@ -455,17 +493,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			go func(task *types.Task) {
 				defer awg.Done()
 
-				gologger.Info().Msgf("Running task:\nId: %s\nTool: %s\nOptions: %+v\n", task.Id, task.Tool, task.Options)
-
-				_ = runningTasks.Set(task.Id, struct{}{})
-
-				if err := pkg.Run(ctx, task); err != nil {
-					gologger.Error().Msgf("Error executing task: %v", err)
-				}
-				gologger.Info().Msgf("Task %s completed\n", task.Id)
-				_ = completedTasks.Set(task.Id, struct{}{})
-				runningTasks.Delete(task.Id)
-				pendingTasks.Delete(task.Id)
+				r.processTask(ctx, task)
 			}(task)
 		}
 	}
@@ -859,61 +887,69 @@ func (r *Runner) getScans(ctx context.Context) error {
 						len(scanChunk.Targets),
 						len(scanChunk.PublicTemplates))
 
-					scanChunkTask := &types.Task{
-						Tool: types.Nuclei,
-						Options: types.Options{
-							Hosts:     scanChunk.Targets,
-							Templates: scanChunk.PublicTemplates,
-							Silent:    true,
-							ScanID:    id,
-							Config:    finalConfig,
-						},
-						Id: scanChunk.ChunkID,
-					}
+					awg.Add()
 
-					// Set initial status to in progress
-					if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-						gologger.Error().Msgf("Error updating scan chunk status: %v", err)
-					} else {
-						gologger.Info().Msgf("Updated chunk %s status to in_progress", scanChunk.ChunkID)
-					}
+					go func(task *types.Task) {
+						defer awg.Done()
 
-					// Start a goroutine to periodically update status
-					timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
-					go func(ctx context.Context, scanID, chunkID string) {
-						ticker := time.NewTicker(10 * time.Second)
-						defer ticker.Stop()
+						scanChunkTask := &types.Task{
+							Tool: types.Nuclei,
+							Options: types.Options{
+								Hosts:     scanChunk.Targets,
+								Templates: scanChunk.PublicTemplates,
+								Silent:    true,
+								ScanID:    id,
+								Config:    finalConfig,
+							},
+							Id: scanChunk.ChunkID,
+						}
 
-						for {
-							select {
-							case <-ctx.Done():
-								return
-							case <-ticker.C:
-								if err := r.UpdateTaskChunkStatus(ctx, scanID, chunkID, TaskChunkStatusInProgress); err != nil {
-									gologger.Error().Msgf("Error updating scan chunk status: %v", err)
-								} else {
-									gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+						// Set initial status to in progress
+						if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
+							gologger.Error().Msgf("Error updating scan chunk status: %v", err)
+						} else {
+							gologger.Info().Msgf("Updated chunk %s status to in_progress", scanChunk.ChunkID)
+						}
+
+						// Start a goroutine to periodically update status
+						timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+						go func(ctx context.Context, scanID, chunkID string) {
+							ticker := time.NewTicker(10 * time.Second)
+							defer ticker.Stop()
+
+							for {
+								select {
+								case <-ctx.Done():
+									return
+								case <-ticker.C:
+									if err := r.UpdateTaskChunkStatus(ctx, scanID, chunkID, TaskChunkStatusInProgress); err != nil {
+										gologger.Error().Msgf("Error updating scan chunk status: %v", err)
+									} else {
+										gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+									}
 								}
 							}
+						}(timerCtx, scanChunk.ScanID, scanChunk.ChunkID)
+
+						gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
+
+						r.processTask(ctx, scanChunkTask)
+
+						// stops the timer
+						timerCtxCancel()
+						gologger.Debug().Msgf("Stopped status update timer for chunk %s", scanChunk.ChunkID)
+
+						// wait 1 second
+						time.Sleep(time.Second)
+
+						// mark the chunk as completed with ACK
+						if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusAck); err != nil {
+							gologger.Error().Msgf("Error updating scan chunk status to ACK: %v", err)
+						} else {
+							gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, scanChunk.ChunkID)
 						}
-					}(timerCtx, scanChunk.ScanID, scanChunk.ChunkID)
 
-					gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
-					queuedTasks <- scanChunkTask
-
-					// stops the timer
-					timerCtxCancel()
-					gologger.Debug().Msgf("Stopped status update timer for chunk %s", scanChunk.ChunkID)
-
-					// wait 1 second
-					time.Sleep(time.Second)
-
-					// mark the chunk as completed with ACK
-					if err := r.UpdateTaskChunkStatus(ctx, scanChunk.ScanID, scanChunk.ChunkID, TaskChunkStatusAck); err != nil {
-						gologger.Error().Msgf("Error updating scan chunk status to ACK: %v", err)
-					} else {
-						gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, scanChunk.ChunkID)
-					}
+					}(task)
 
 					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
 					time.Sleep(time.Second * 10)
@@ -1220,61 +1256,67 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 						enumChunk.ChunkID,
 						len(enumChunk.Targets))
 
-					enumChunkTask := &types.Task{
-						Tool: types.Nuclei,
-						Options: types.Options{
-							Hosts:         enumChunk.Targets,
-							Silent:        true,
-							Steps:         steps,
-							EnumerationID: id,
-						},
-						Id: enumChunk.ChunkID,
-					}
+					awg.Add()
 
-					// Set initial status to in progress
-					if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-						gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
-					} else {
-						gologger.Info().Msgf("Updated chunk %s status to in_progress", enumChunk.ChunkID)
-					}
+					go func(task *types.Task) {
+						defer awg.Done()
 
-					// Start a goroutine to periodically update status
-					timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
-					go func(ctx context.Context, enumID, chunkID string) {
-						ticker := time.NewTicker(10 * time.Second)
-						defer ticker.Stop()
+						enumChunkTask := &types.Task{
+							Tool: types.Nuclei,
+							Options: types.Options{
+								Hosts:         enumChunk.Targets,
+								Silent:        true,
+								Steps:         steps,
+								EnumerationID: id,
+							},
+							Id: enumChunk.ChunkID,
+						}
 
-						for {
-							select {
-							case <-ctx.Done():
-								return
-							case <-ticker.C:
-								if err := r.UpdateTaskChunkStatus(ctx, enumID, chunkID, TaskChunkStatusInProgress); err != nil {
-									gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
-								} else {
-									gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+						// Set initial status to in progress
+						if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusInProgress); err != nil {
+							gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
+						} else {
+							gologger.Info().Msgf("Updated chunk %s status to in_progress", enumChunk.ChunkID)
+						}
+
+						// Start a goroutine to periodically update status
+						timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+						go func(ctx context.Context, enumID, chunkID string) {
+							ticker := time.NewTicker(10 * time.Second)
+							defer ticker.Stop()
+
+							for {
+								select {
+								case <-ctx.Done():
+									return
+								case <-ticker.C:
+									if err := r.UpdateTaskChunkStatus(ctx, enumID, chunkID, TaskChunkStatusInProgress); err != nil {
+										gologger.Error().Msgf("Error updating enumeration chunk status: %v", err)
+									} else {
+										gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+									}
 								}
 							}
+						}(timerCtx, id, enumChunk.ChunkID)
+
+						gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
+
+						r.processTask(ctx, enumChunkTask)
+
+						// stops the timer
+						timerCtxCancel()
+						gologger.Debug().Msgf("Stopped status update timer for chunk %s", enumChunk.ChunkID)
+
+						// wait 1 second
+						time.Sleep(time.Second)
+
+						// mark the chunk as completed with ACK
+						if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusAck); err != nil {
+							gologger.Error().Msgf("Error updating enumeration chunk status to ACK: %v", err)
+						} else {
+							gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, enumChunk.ChunkID)
 						}
-					}(timerCtx, id, enumChunk.ChunkID)
-
-					gologger.Info().Msgf("Enqueueing chunk #%d for processing", chunkCount)
-					queuedTasks <- enumChunkTask
-
-					// stops the timer
-					timerCtxCancel()
-					gologger.Debug().Msgf("Stopped status update timer for chunk %s", enumChunk.ChunkID)
-
-					// wait 1 second
-					time.Sleep(time.Second)
-
-					// mark the chunk as completed with ACK
-					if err := r.UpdateTaskChunkStatus(ctx, id, enumChunk.ChunkID, TaskChunkStatusAck); err != nil {
-						gologger.Error().Msgf("Error updating enumeration chunk status to ACK: %v", err)
-					} else {
-						gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, enumChunk.ChunkID)
-					}
-
+					}(task)
 					gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
 					time.Sleep(time.Second * 10)
 				}
@@ -1905,4 +1947,25 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 	}
 
 	return targets
+}
+
+func (r *Runner) processTask(ctx context.Context, task *types.Task) error {
+	gologger.Info().Msgf("Running task:\nId: %s\nTool: %s\nOptions: %+v\n", task.Id, task.Tool, task.Options)
+
+	_ = runningTasks.Set(task.Id, struct{}{})
+	defer func() {
+		_ = completedTasks.Set(task.Id, struct{}{})
+		runningTasks.Delete(task.Id)
+		pendingTasks.Delete(task.Id)
+	}()
+	taskResult, err := pkg.Run(ctx, task)
+	if err != nil {
+		gologger.Error().Msgf("Error executing task: %v", err)
+		return err
+	}
+
+	task.Result = taskResult
+
+	gologger.Info().Msgf("Task %s completed\n", task.Id)
+	return nil
 }
