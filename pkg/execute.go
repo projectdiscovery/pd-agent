@@ -81,7 +81,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 				return nil, err
 			}
 			defer removeFunc()
-			args[0] = tool
+			args[0] = tool.Name
 			var outputFile string
 			// handle per tool specific args
 			if task.Options.Output != "" {
@@ -96,6 +96,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 					"-asset-id", manualAssetId,
 				)
 			}
+			args = append(args, tool.Args...)
 			if _, err := runCommand(ctx, envs, args); err != nil {
 				return nil, err
 			}
@@ -142,21 +143,33 @@ func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
 	}
 }
 
-func getToolsFromSteps(steps []string) []string {
-	var tools []string
+type Tool struct {
+	Name string
+	Args []string
+}
+
+func getToolsFromSteps(steps []string) []Tool {
+	var tools []Tool
 	if sliceutil.Contains(steps, "dns_resolve") {
-		tools = append(tools, "dnsx")
+		tools = append(tools, Tool{Name: "dnsx"})
 	}
 	if sliceutil.Contains(steps, "port_scan") {
-		tools = append(tools, "naabu")
+		tool := Tool{Name: "naabu"}
+		if sliceutil.Contains(steps, "ports_service_scan") {
+			tool.Args = append(tool.Args, "-nmap-cli 'nmap -sV'")
+		}
+		tools = append(tools, tool)
 	}
 	if sliceutil.Contains(steps, "http_probe") {
-		tools = append(tools, "httpx")
+		tool := Tool{Name: "httpx"}
+		if sliceutil.Contains(steps, "http_screenshot") {
+			tool.Args = append(tool.Args, "-screenshot")
+		}
+		tools = append(tools, tool)
 	}
 	if sliceutil.Contains(steps, "tls_scan") {
-		tools = append(tools, "tlsx")
+		tools = append(tools, Tool{Name: "tlsx"})
 	}
-	// todo: add dns_permute - dns_bruteforce - passive_nuclei_scan - vulnerability_scan
 	return tools
 }
 
