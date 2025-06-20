@@ -156,7 +156,7 @@ func getToolsFromSteps(steps []string) []Tool {
 	if sliceutil.Contains(steps, "port_scan") {
 		tool := Tool{Name: "naabu"}
 		if sliceutil.Contains(steps, "ports_service_scan") {
-			tool.Args = append(tool.Args, "-nmap-cli 'nmap -sV'")
+			tool.Args = append(tool.Args, "-nmap-cli", "nmap -sV -Pn")
 		}
 		tools = append(tools, tool)
 	}
@@ -392,7 +392,7 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
-		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStderr: %s", args[0], err, string(stderrOutput))
+		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStdout: %s\nStderr: %s", args[0], err, string(stdoutOutput), string(stderrOutput))
 	}
 
 	gologger.Info().Msgf("Stdout:\n%s\nStderr:\n%s", string(stdoutOutput), string(stderrOutput))
