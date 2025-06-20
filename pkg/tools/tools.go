@@ -7,6 +7,7 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	fileutil "github.com/projectdiscovery/utils/file"
 )
 
 var (
@@ -29,6 +30,11 @@ func UpdateCache(toolList []types.Tool) error {
 	b, err := json.Marshal(toolList)
 	if err != nil {
 		return err
+	}
+	if fileutil.FolderExists(filepath.Dir(CacheFile)) {
+		if err := os.MkdirAll(filepath.Dir(CacheFile), os.ModePerm); err != nil {
+			return err
+		}
 	}
 	return os.WriteFile(CacheFile, b, os.ModePerm)
 }
