@@ -346,6 +346,7 @@ func getEnvs() []string {
 		"PDCP_API_KEY=" + os.Getenv("PDCP_API_KEY"),
 		"HOME=" + os.Getenv("HOME"),
 		"PDCP_TEAM_ID=" + os.Getenv("PDCP_TEAM_ID"),
+		"PATH=" + os.Getenv("PATH"),
 	}
 	return envs
 }
