@@ -151,8 +151,10 @@ func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
 
 // Runner contains the internal logic of the program
 type Runner struct {
-	options    *Options
-	localCache *LocalCache
+	options        *Options
+	localCache     *LocalCache
+	inRequestCount int       // Number of /in requests sent
+	agentStartTime time.Time // When the agent started
 }
 
 // Add these functions after the existing types
@@ -177,8 +179,9 @@ func storeAgentID(agentID string) error {
 // NewRunner instance
 func NewRunner(options *Options) (*Runner, error) {
 	r := &Runner{
-		options:    options,
-		localCache: NewLocalCache(),
+		options:        options,
+		localCache:     NewLocalCache(),
+		agentStartTime: time.Now(),
 	}
 
 	if err := r.localCache.Load(); err != nil {
@@ -1426,19 +1429,16 @@ func (r *Runner) In(ctx context.Context) error {
 var isRegistered bool
 
 func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
-	endpoint := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	r.inRequestCount++ // increment /in request counter
+
+	// Fetch agent info from punch_hole /workers/:id
+	endpoint := fmt.Sprintf("http://%s:%s/workers/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		log.Printf("failed to create request: %v", err)
+		log.Printf("failed to create agent info request: %v", err)
 		return err
 	}
-	q := req.URL.Query()
-	q.Add("os", runtime.GOOS)
-	q.Add("arch", runtime.GOARCH)
-	q.Add("id", r.options.AgentId)
-	q.Add("type", "agent")
-	q.Add("tags", strings.Join(r.options.AgentTags, ","))
-	req.URL.RawQuery = q.Encode()
+	req.Header.Set("x-api-key", PDCPApiKey)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -1447,26 +1447,77 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
+		log.Printf("failed to fetch agent info: %v", err)
+	} // don't return, fallback to local tags
+	defer func() {
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	// Default to local tags
+	tagsToUse := r.options.AgentTags
+	var lastUpdate time.Time
+	if resp != nil && resp.StatusCode == http.StatusOK {
+		var agentInfo struct {
+			Id         string    `json:"id"`
+			Tags       []string  `json:"tags"`
+			LastUpdate time.Time `json:"last_update"`
+			Name       string    `json:"name"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&agentInfo); err == nil {
+			lastUpdate = agentInfo.LastUpdate
+			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
+				gologger.Info().Msgf("Using tags from punch_hole server: %v (was: %v)", agentInfo.Tags, tagsToUse)
+				tagsToUse = agentInfo.Tags
+				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
+			}
+			// Handle agent name
+			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
+				gologger.Info().Msgf("Using agent name from punch_hole server: %s (was: %s)", agentInfo.Name, r.options.AgentName)
+				r.options.AgentName = agentInfo.Name
+			}
+			gologger.Info().Msgf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339))
+		}
+	}
+
+	// Now send the /in registration with the tagsToUse
+	inEndpoint := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
+	inReq, err := http.NewRequestWithContext(ctx, http.MethodPost, inEndpoint, nil)
+	if err != nil {
+		log.Printf("failed to create /in request: %v", err)
+		return err
+	}
+	q := inReq.URL.Query()
+	q.Add("os", runtime.GOOS)
+	q.Add("arch", runtime.GOARCH)
+	q.Add("id", r.options.AgentId)
+	q.Add("type", "agent")
+	q.Add("tags", strings.Join(tagsToUse, ","))
+	inReq.URL.RawQuery = q.Encode()
+	inReq.Header.Set("x-api-key", PDCPApiKey)
+
+	inResp, err := client.Do(inReq)
+	if err != nil {
 		log.Printf("failed to call /in endpoint: %v", err)
 		return err
 	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-	body, err := io.ReadAll(resp.Body)
+	defer func() { _ = inResp.Body.Close() }()
+	body, err := io.ReadAll(inResp.Body)
 	if err != nil {
 		log.Printf("failed to read response body: %v", err)
 		return err
 	}
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("unexpected status code from /in endpoint: %d, body: %s", resp.StatusCode, string(body))
-		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", resp.StatusCode, string(body))
+	if inResp.StatusCode != http.StatusOK {
+		log.Printf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(body))
+		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(body))
 	} else {
 		if !isRegistered {
 			gologger.Info().Msgf("agent registered successfully")
 			isRegistered = true
 		}
 	}
+	gologger.Info().Msgf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339))
 	return nil
 }
 
@@ -1508,42 +1559,6 @@ func (r *Runner) Out(ctx context.Context) error {
 	}
 	return nil
 }
-
-// func (r *Runner) renameAgent(ctx context.Context, name string) error {
-// 	endpoint := fmt.Sprintf("http://%s:%s/rename", PunchHoleHost, PunchHoleHTTPPort)
-// 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to create request: %v", err)
-// 	}
-
-// 	q := req.URL.Query()
-// 	q.Add("id", r.options.AgentId)
-// 	q.Add("name", name)
-// 	q.Add("type", "agent")
-// 	req.URL.RawQuery = q.Encode()
-
-// 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
-// 	if err != nil {
-// 		return fmt.Errorf("error creating authenticated client: %v", err)
-// 	}
-
-// 	resp, err := client.Do(req)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to call /rename endpoint: %v", err)
-// 	}
-// 	defer resp.Body.Close()
-
-// 	body, err := io.ReadAll(resp.Body)
-// 	if err != nil {
-// 		return fmt.Errorf("failed to read response body: %v", err)
-// 	}
-
-// 	if resp.StatusCode != http.StatusOK {
-// 		return fmt.Errorf("unexpected status code from /rename endpoint: %d, body: %s", resp.StatusCode, string(body))
-// 	}
-
-// 	return nil
-// }
 
 // buildStatusString builds the status string for both resource and tool
 func (r *Runner) buildStatusString() string {

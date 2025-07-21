@@ -57,6 +57,7 @@ type Options struct {
 	AgentId     string
 	AgentTags   goflags.StringSlice
 	AgentOutput string
+	AgentName   string
 
 	MCPMode bool
 }
