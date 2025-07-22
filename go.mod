@@ -8,6 +8,7 @@ require (
 	github.com/charmbracelet/glamour v0.8.0
 	github.com/getkin/kin-openapi v0.123.0
 	github.com/google/go-github v17.0.0+incompatible
+	github.com/google/gopacket v1.1.19
 	github.com/kr/pretty v0.3.1
 	github.com/labstack/echo/v4 v4.13.3
 	github.com/logrusorgru/aurora/v4 v4.0.0

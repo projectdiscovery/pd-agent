@@ -39,6 +39,9 @@ import (
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	syncutil "github.com/projectdiscovery/utils/sync"
 	"github.com/tidwall/gjson"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/pcap"
 )
 
 var excludedToolList = []string{"nuclei-templates"}
@@ -149,6 +152,53 @@ func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
 	}()
 }
 
+var passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
+
+func (r *Runner) startPassiveDiscovery() {
+	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
+	ifs, err := pcap.FindAllDevs()
+	if err != nil {
+		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
+		return
+	}
+	for _, iface := range ifs {
+		go func(iface pcap.Interface) {
+			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
+			if err != nil {
+				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
+				return
+			}
+			defer handle.Close()
+			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+			for packet := range packetSource.Packets() {
+				if netLayer := packet.NetworkLayer(); netLayer != nil {
+					src, dst := netLayer.NetworkFlow().Endpoints()
+					for _, ep := range []gopacket.Endpoint{src, dst} {
+						ip := net.ParseIP(ep.String())
+						if ip.IsPrivate() {
+							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
+						}
+					}
+				}
+			}
+		}(iface)
+	}
+	gologger.Info().Msg("Started passive discovery on all interfaces")
+}
+
+// Pop all discovered IPs and reset the map
+func PopAllPassiveDiscoveredIPs() []string {
+	var ips []string
+	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
+		ips = append(ips, k)
+		return nil
+	})
+	for _, k := range ips {
+		passiveDiscoveredIPs.Delete(k)
+	}
+	return ips
+}
+
 // Runner contains the internal logic of the program
 type Runner struct {
 	options        *Options
@@ -199,6 +249,10 @@ func NewRunner(options *Options) (*Runner, error) {
 				gologger.Warning().Msgf("error storing agent ID: %v", err)
 			}
 		}
+	}
+
+	if r.options.PassiveDiscovery {
+		go r.startPassiveDiscovery()
 	}
 
 	return r, nil
@@ -1214,6 +1268,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			if hasAutoDiscovery {
 				autoDiscoveredTargets = r.getAutoDiscoveredTargets()
 				log.Printf("adding auto discovered targets: %s", strings.Join(autoDiscoveredTargets, ","))
+			}
+
+			hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
+			if hasPassiveDiscovery {
+				log.Printf("adding passive discovered targets: %s", strings.Join(autoDiscoveredTargets, ","))
 			}
 
 			_ = pendingTasks.Set(metaId, struct{}{})

@@ -59,7 +59,8 @@ type Options struct {
 	AgentOutput string
 	AgentName   string
 
-	MCPMode bool
+	MCPMode          bool
+	PassiveDiscovery bool // Enable passive discovery
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -111,6 +112,7 @@ func ParseOptions() *Options {
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
+		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
@@ -172,6 +174,11 @@ func ParseOptions() *Options {
 
 	if options.AgentId == "" {
 		options.AgentId = xid.New().String()
+	}
+
+	// Also support env variable PASSIVE_DISCOVERY
+	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
+		options.PassiveDiscovery = true
 	}
 
 	return options
