@@ -32,6 +32,7 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
+	envutil "github.com/projectdiscovery/utils/env"
 	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	osutils "github.com/projectdiscovery/utils/os"
@@ -496,8 +497,10 @@ func (r *Runner) Close() {
 var awg *syncutil.AdaptiveWaitGroup
 
 func init() {
+	// Use PDTM_AGENT_WORKERS env variable, default 5
+	workers := envutil.GetEnvOrDefault("PDTM_AGENT_WORKERS", 5)
 	var err error
-	awg, err = syncutil.New(syncutil.WithSize(5))
+	awg, err = syncutil.New(syncutil.WithSize(workers))
 	if err != nil {
 		log.Fatalf("could not create worker group: %v", err)
 	}
@@ -1314,6 +1317,8 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					if err != nil {
 						gologger.Error().Msgf("Failed to get chunk after %d retries: %v", maxRetries, err)
 						break
+					} else {
+						gologger.Info().Msgf("Got chunk #%d for enumeration ID: %s", chunkCount, id)
 					}
 
 					if enumChunk == nil {

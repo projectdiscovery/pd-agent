@@ -89,7 +89,8 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 				outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
 				args = append(args, "-o", outputFile)
 			}
-			if args[0] == "httpx" && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
+			hasToolDashboardUpload := stringsutil.EqualFoldAny(args[0], "httpx", "naabu")
+			if hasToolDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
 				args = append(args,
 					"-team-id", os.Getenv("PDCP_TEAM_ID"),
 					"-dashboard",
@@ -414,6 +415,7 @@ func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(),
 	args = append(args,
 		"-silent",
 		"-l", tmpFile,
+		// "-verbose",
 	)
 
 	return envs, args, removeFunc, nil
