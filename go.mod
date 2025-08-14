@@ -1,8 +1,6 @@
 module github.com/projectdiscovery/pdtm-agent
 
-go 1.23
-
-toolchain go1.24.1
+go 1.24
 
 require (
 	github.com/charmbracelet/glamour v0.8.0
