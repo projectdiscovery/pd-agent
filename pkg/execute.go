@@ -52,7 +52,6 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 
 		taskResult, err := runCommand(ctx, envs, args)
 		if err != nil {
-			log.Fatal(err)
 			return nil, err
 		}
 
