@@ -95,6 +95,9 @@ func (c *LocalCache) Load() error {
 		return fmt.Errorf("error reading cache file: %v", err)
 	}
 
+	// TODO: execute at each run - TEMPORARY
+	_ = os.RemoveAll(cacheFile)
+
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
