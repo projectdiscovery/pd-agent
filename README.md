@@ -7,8 +7,8 @@
 
 <p align="center">
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-_red.svg"></a>
-<a href="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm"><img src="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm"></a>
-<a href="https://github.com/projectdiscovery/pdtm/releases"><img src="https://img.shields.io/github/release/projectdiscovery/pdtm"></a>
+<a href="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm-agent"><img src="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm-agent"></a>
+<a href="https://github.com/projectdiscovery/pdtm-agent/releases"><img src="https://img.shields.io/github/release/projectdiscovery/pdtm-agent"></a>
 <a href="https://twitter.com/pdiscoveryio"><img src="https://img.shields.io/twitter/follow/pdiscoveryio.svg?logo=twitter"></a>
 <a href="https://discord.gg/projectdiscovery"><img src="https://img.shields.io/discord/695645237418131507.svg?logo=discord"></a>
 </p>
@@ -36,10 +36,10 @@
 1. Install using go install -
 
 ```sh
-go install -v github.com/projectdiscovery/pdtm/cmd/pdtm@latest
+go install -v github.com/projectdiscovery/pdtm-agent/cmd/pdtm@latest
 ```
 
-2. Install by downloading binary from https://github.com/projectdiscovery/pdtm/releases
+2. Install by downloading binary from https://github.com/projectdiscovery/pdtm-agent/releases
 
 <table>
 <tr>

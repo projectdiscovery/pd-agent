@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/glamour"
-	ospath "github.com/projectdiscovery/pdtm/pkg/path"
-	"github.com/projectdiscovery/pdtm/pkg/types"
-	"github.com/projectdiscovery/pdtm/pkg/version"
+	ospath "github.com/projectdiscovery/pdtm-agent/pkg/path"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/pdtm-agent/pkg/version"
 	updateutils "github.com/projectdiscovery/utils/update"
 
 	"github.com/projectdiscovery/gologger"

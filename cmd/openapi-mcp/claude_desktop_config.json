@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+        "openapi-mcp": {
+            "command": "/Users/mzack/go/src/github.com/projectdiscovery/pdtm-agent/cmd/openapi-mcp/openapi-mcp",
+            "args": [
+                "-openapi",
+                "/Users/mzack/go/src/github.com/projectdiscovery/pdtm-agent/cmd/openapi-mcp/openapi-pdtm.yaml",
+                "-url",
+                "http://localhost:54321"
+            ]
+        }
+	}
+}

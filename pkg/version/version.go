@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 )
 
 var RegexVersionNumber = regexp.MustCompile(`(?m)[v\s](\d+\.\d+\.\d+)`)

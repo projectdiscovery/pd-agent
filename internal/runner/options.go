@@ -2,33 +2,28 @@ package runner
 
 import (
 	"os"
-	"path/filepath"
 
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/formatter"
 	"github.com/projectdiscovery/gologger/levels"
+	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
+	pdcpauth "github.com/projectdiscovery/utils/auth/pdcp"
+	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	updateutils "github.com/projectdiscovery/utils/update"
-)
-
-var (
-	// retrieve home directory or fail
-	homeDir = func() string {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			gologger.Fatal().Msgf("Failed to get user home directory: %s", err)
-		}
-		return home
-	}()
-
-	defaultConfigLocation = filepath.Join(homeDir, ".config/pdtm/config.yaml")
-	cacheFile             = filepath.Join(homeDir, ".config/pdtm/cache.json")
-	defaultPath           = filepath.Join(homeDir, ".pdtm/go/bin")
+	"github.com/rs/xid"
 )
 
 var au *aurora.Aurora
+
+var (
+	PDCPApiKey        = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv         = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy-dev.projectdiscovery.io")
+	PunchHoleHTTPPort = envutil.GetEnvOrDefault("PUNCH_HOLE_HTTP_PORT", "8880")
+)
 
 // Options contains the configuration options for tuning the enumeration process.
 type Options struct {
@@ -53,6 +48,19 @@ type Options struct {
 	ShowPath           bool
 	DisableUpdateCheck bool
 	DisableChangeLog   bool
+
+	PdcpAuth         string
+	PdcpAuthCredFile string
+	TeamID           string
+
+	AgentMode   bool
+	AgentId     string
+	AgentTags   goflags.StringSlice
+	AgentOutput string
+	AgentName   string
+
+	MCPMode          bool
+	PassiveDiscovery bool // Enable passive discovery
 }
 
 // ParseOptions parses the command line flags provided by a user
@@ -63,8 +71,8 @@ func ParseOptions() *Options {
 	flagSet.SetDescription(`pdtm is a simple and easy-to-use golang based tool for managing open source projects from ProjectDiscovery`)
 
 	flagSet.CreateGroup("config", "Config",
-		flagSet.StringVar(&options.ConfigFile, "config", defaultConfigLocation, "cli flag configuration file"),
-		flagSet.StringVarP(&options.Path, "binary-path", "bp", defaultPath, "custom location to download project binary"),
+		flagSet.StringVar(&options.ConfigFile, "config", tools.DefaultConfigLocation, "cli flag configuration file"),
+		flagSet.StringVarP(&options.Path, "binary-path", "bp", tools.DefaultPath, "custom location to download project binary"),
 	)
 
 	flagSet.CreateGroup("install", "Install",
@@ -93,6 +101,18 @@ func ParseOptions() *Options {
 		flagSet.BoolVarP(&options.Verbose, "verbose", "v", false, "show verbose output"),
 		flagSet.BoolVarP(&options.NoColor, "no-color", "nc", false, "disable output content coloring (ANSI escape codes)"),
 		flagSet.BoolVarP(&options.DisableChangeLog, "dc", "disable-changelog", false, "disable release changelog in output"),
+	)
+
+	flagSet.CreateGroup("cloud", "Cloud",
+		flagSet.DynamicVar(&options.PdcpAuth, "auth", "true", "configure projectdiscovery cloud (pdcp) api key"),
+		flagSet.StringVarP(&options.PdcpAuthCredFile, "auth-config", "ac", "", "configure projectdiscovery cloud (pdcp) api key credential file"),
+		flagSet.StringVarP(&options.TeamID, "team-id", "tid", TeamIDEnv, "upload asset results to given team id (optional)"),
+		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
+		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
+		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
+		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
+		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
@@ -128,8 +148,37 @@ func ParseOptions() *Options {
 		}
 	}
 
-	if options.ConfigFile != defaultConfigLocation {
+	if options.ConfigFile != tools.DefaultConfigLocation {
 		_ = options.loadConfigFrom(options.ConfigFile)
+	}
+
+	// api key hierarchy: cli flag > env var > .pdcp/credential file
+	// use dev api
+	pdcpauth.DefaultApiServer = "https://api.dev.projectdiscovery.io"
+	pdcpauth.DashBoardURL = "https://cloud-dev.projectdiscovery.io"
+
+	h := &pdcpauth.PDCPCredHandler{}
+	creds, err := h.GetCreds()
+	if err != nil {
+		if err != pdcpauth.ErrNoCreds {
+			gologger.Verbose().Msgf("Could not get credentials for cloud upload: %s\n", err)
+		}
+		pdcpauth.CheckNValidateCredentials("pdtm")
+		return nil
+	}
+	if apikey := os.Getenv("PDCP_API_KEY"); apikey != "" {
+		PDCPApiKey = apikey
+	} else {
+		PDCPApiKey = creds.APIKey
+	}
+
+	if options.AgentId == "" {
+		options.AgentId = xid.New().String()
+	}
+
+	// Also support env variable PASSIVE_DISCOVERY
+	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
+		options.PassiveDiscovery = true
 	}
 
 	return options

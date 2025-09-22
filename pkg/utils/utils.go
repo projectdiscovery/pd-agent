@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,9 +11,9 @@ import (
 	"strings"
 
 	"github.com/logrusorgru/aurora/v4"
-	"github.com/projectdiscovery/pdtm/pkg/path"
-	"github.com/projectdiscovery/pdtm/pkg/types"
-	"github.com/projectdiscovery/pdtm/pkg/version"
+	"github.com/projectdiscovery/pdtm-agent/pkg/path"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/pdtm-agent/pkg/version"
 	updateutils "github.com/projectdiscovery/utils/update"
 )
 
@@ -38,7 +40,9 @@ func FetchToolList() ([]types.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(resp.Body)
@@ -62,7 +66,9 @@ func fetchTool(toolName string) (types.Tool, error) {
 	if err != nil {
 		return tool, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode == http.StatusOK {
 		body, err := io.ReadAll(resp.Body)
@@ -139,4 +145,11 @@ func isOsAvailable(tool types.Tool) bool {
 		}
 	}
 	return false
+}
+
+// GenerateRandomString generates a random string of specified length
+func GenerateRandomString(length int) string {
+	b := make([]byte, length)
+	_, _ = rand.Read(b)
+	return base64.URLEncoding.EncodeToString(b)[:length]
 }

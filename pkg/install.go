@@ -19,8 +19,8 @@ import (
 	"github.com/google/go-github/github"
 	"github.com/logrusorgru/aurora/v4"
 	"github.com/projectdiscovery/gologger"
-	ospath "github.com/projectdiscovery/pdtm/pkg/path"
-	"github.com/projectdiscovery/pdtm/pkg/types"
+	ospath "github.com/projectdiscovery/pdtm-agent/pkg/path"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	osutils "github.com/projectdiscovery/utils/os"
 	"github.com/projectdiscovery/utils/syscallutil"
 )
@@ -114,7 +114,9 @@ loop:
 		return "", err
 	}
 
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 	if resp.StatusCode != 200 {
 		return "", err
 	}
@@ -167,7 +169,9 @@ func downloadTar(reader io.Reader, toolName, path string) error {
 			if err != nil {
 				return err
 			}
-			defer dstFile.Close()
+			defer func() {
+				_ = dstFile.Close()
+			}()
 			// copy the file data from the archive
 			_, err = io.Copy(dstFile, tarReader)
 			if err != nil {
@@ -224,8 +228,8 @@ func downloadZip(reader io.Reader, toolName, path string) error {
 			return err
 		}
 
-		dstFile.Close()
-		fileInArchive.Close()
+		_ = dstFile.Close()
+		_ = fileInArchive.Close()
 	}
 	return nil
 }
@@ -240,12 +244,12 @@ func printRequirementInfo(tool types.Tool) {
 			continue
 		}
 		if printTitle {
-			stringBuilder.WriteString(fmt.Sprintf("%s\n", au.Bold(tool.Name+" requirements:").String()))
+			fmt.Fprintf(stringBuilder, "%s\n", au.Bold(tool.Name+" requirements:").String())
 			printTitle = false
 		}
 		instruction := getFormattedInstruction(spec)
 		isRequired := getRequirementStatus(spec)
-		stringBuilder.WriteString(fmt.Sprintf("%s %s\n", isRequired, instruction))
+		fmt.Fprintf(stringBuilder, "%s %s\n", isRequired, instruction)
 	}
 	if stringBuilder.Len() > 0 {
 		gologger.Info().Msgf("%s", stringBuilder.String())
