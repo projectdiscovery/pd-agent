@@ -15,7 +15,7 @@ require (
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.56
-	github.com/projectdiscovery/utils v0.5.0
+	github.com/projectdiscovery/utils v0.6.0
 	github.com/rs/xid v1.6.0
 	github.com/stretchr/testify v1.11.1
 	github.com/tidwall/gjson v1.18.0
@@ -117,7 +117,7 @@ require (
 	github.com/projectdiscovery/hmap v0.0.94 // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20250715113114-c77eb3567582 // indirect
 	github.com/projectdiscovery/networkpolicy v0.1.25 // indirect
-	github.com/projectdiscovery/retryabledns v1.0.107 // indirect
+	github.com/projectdiscovery/retryabledns v1.0.108 // indirect
 	github.com/projectdiscovery/retryablehttp-go v1.0.126 // indirect
 	github.com/refraction-networking/utls v1.8.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
