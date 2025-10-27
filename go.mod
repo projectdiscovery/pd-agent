@@ -59,7 +59,7 @@ require (
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
 	github.com/ebitengine/purego v0.8.4 // indirect
 	github.com/fatih/color v1.18.0 // indirect
-	github.com/gaissmai/bart v0.25.0 // indirect
+	github.com/gaissmai/bart v0.26.0 // indirect
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/go-openapi/jsonpointer v0.20.2 // indirect
@@ -116,7 +116,7 @@ require (
 	github.com/projectdiscovery/fastdialer v0.4.13 // indirect
 	github.com/projectdiscovery/hmap v0.0.95 // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20250715113114-c77eb3567582 // indirect
-	github.com/projectdiscovery/networkpolicy v0.1.26 // indirect
+	github.com/projectdiscovery/networkpolicy v0.1.27 // indirect
 	github.com/projectdiscovery/retryabledns v1.0.108 // indirect
 	github.com/projectdiscovery/retryablehttp-go v1.0.129 // indirect
 	github.com/refraction-networking/utls v1.8.0 // indirect
