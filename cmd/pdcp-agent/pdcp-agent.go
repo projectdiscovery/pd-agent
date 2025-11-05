@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -24,6 +25,7 @@ import (
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pdtm-agent/pkg"
 	"github.com/projectdiscovery/pdtm-agent/pkg/client"
+	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	envutil "github.com/projectdiscovery/utils/env"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -776,6 +778,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				return true
 			}
 
+			log.Printf("Before sanitization: %s", enumerationConfig)
+
+			// Sanitize enumeration config (remove unsupported steps)
+			enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, scanName)
+
 			// Get basic info needed for hash
 			var assets []string
 			gjson.Parse(enumerationConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
@@ -829,30 +836,221 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	return nil
 }
 
-// elaborateScanChunks processes distributed scan chunks
+// executeNucleiScan is the shared implementation for executing nuclei scans
+// using the same logic as pdtm-agent
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+	// Set output directory if agent output is specified
+	var outputDir string
+	if r.options.AgentOutput != "" {
+		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+	}
+
+	// Create task similar to pdtm-agent
+	task := &types.Task{
+		Tool: types.Nuclei,
+		Options: types.Options{
+			Hosts:     assets,
+			Templates: templates,
+			Silent:    true,
+			ScanID:    scanID,
+			Config:    config,
+			TeamID:    r.options.TeamID,
+			Output:    outputDir,
+		},
+		Id: metaID,
+	}
+
+	// Execute using the same pkg.Run logic as pdtm-agent
+	gologger.Info().Msgf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID)
+	taskResult, err := pkg.Run(ctx, task)
+	if err != nil {
+		gologger.Error().Msgf("Nuclei scan execution failed: %v", err)
+		return
+	}
+
+	if taskResult != nil {
+		gologger.Info().Msgf("Completed nuclei scan for scanID=%s, metaID=%s\nStdout: %s\nStderr: %s", scanID, metaID, taskResult.Stdout, taskResult.Stderr)
+	} else {
+		gologger.Info().Msgf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID)
+	}
+}
+
+// processChunks is a generic chunk processing method that handles the common logic
+// for pulling chunks, updating status, and executing them
+func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, executeChunk func(ctx context.Context, chunk *TaskChunk) error) {
+	gologger.Info().Msgf("Starting distributed %s processing for %s ID: %s", taskType, taskType, taskID)
+
+	chunkCount := 0
+	for {
+		chunkCount++
+		gologger.Info().Msgf("Fetching chunk #%d for %s ID: %s", chunkCount, taskType, taskID)
+
+		var chunk *TaskChunk
+		var err error
+		maxRetries := 5
+		retryCount := 0
+		lastErr := ""
+
+		// Retry logic for getting chunks
+		for retryCount < maxRetries {
+			chunk, err = r.getTaskChunk(ctx, taskID, false)
+			if err == nil {
+				break
+			}
+			currentErr := err.Error()
+			if currentErr == lastErr {
+				// If we get the same error multiple times, likely the task is complete
+				gologger.Info().Msgf("%s ID %s completed successfully", taskType, taskID)
+				goto Complete
+			}
+			lastErr = currentErr
+			retryCount++
+			if retryCount < maxRetries {
+				time.Sleep(time.Second * 3)
+			}
+		}
+
+		if err != nil {
+			gologger.Error().Msgf("Failed to get chunk after %d retries: %v", maxRetries, err)
+			break
+		}
+
+		if chunk == nil {
+			gologger.Info().Msgf("No more chunks available for %s ID: %s", taskType, taskID)
+			break
+		}
+
+		gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
+			chunkCount,
+			chunk.ChunkID,
+			len(chunk.Targets))
+
+		// Set initial status to in_progress
+		if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
+			gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+		} else {
+			gologger.Info().Msgf("Updated chunk %s status to in_progress", chunk.ChunkID)
+		}
+
+		// Start a goroutine to periodically update status (heartbeat)
+		timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+		go func(ctx context.Context, taskID, chunkID string) {
+			ticker := time.NewTicker(10 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
+						gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+					} else {
+						gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+					}
+				}
+			}
+		}(timerCtx, taskID, chunk.ChunkID)
+
+		// Execute the chunk using the provided callback
+		if err := executeChunk(ctx, chunk); err != nil {
+			gologger.Error().Msgf("Error executing %s chunk: %v", taskType, err)
+		}
+
+		// Stop the heartbeat timer
+		timerCtxCancel()
+		gologger.Debug().Msgf("Stopped status update timer for chunk %s", chunk.ChunkID)
+
+		// Wait 1 second before marking as complete
+		time.Sleep(time.Second)
+
+		// Mark the chunk as completed with ACK
+		if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusAck); err != nil {
+			gologger.Error().Msgf("Error updating %s chunk status to ACK: %v", taskType, err)
+		} else {
+			gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, chunk.ChunkID)
+		}
+
+		gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
+		time.Sleep(time.Second * 10)
+	}
+
+Complete:
+	gologger.Info().Msgf("Completed processing all chunks for %s ID: %s (total chunks: %d)", taskType, taskID, chunkCount)
+
+	// Mark the task as done
+	_, _ = r.getTaskChunk(ctx, taskID, true)
+}
+
+// elaborateScanChunks processes distributed scan chunks using the same logic as pdtm-agent
 func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	time.Sleep(10 * time.Second)
-	// TODO: Implement chunk elaboration logic
-	gologger.Info().Msgf("elaborateScanChunks: scanID=%s, metaID=%s", scanID, metaID)
+	r.processChunks(ctx, scanID, "scan", func(ctx context.Context, chunk *TaskChunk) error {
+		// Execute the chunk using the shared scan execution logic
+		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, chunk.Targets)
+		return nil
+	})
 }
 
-// elaborateScan processes a non-distributed scan
+// elaborateScan processes a non-distributed scan using the same logic as pdtm-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	time.Sleep(10 * time.Second)
-	// TODO: Implement scan elaboration logic
-	gologger.Info().Msgf("elaborateScan: scanID=%s, metaID=%s", scanID, metaID)
+	gologger.Info().Msgf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets))
+	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets)
 }
 
-// elaborateEnumerationChunks processes distributed enumeration chunks
+// executeEnumeration is the shared implementation for executing enumerations
+// using the same logic as pdtm-agent
+func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
+	gologger.Info().Msgf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets))
+
+	// Set output directory if agent output is specified
+	var outputDir string
+	if r.options.AgentOutput != "" {
+		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+	}
+
+	// Create task for enumeration - this will trigger the enumeration execution logic in pkg.Run
+	// which runs tools like dnsx, naabu, httpx based on the steps
+	task := &types.Task{
+		Tool: types.Nuclei, // Tool type doesn't matter for enumerations, pkg.Run checks EnumerationID to run enumeration tools
+		Options: types.Options{
+			Hosts:         assets,
+			Steps:         steps,
+			Silent:        true,
+			EnumerationID: enumID,
+			TeamID:        r.options.TeamID,
+			Output:        outputDir,
+		},
+		Id: metaID,
+	}
+
+	// Execute using the same pkg.Run logic as pdtm-agent
+	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
+	taskResult, err := pkg.Run(ctx, task)
+	if err != nil {
+		gologger.Error().Msgf("Enumeration execution failed: %v", err)
+		return
+	}
+
+	if taskResult != nil {
+		gologger.Info().Msgf("Completed enumeration for enumID=%s, metaID=%s\nStdout: %s\nStderr: %s", enumID, metaID, taskResult.Stdout, taskResult.Stderr)
+	} else {
+		gologger.Info().Msgf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID)
+	}
+}
+
+// elaborateEnumerationChunks processes distributed enumeration chunks using the same logic as pdtm-agent
 func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	// TODO: Implement enumeration chunk elaboration logic
-	gologger.Info().Msgf("elaborateEnumerationChunks: enumID=%s, metaID=%s", enumID, metaID)
+	r.processChunks(ctx, enumID, "enumeration", func(ctx context.Context, chunk *TaskChunk) error {
+		// Execute the chunk using the shared enumeration execution logic
+		r.executeEnumeration(ctx, enumID, chunk.ChunkID, steps, chunk.Targets)
+		return nil
+	})
 }
 
 // elaborateEnumeration processes a non-distributed enumeration
 func (r *Runner) elaborateEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	// TODO: Implement enumeration elaboration logic
-	gologger.Info().Msgf("elaborateEnumeration: enumID=%s, metaID=%s", enumID, metaID)
+	gologger.Info().Msgf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets))
+	r.executeEnumeration(ctx, enumID, metaID, steps, assets)
 }
 
 // fetchScanConfig fetches scan configuration
@@ -913,6 +1111,100 @@ func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
 	}
 
 	return string(resp.Body), nil
+}
+
+// UpdateTaskChunkStatus updates the status of a task chunk (ACK, NACK, or in_progress)
+func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskId, chunkID string, status TaskChunkStatus) error {
+	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk/%s", pkg.PCDPApiServer, taskId, chunkID)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+	if err != nil {
+		return fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+
+	// Add status query parameter
+	q := req.URL.Query()
+	q.Add("status", string(status))
+	req.URL.RawQuery = q.Encode()
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error sending request: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response to check if ok is true
+	var response struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		return fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	if !response.OK {
+		return fmt.Errorf("server returned ok=false")
+	}
+
+	return nil
+}
+
+// getTaskChunk fetches a task chunk from the API
+func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*TaskChunk, error) {
+	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk", pkg.PCDPApiServer, taskID)
+
+	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+	if err != nil {
+		return nil, fmt.Errorf("error creating authenticated client: %v", err)
+	}
+
+	if done {
+		apiURL = fmt.Sprintf("%s?done=true", apiURL)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error creating request: %v", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("error sending request: %v", err)
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("error reading response: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	var taskChunk TaskChunk
+	if err := json.Unmarshal(body, &taskChunk); err != nil {
+		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	return &taskChunk, nil
 }
 
 // In handles agent registration with the punch-hole server
@@ -1042,6 +1334,54 @@ func computeScanConfigHash(scanConfig string, templates []string, assets []strin
 	h.Write([]byte(strings.Join(assets, ",")))
 
 	return fmt.Sprintf("%x", h.Sum(nil))
+}
+
+// sanitizeEnumerationConfig removes unsupported steps from the enumeration config.
+// Steps "uncover_assets", "dns_passive", "dns_bruteforce", and "dns_permute" are not supported for internal scans and will be removed.
+// Returns the sanitized configuration as a JSON string.
+func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string) string {
+	var unsupportedSteps []string
+	var supportedSteps []string
+
+	// Extract all steps from the enumeration config
+	gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
+		step := value.String()
+		if step == "uncover_assets" || step == "dns_passive" || step == "dns_bruteforce" || step == "dns_permute" {
+			unsupportedSteps = append(unsupportedSteps, step)
+		} else {
+			supportedSteps = append(supportedSteps, step)
+		}
+		return true
+	})
+
+	// If no unsupported steps found, return the original config
+	if len(unsupportedSteps) == 0 {
+		return enumerationConfig
+	}
+
+	// Log info about removed steps
+	gologger.Info().Msgf("Removing unsupported steps from enumeration %s: %s", enumerationName, strings.Join(unsupportedSteps, ", "))
+
+	// Parse the entire config as JSON to properly reconstruct it
+	var configMap map[string]interface{}
+	if err := json.Unmarshal([]byte(enumerationConfig), &configMap); err != nil {
+		// If parsing fails, return original config
+		gologger.Warning().Msgf("Failed to parse enumeration config for sanitization: %v", err)
+		return enumerationConfig
+	}
+
+	// Update the steps array with only supported steps
+	configMap["steps"] = supportedSteps
+
+	// Reconstruct the JSON
+	sanitizedConfig, err := json.Marshal(configMap)
+	if err != nil {
+		// If marshaling fails, return original config
+		gologger.Warning().Msgf("Failed to marshal sanitized enumeration config: %v", err)
+		return enumerationConfig
+	}
+
+	return string(sanitizedConfig)
 }
 
 // computeEnumerationConfigHash computes a hash of the enumeration configuration
