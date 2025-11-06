@@ -106,7 +106,7 @@ require (
 	github.com/mohae/deepcopy v0.0.0-20170929034955-c48cc78d4826 // indirect
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/nwaples/rardecode/v2 v2.1.1 // indirect
+	github.com/nwaples/rardecode/v2 v2.2.0 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
