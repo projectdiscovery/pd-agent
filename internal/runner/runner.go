@@ -1559,6 +1559,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("os", runtime.GOOS)
 	q.Add("arch", runtime.GOARCH)
 	q.Add("id", r.options.AgentId)
+	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(tagsToUse, ","))
 	inReq.URL.RawQuery = q.Encode()
