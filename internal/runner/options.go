@@ -176,6 +176,16 @@ func ParseOptions() *Options {
 		options.AgentId = xid.New().String()
 	}
 
+	// Initialize AgentName with hostname if not set
+	if options.AgentName == "" {
+		if hostname, err := os.Hostname(); err == nil {
+			options.AgentName = hostname
+		} else {
+			// Fallback to agent ID if hostname cannot be determined
+			options.AgentName = options.AgentId
+		}
+	}
+
 	// Also support env variable PASSIVE_DISCOVERY
 	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
 		options.PassiveDiscovery = true
