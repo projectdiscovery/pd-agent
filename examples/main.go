@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/projectdiscovery/goflags"
-	"github.com/projectdiscovery/pdtm/pkg/utils"
+	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
 )
 
 type options struct {
