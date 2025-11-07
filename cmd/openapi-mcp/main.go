@@ -72,18 +72,17 @@ func main() {
 			for _, param := range pathItem.Parameters {
 				log.Printf("processing path parameter: %s", param.Value.Name)
 				if param.Value.Schema != nil && param.Value.Schema.Value != nil {
-					switch param.Value.Schema.Value.Type {
-					case "string":
+					if param.Value.Schema.Value.Type.Is(openapi3.TypeString) {
 						toolOpts = append(toolOpts, mcp.WithString(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
 						))
-					case "integer", "number":
+					} else if param.Value.Schema.Value.Type.Is(openapi3.TypeInteger) || param.Value.Schema.Value.Type.Is(openapi3.TypeNumber) {
 						toolOpts = append(toolOpts, mcp.WithNumber(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
 						))
-					case "boolean":
+					} else if param.Value.Schema.Value.Type.Is(openapi3.TypeBoolean) {
 						toolOpts = append(toolOpts, mcp.WithString(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
@@ -98,24 +97,23 @@ func main() {
 			for _, param := range operation.Parameters {
 				log.Printf("processing operation parameter: %s", param.Value.Name)
 				if param.Value.Schema != nil && param.Value.Schema.Value != nil {
-					switch param.Value.Schema.Value.Type {
-					case "string":
+					if param.Value.Schema.Value.Type.Is("string") {
 						toolOpts = append(toolOpts, mcp.WithString(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
 						))
-					case "integer", "number":
+					} else if param.Value.Schema.Value.Type.Is("integer") || param.Value.Schema.Value.Type.Is("number") {
 						toolOpts = append(toolOpts, mcp.WithNumber(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
 						))
-					case "boolean":
+					} else if param.Value.Schema.Value.Type.Is("boolean") {
 						toolOpts = append(toolOpts, mcp.WithString(param.Value.Name,
 							mcp.Description(param.Value.Description),
 							mcp.Required(),
 						))
 					}
-					toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %s | Required: %t",
+					toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %v | Required: %t",
 						param.Value.Name,
 						param.Value.Description,
 						param.Value.Schema.Value.Type,
@@ -132,30 +130,30 @@ func main() {
 							if prop.Value != nil {
 								var toolOpt mcp.ToolOption
 								switch {
-								case prop.Value.Type == "array" && prop.Value.Items != nil && prop.Value.Items.Value.Type == "string":
+								case prop.Value.Type.Is("array") && prop.Value.Items != nil && prop.Value.Items.Value.Type.Is("string"):
 									// Handle arrays as comma-separated strings
 									toolOpt = mcp.WithString(propName,
 										mcp.Description(prop.Value.Description+" (comma-separated list)"),
 										mcp.Required(),
 									)
-								case prop.Value.Type == "string":
+								case prop.Value.Type.Is("string"):
 									toolOpt = mcp.WithString(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
 									)
-								case prop.Value.Type == "integer" || prop.Value.Type == "number":
+								case prop.Value.Type.Is("integer") || prop.Value.Type.Is("number"):
 									toolOpt = mcp.WithNumber(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
 									)
-								case prop.Value.Type == "boolean":
+								case prop.Value.Type.Is("boolean"):
 									toolOpt = mcp.WithString(propName,
 										mcp.Description(prop.Value.Description),
 										mcp.Required(),
 									)
 								}
 								if toolOpt != nil {
-									toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %s | Required: %v",
+									toolOptions = append(toolOptions, fmt.Sprintf("Name: %s | Description: %s | Type: %v | Required: %v",
 										propName,
 										prop.Value.Description,
 										prop.Value.Type,
@@ -200,7 +198,7 @@ func main() {
 						// Check if this parameter is defined as an array in the schema
 						if strValue, ok := value.(string); ok {
 							if mediaType := operation.RequestBody.Value.Content["application/json"]; mediaType != nil {
-								if prop, ok := mediaType.Schema.Value.Properties[key]; ok && prop.Value.Type == "array" {
+								if prop, ok := mediaType.Schema.Value.Properties[key]; ok && prop.Value.Type.Is("array") {
 									// Split comma-separated string into array, trimming spaces
 									values := strings.Split(strValue, ",")
 									for i := range values {
