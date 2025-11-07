@@ -1498,8 +1498,8 @@ var isRegistered bool
 func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++ // increment /in request counter
 
-	// Fetch agent info from punch_hole /workers/:id
-	endpoint := fmt.Sprintf("http://%s:%s/workers/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
+	// Fetch agent info from punch_hole /agents/:id
+	endpoint := fmt.Sprintf("http://%s:%s/agents/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		log.Printf("failed to create agent info request: %v", err)
