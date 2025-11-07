@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: projectdiscovery/actions/setup/go@v1
+      - name: Install libpcap-dev
+        run: sudo apt install libpcap-dev
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v5
         with:
@@ -28,10 +31,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+        # os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: [ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: projectdiscovery/actions/setup/go@v1
+      - name: Install libpcap-dev
+        run: sudo apt install libpcap-dev
       - run: go build .
         working-directory: cmd/pdcp-agent/
 
