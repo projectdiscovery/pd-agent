@@ -33,7 +33,6 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	"github.com/projectdiscovery/pdtm-agent/pkg/utils"
 	envutil "github.com/projectdiscovery/utils/env"
-	errorutil "github.com/projectdiscovery/utils/errors"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -43,6 +42,7 @@ import (
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/pcap"
+	"github.com/projectdiscovery/utils/errkit"
 )
 
 var excludedToolList = []string{"nuclei-templates"}
@@ -267,7 +267,7 @@ func (r *Runner) Run(ctx context.Context) error {
 	// add default path to $PATH
 	if r.options.SetPath || r.options.Path == tools.DefaultPath {
 		if err := path.SetENV(r.options.Path); err != nil {
-			return errorutil.NewWithErr(err).Msgf(`Failed to set path: %s. Add it to $PATH and run again`, r.options.Path)
+			return errkit.Wrapf(err, "Failed to set path: %s. Add it to $PATH and run again", r.options.Path)
 		}
 	}
 
@@ -279,14 +279,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		if goEnvVar != "" {
 			if err := path.SetENV(goEnvVar); err != nil {
-				return errorutil.NewWithErr(err).Msgf(`Failed to set path: %s. Add it to $PATH and run again`, goEnvVar)
+				return errkit.Wrapf(err, "Failed to set path: %s. Add it to $PATH and run again", goEnvVar)
 			}
 		}
 	}
 
 	if r.options.UnSetPath {
 		if err := path.UnsetENV(r.options.Path); err != nil {
-			return errorutil.NewWithErr(err).Msgf(`Failed to unset path: %s. Remove it from $PATH and run again`, r.options.Path)
+			return errkit.Wrapf(err, "Failed to unset path: %s. Remove it from $PATH and run again", r.options.Path)
 		}
 	}
 
@@ -1559,6 +1559,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("os", runtime.GOOS)
 	q.Add("arch", runtime.GOARCH)
 	q.Add("id", r.options.AgentId)
+	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(tagsToUse, ","))
 	inReq.URL.RawQuery = q.Encode()
