@@ -1562,6 +1562,15 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(tagsToUse, ","))
+
+	// Get auto-discovered network subnets and add to query parameters
+	// This is fault-tolerant - if getAutoDiscoveredTargets() returns empty or nil,
+	// we simply send an empty string
+	networkSubnets := r.getAutoDiscoveredTargets()
+	if len(networkSubnets) > 0 {
+		q.Add("network_subnets", strings.Join(networkSubnets, ","))
+	}
+
 	inReq.URL.RawQuery = q.Encode()
 	inReq.Header.Set("x-api-key", PDCPApiKey)
 
