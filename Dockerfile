@@ -1,9 +1,18 @@
-FROM --platform=linux/amd64 golang:1.24 AS builder
-RUN apt-get update && apt-get install -y git
+FROM --platform=linux/amd64 golang:1.25 AS builder
+RUN apt-get update && apt-get install -y git libpcap-dev
 ARG GITHUB_TOKEN
 RUN git config --global url."https://${GITHUB_TOKEN}:x-oauth-basic@github.com/".insteadOf "https://github.com/"
 RUN go env -w GOPRIVATE=github.com/projectdiscovery
-RUN go install -v github.com/projectdiscovery/pdtm/cmd/pdtm@latest
+
+# Copy source code
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Build pdcp-agent binary
+# CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/pdcp-agent ./cmd/pdcp-agent/pdcp-agent.go
 
 # Tools dependencies
 # dnsx
@@ -38,7 +47,7 @@ ENV CHROME_PATH=/usr/bin/
 ENV CHROME_NO_SANDBOX=true
 
 # Copy agent binary
-COPY --from=builder /go/bin/pdtm /usr/local/bin/
+COPY --from=builder /go/bin/pdcp-agent /usr/local/bin/pdcp-agent
 
 # Copy tools binaries
 COPY --from=builder /go/bin/dnsx /usr/local/bin/
@@ -47,4 +56,14 @@ COPY --from=builder /go/bin/httpx /usr/local/bin/
 COPY --from=builder /go/bin/tlsx /usr/local/bin/
 COPY --from=builder /go/bin/nuclei /usr/local/bin/
 
-ENTRYPOINT ["pdtm-agent"]
+# Set default environment variables (can be overridden at runtime)
+ENV PDCP_API_KEY=""
+ENV PDCP_API_SERVER="https://api.dev.projectdiscovery.io"
+ENV PUNCH_HOLE_HOST="proxy-dev.projectdiscovery.io"
+ENV PUNCH_HOLE_HTTP_PORT="8880"
+ENV PDCP_TEAM_ID=""
+ENV PROXY_URL="http://127.0.0.1:8080"
+
+# ENTRYPOINT allows passing command-line arguments at runtime
+# Environment variables should be passed via -e flags or docker-compose
+ENTRYPOINT ["pdcp-agent"]
