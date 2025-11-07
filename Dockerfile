@@ -27,6 +27,8 @@ RUN go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
 RUN go install -v github.com/projectdiscovery/nuclei/cmd/nuclei@latest
 
 FROM --platform=linux/amd64 ubuntu:latest
+# install dependencies
+# required: libpcap-dev, chrome
 RUN apt update && apt install -y \
     bind9-dnsutils \
     ca-certificates \
