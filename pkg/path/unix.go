@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/projectdiscovery/gologger"
-	errorutil "github.com/projectdiscovery/utils/errors"
+	"github.com/projectdiscovery/utils/errkit"
 	fileutil "github.com/projectdiscovery/utils/file"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 )
@@ -76,7 +76,7 @@ func add(path string) (bool, error) {
 
 	conf, err := lookupConfFromShell()
 	if err != nil {
-		return false, errorutil.NewWithErr(err).Msgf("add %s to $PATH env", path)
+		return false, errkit.Wrapf(err, "add %s to $PATH env", path)
 	}
 
 	script := fmt.Sprintf("export PATH=$PATH:%s\n\n", path)
@@ -91,7 +91,7 @@ func remove(path string) (bool, error) {
 
 	conf, err := lookupConfFromShell()
 	if err != nil {
-		return false, errorutil.NewWithErr(err).Msgf("remove %s from $PATH env", path)
+		return false, errkit.Wrapf(err, "remove %s from $PATH env", path)
 	}
 	pathVars = sliceutil.PruneEqual(pathVars, path)
 	script := fmt.Sprintf("export PATH=%s\n\n", strings.Join(pathVars, ":"))
