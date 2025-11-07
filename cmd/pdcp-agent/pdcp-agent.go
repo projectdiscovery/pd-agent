@@ -48,7 +48,6 @@ type Options struct {
 	AgentName        string
 	Verbose          bool
 	PassiveDiscovery bool // Enable passive discovery
-	AgentMode        bool // Agent mode (always true for pdcp-agent)
 }
 
 // ScanCache represents cached scan execution information
@@ -480,6 +479,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				})
 			}
 
+			id := value.Get("scan_id").String()
 			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag {
 				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
 				return true
@@ -525,7 +525,6 @@ func (r *Runner) getScans(ctx context.Context) error {
 				}
 			}
 
-			id := value.Get("scan_id").String()
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
 			// First check completed and pending tasks
@@ -1408,7 +1407,6 @@ func parseOptions() *Options {
 	flagSet.SetDescription(`pdcp-agent is an agent for ProjectDiscovery Cloud Platform`)
 
 	flagSet.CreateGroup("agent", "Agent",
-		flagSet.BoolVar(&options.AgentMode, "agent", false, "agent mode"),
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
