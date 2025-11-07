@@ -176,13 +176,13 @@ func ParseOptions() *Options {
 		options.AgentId = xid.New().String()
 	}
 
-	// Initialize AgentName with hostname if not set
+	// Initialize AgentName if not set
 	if options.AgentName == "" {
-		if hostname, err := os.Hostname(); err == nil {
+		// by default use agent id
+		options.AgentName = options.AgentId
+		// if hostname is available and not empty, use it
+		if hostname, err := os.Hostname(); err == nil && hostname != "" {
 			options.AgentName = hostname
-		} else {
-			// Fallback to agent ID if hostname cannot be determined
-			options.AgentName = options.AgentId
 		}
 	}
 
