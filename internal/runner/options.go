@@ -53,11 +53,12 @@ type Options struct {
 	PdcpAuthCredFile string
 	TeamID           string
 
-	AgentMode   bool
-	AgentId     string
-	AgentTags   goflags.StringSlice
-	AgentOutput string
-	AgentName   string
+	AgentMode     bool
+	AgentId       string
+	AgentTags     goflags.StringSlice
+	AgentNetworks goflags.StringSlice
+	AgentOutput   string
+	AgentName     string
 
 	MCPMode          bool
 	PassiveDiscovery bool // Enable passive discovery
@@ -111,6 +112,7 @@ func ParseOptions() *Options {
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.BoolVar(&options.MCPMode, "mcp", false, "mcp mode"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 	)
