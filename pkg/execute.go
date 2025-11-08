@@ -67,7 +67,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 		var (
 			naabuOutput     []string
 			naabuOutputFile string
-			manualAssetId   string
+			manualAssetId   = task.Options.EnumerationID
 		)
 		for _, tool := range tools {
 			if len(naabuOutput) > 0 {

@@ -1,10 +1,10 @@
 module github.com/projectdiscovery/pdtm-agent
 
-go 1.24.0
+go 1.24.1
 
 require (
 	github.com/charmbracelet/glamour v0.10.0
-	github.com/getkin/kin-openapi v0.131.0
+	github.com/getkin/kin-openapi v0.132.0
 	github.com/google/go-github v17.0.0+incompatible
 	github.com/google/gopacket v1.1.19
 	github.com/kr/pretty v0.3.1
@@ -108,6 +108,7 @@ require (
 	github.com/nwaples/rardecode/v2 v2.1.1 // indirect
 	github.com/oasdiff/yaml v0.0.0-20250309154309-f31be36b4037 // indirect
 	github.com/oasdiff/yaml3 v0.0.0-20250309153720-d2182401db90 // indirect
+	github.com/onsi/gomega v1.34.1 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.22 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -122,7 +123,7 @@ require (
 	github.com/projectdiscovery/retryablehttp-go v1.0.130 // indirect
 	github.com/refraction-networking/utls v1.8.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/rogpeppe/go-internal v1.13.1 // indirect
+	github.com/rogpeppe/go-internal v1.14.1 // indirect
 	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d // indirect
 	github.com/shirou/gopsutil/v3 v3.24.5 // indirect
 	github.com/shoenig/go-m1cpu v0.1.6 // indirect
@@ -139,6 +140,7 @@ require (
 	github.com/tidwall/transform v0.0.0-20201103190739-32f242e2dbde // indirect
 	github.com/tklauser/go-sysconf v0.3.15 // indirect
 	github.com/tklauser/numcpus v0.10.0 // indirect
+	github.com/ugorji/go/codec v1.2.11 // indirect
 	github.com/ulikunitz/xz v0.5.14 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
@@ -149,7 +151,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	github.com/zcalusic/sysinfo v1.1.3 // indirect
 	github.com/zmap/rc2 v0.0.0-20190804163417-abaa70531248 // indirect
-	github.com/zmap/zcrypto v0.0.0-20230422215203-9a665e1e9968 // indirect
+	github.com/zmap/zcrypto v0.0.0-20240512203510-0fef58d9a9db // indirect
 	go.etcd.io/bbolt v1.4.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
