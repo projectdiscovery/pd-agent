@@ -32,6 +32,9 @@ import (
 	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	"github.com/tidwall/gjson"
+
+	"github.com/google/gopacket"
+	"github.com/google/gopacket/pcap"
 )
 
 var (
@@ -274,7 +277,8 @@ var (
 			LRU().
 			Expiration(time.Hour).
 			Build()
-	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
+	pendingTasks         = mapsutil.NewSyncLockMap[string, struct{}]()
+	passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
 )
 
 // NewRunner creates a new runner instance
@@ -300,6 +304,11 @@ func NewRunner(options *Options) (*Runner, error) {
 				gologger.Warning().Msgf("error storing agent ID: %v", err)
 			}
 		}
+	}
+
+	// Start passive discovery if enabled
+	if r.options.PassiveDiscovery {
+		go r.startPassiveDiscovery()
 	}
 
 	return r, nil
@@ -857,6 +866,16 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			workerBehavior := value.Get("worker_behavior").String()
 			isDistributed := workerBehavior == "distribute"
+
+			// Check if passive discovery is enabled for this enumeration
+			hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
+			if hasPassiveDiscovery && r.options.PassiveDiscovery {
+				discoveredIPs := PopAllPassiveDiscoveredIPs()
+				if len(discoveredIPs) > 0 {
+					gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
+					assets = append(assets, discoveredIPs...)
+				}
+			}
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
@@ -1485,6 +1504,55 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 	}
 
 	return targets
+}
+
+// startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket
+func (r *Runner) startPassiveDiscovery() {
+	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
+	ifs, err := pcap.FindAllDevs()
+	if err != nil {
+		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
+		return
+	}
+	for _, iface := range ifs {
+		go func(iface pcap.Interface) {
+			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
+			if err != nil {
+				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
+				return
+			}
+			defer handle.Close()
+			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+			for packet := range packetSource.Packets() {
+				if netLayer := packet.NetworkLayer(); netLayer != nil {
+					src, dst := netLayer.NetworkFlow().Endpoints()
+					for _, ep := range []gopacket.Endpoint{src, dst} {
+						ip := net.ParseIP(ep.String())
+						if ip != nil && ip.IsPrivate() {
+							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
+						}
+					}
+				}
+			}
+		}(iface)
+	}
+	gologger.Info().Msg("Started passive discovery on all interfaces")
+}
+
+// PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
+func PopAllPassiveDiscoveredIPs() []string {
+	if passiveDiscoveredIPs == nil {
+		return nil
+	}
+	var ips []string
+	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
+		ips = append(ips, k)
+		return nil
+	})
+	for _, k := range ips {
+		passiveDiscoveredIPs.Delete(k)
+	}
+	return ips
 }
 
 // computeScanConfigHash computes a hash of the scan configuration
