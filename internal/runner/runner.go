@@ -443,6 +443,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		} else {
 			infoMessage.WriteString(" (no tags)")
 		}
+		if len(r.options.AgentNetworks) > 0 {
+			infoMessage.WriteString(fmt.Sprintf(" (networks: %s)", strings.Join(r.options.AgentNetworks, ",")))
+		}
 
 		gologger.Info().Msg(infoMessage.String())
 
@@ -718,7 +721,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("worker_id").String()
+			agentId := value.Get("agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
@@ -732,8 +735,8 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			// we check if worker tag matches
 			var hasWorkerTag bool
-			if value.Get("worker_tags").Exists() {
-				value.Get("worker_tags").ForEach(func(key, value gjson.Result) bool {
+			if value.Get("agent_tags").Exists() {
+				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
 					if sliceutil.Contains(r.options.AgentTags, value.String()) {
 						hasWorkerTag = true
 					}
@@ -741,7 +744,27 @@ func (r *Runner) getScans(ctx context.Context) error {
 				})
 			}
 
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag {
+			// we also check if it has any network in name
+			var hasNetworkInName bool
+			for _, network := range r.options.AgentNetworks {
+				if strings.Contains(scanName, "["+network+"]") {
+					hasNetworkInName = true
+					break
+				}
+			}
+
+			// we check if worker network matches
+			var hasWorkerNetwork bool
+			if value.Get("agent_networks").Exists() {
+				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
+					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
+						hasWorkerNetwork = true
+					}
+					return true
+				})
+			}
+
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag && !hasNetworkInName && !hasWorkerNetwork {
 				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
 				return true
 			}
@@ -1134,7 +1157,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			// we use the scan name to contain the [pdtm-agent-id] temporarily
 			scanName := value.Get("name").String()
 			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("worker_id").String()
+			agentId := value.Get("agent_id").String()
 			isAssignedToagent := agentId == r.options.AgentId
 
 			// we also check if it has any tag in name
@@ -1148,8 +1171,8 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			// we check if worker tag matches
 			var hasWorkerTag bool
-			if value.Get("worker_tags").Exists() {
-				value.Get("worker_tags").ForEach(func(key, value gjson.Result) bool {
+			if value.Get("agent_tags").Exists() {
+				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
 					if sliceutil.Contains(r.options.AgentTags, value.String()) {
 						hasWorkerTag = true
 					}
@@ -1157,7 +1180,27 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				})
 			}
 
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag {
+			// we also check if it has any network in name
+			var hasNetworkInName bool
+			for _, network := range r.options.AgentNetworks {
+				if strings.Contains(scanName, "["+network+"]") {
+					hasNetworkInName = true
+					break
+				}
+			}
+
+			// we check if worker network matches
+			var hasWorkerNetwork bool
+			if value.Get("agent_networks").Exists() {
+				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
+					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
+						hasWorkerNetwork = true
+					}
+					return true
+				})
+			}
+
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag && !hasNetworkInName && !hasWorkerNetwork {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
 				return true
 			}
@@ -1498,8 +1541,8 @@ var isRegistered bool
 func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++ // increment /in request counter
 
-	// Fetch agent info from punch_hole /workers/:id
-	endpoint := fmt.Sprintf("http://%s:%s/workers/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
+	// Fetch agent info from punch_hole /agents/:id
+	endpoint := fmt.Sprintf("http://%s:%s/agents/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		log.Printf("failed to create agent info request: %v", err)
@@ -1522,13 +1565,15 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		}
 	}()
 
-	// Default to local tags
+	// Default to local tags and networks
 	tagsToUse := r.options.AgentTags
+	networksToUse := r.options.AgentNetworks
 	var lastUpdate time.Time
 	if resp != nil && resp.StatusCode == http.StatusOK {
 		var agentInfo struct {
 			Id         string    `json:"id"`
 			Tags       []string  `json:"tags"`
+			Networks   []string  `json:"networks"`
 			LastUpdate time.Time `json:"last_update"`
 			Name       string    `json:"name"`
 		}
@@ -1538,6 +1583,11 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 				gologger.Info().Msgf("Using tags from punch_hole server: %v (was: %v)", agentInfo.Tags, tagsToUse)
 				tagsToUse = agentInfo.Tags
 				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
+			}
+			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
+				gologger.Info().Msgf("Using networks from punch_hole server: %v (was: %v)", agentInfo.Networks, networksToUse)
+				networksToUse = agentInfo.Networks
+				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
@@ -1562,6 +1612,16 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(tagsToUse, ","))
+	q.Add("networks", strings.Join(networksToUse, ","))
+
+	// Get auto-discovered network subnets and add to query parameters
+	// This is fault-tolerant - if getAutoDiscoveredTargets() returns empty or nil,
+	// we simply send an empty string
+	networkSubnets := r.getAutoDiscoveredTargets()
+	if len(networkSubnets) > 0 {
+		q.Add("network_subnets", strings.Join(networkSubnets, ","))
+	}
+
 	inReq.URL.RawQuery = q.Encode()
 	inReq.Header.Set("x-api-key", PDCPApiKey)
 
