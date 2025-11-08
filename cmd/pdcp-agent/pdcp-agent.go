@@ -1636,27 +1636,27 @@ func configureLogging(options *Options) {
 // deleteCacheFileForTesting deletes the execution cache file on startup.
 // This is FOR TESTING PURPOSES ONLY to ensure scans and enumerations are not skipped
 // due to cached execution history.
-func deleteCacheFileForTesting() {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		gologger.Warning().Msgf("Could not get home directory to delete cache file: %v", err)
-		return
-	}
+// func deleteCacheFileForTesting() {
+// 	homeDir, err := os.UserHomeDir()
+// 	if err != nil {
+// 		gologger.Warning().Msgf("Could not get home directory to delete cache file: %v", err)
+// 		return
+// 	}
 
-	cacheFile := filepath.Join(homeDir, ".pdcp-agent", "execution-cache.json")
-	if err := os.Remove(cacheFile); err != nil {
-		if !os.IsNotExist(err) {
-			gologger.Warning().Msgf("Could not delete cache file (this is ok if it doesn't exist): %v", err)
-		}
-	} else {
-		gologger.Info().Msg("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
-	}
-}
+// 	cacheFile := filepath.Join(homeDir, ".pdcp-agent", "execution-cache.json")
+// 	if err := os.Remove(cacheFile); err != nil {
+// 		if !os.IsNotExist(err) {
+// 			gologger.Warning().Msgf("Could not delete cache file (this is ok if it doesn't exist): %v", err)
+// 		}
+// 	} else {
+// 		gologger.Info().Msg("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
+// 	}
+// }
 
 func main() {
 	// FOR TESTING PURPOSES ONLY: Delete the cache file containing executed scans and enumerations
 	// This ensures that scans/enumerations are not skipped due to cached execution history during testing
-	deleteCacheFileForTesting()
+	// deleteCacheFileForTesting()
 
 	options := parseOptions()
 	pdcpRunner, err := NewRunner(options)
