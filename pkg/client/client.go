@@ -3,6 +3,8 @@ package client
 import (
 	"crypto/tls"
 	"net/http"
+	"net/url"
+	"os"
 )
 
 func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) {
@@ -10,6 +12,16 @@ func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) 
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
 		},
+		ForceAttemptHTTP2: true,
+	}
+
+	proxyURL := os.Getenv("PROXY_URL")
+	if proxyURL != "" {
+		proxy, err := url.Parse(proxyURL)
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = http.ProxyURL(proxy)
 	}
 
 	client := &http.Client{
