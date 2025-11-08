@@ -1,0 +1,112 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pdcp-agent
+  labels:
+    app: pdcp-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pdcp-agent
+  template:
+    metadata:
+      labels:
+        app: pdcp-agent
+    spec:
+      # Run as non-root user for security
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: pdcp-agent
+        image: pdcp-agent:latest
+        imagePullPolicy: IfNotPresent
+        args:
+          - -agent-output
+          - /output
+          - -verbose
+          - -agent-tags
+          - production
+          - -agent-id
+          - unique-agent-id
+        env:
+          # Sensitive data from Secret
+          - name: PDCP_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pdcp-agent-secret
+                key: PDCP_API_KEY
+          - name: PDCP_TEAM_ID
+            valueFrom:
+              secretKeyRef:
+                name: pdcp-agent-secret
+                key: PDCP_TEAM_ID
+          # Configuration from ConfigMap
+          - name: PDCP_API_SERVER
+            valueFrom:
+              configMapKeyRef:
+                name: pdcp-agent-config
+                key: PDCP_API_SERVER
+          - name: PUNCH_HOLE_HOST
+            valueFrom:
+              configMapKeyRef:
+                name: pdcp-agent-config
+                key: PUNCH_HOLE_HOST
+          - name: PUNCH_HOLE_HTTP_PORT
+            valueFrom:
+              configMapKeyRef:
+                name: pdcp-agent-config
+                key: PUNCH_HOLE_HTTP_PORT
+          - name: PROXY_URL
+            valueFrom:
+              configMapKeyRef:
+                name: pdcp-agent-config
+                key: PROXY_URL
+          # Agent-specific configuration
+          - name: PDCP_AGENT_ID
+            value: "unique-agent-id"
+          - name: PDCP_AGENT_TAGS
+            value: "production"
+          - name: PDCP_VERBOSE
+            value: "true"
+        volumeMounts:
+          - name: output
+            mountPath: /output
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        # Health checks (optional)
+        livenessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep pdcp-agent || exit 1"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep pdcp-agent || exit 1"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+        - name: output
+          emptyDir: {}
+      # Optional: For passive discovery, you may need host network
+      # hostNetwork: true
+      # For passive discovery, you may need additional capabilities
+      # securityContext:
+      #   capabilities:
+      #     add:
+      #       - NET_RAW
+      #       - NET_ADMIN
+
