@@ -1,0 +1,23 @@
+[Unit]
+Description=PDCP Agent
+After=network.target
+
+[Service]
+Type=simple
+User=pdcp-agent
+Group=pdcp-agent
+Environment="PDCP_API_KEY=your-api-key"
+Environment="PDCP_API_SERVER=https://api.projectdiscovery.io"
+Environment="PUNCH_HOLE_HOST=proxy.projectdiscovery.io"
+Environment="PUNCH_HOLE_HTTP_PORT=8880"
+Environment="PDCP_TEAM_ID=your-team-id"
+Environment="PROXY_URL=http://127.0.0.1:8080"
+Environment="PDCP_AGENT_TAGS=production"
+Environment="PDCP_AGENT_ID=unique-agent-id"
+ExecStart=/usr/local/bin/pdcp-agent -agent-output /var/lib/pdcp-agent/output -verbose
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+
