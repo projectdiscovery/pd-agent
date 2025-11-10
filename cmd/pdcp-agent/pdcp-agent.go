@@ -31,6 +31,7 @@ import (
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
+	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
 
 	"github.com/google/gopacket"
@@ -293,16 +294,20 @@ func NewRunner(options *Options) (*Runner, error) {
 		gologger.Warning().Msgf("error loading cache: %v", err)
 	}
 
-	// If no agent ID is provided, try to get the stored one or generate a new one
+	// Generate a unique agent ID using xid (similar to tunnelx)
+	// This creates a globally unique ID like "c5s8v3k0h0ql5r2g0000"
 	if r.options.AgentId == "" {
-		if storedID := getStoredAgentID(); storedID != "" {
-			r.options.AgentId = storedID
+		r.options.AgentId = xid.New().String()
+	}
+
+	// Initialize AgentName after AgentId is generated
+	if r.options.AgentName == "" {
+		// Try to use hostname first
+		if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			r.options.AgentName = hostname
 		} else {
-			// Generate a new agent ID
-			r.options.AgentId = generateRandomString(8)
-			if err := storeAgentID(r.options.AgentId); err != nil {
-				gologger.Warning().Msgf("error storing agent ID: %v", err)
-			}
+			// Fallback to agent ID if hostname is not available
+			r.options.AgentName = r.options.AgentId
 		}
 	}
 
@@ -312,44 +317,6 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	return r, nil
-}
-
-// getStoredAgentID retrieves the stored agent ID from disk
-func getStoredAgentID() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	agentIDFile := filepath.Join(homeDir, ".pdcp-agent", "agent-id")
-	data, err := os.ReadFile(agentIDFile)
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(data))
-}
-
-// storeAgentID stores the agent ID to disk
-func storeAgentID(agentID string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("error getting home directory: %v", err)
-	}
-	agentIDFile := filepath.Join(homeDir, ".pdcp-agent", "agent-id")
-	dir := filepath.Dir(agentIDFile)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("error creating directory: %v", err)
-	}
-	return os.WriteFile(agentIDFile, []byte(agentID), 0644)
-}
-
-// generateRandomString generates a random string of specified length
-func generateRandomString(length int) string {
-	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
-	}
-	return string(b)
 }
 
 // Run starts the agent
@@ -1644,7 +1611,6 @@ func parseOptions() *Options {
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
-		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the id for the agent"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
@@ -1656,9 +1622,6 @@ func parseOptions() *Options {
 	}
 
 	// Parse environment variables (env vars take precedence as defaults)
-	if agentID := os.Getenv("PDCP_AGENT_ID"); agentID != "" && options.AgentId == "" {
-		options.AgentId = agentID
-	}
 	if agentTags := os.Getenv("PDCP_AGENT_TAGS"); agentTags != "" && len(options.AgentTags) == 0 {
 		options.AgentTags = goflags.StringSlice(strings.Split(agentTags, ","))
 	}
@@ -1675,15 +1638,7 @@ func parseOptions() *Options {
 		options.Verbose = true
 	}
 
-	// Initialize AgentName if not set
-	if options.AgentName == "" {
-		// by default use agent id
-		options.AgentName = options.AgentId
-		// if hostname is available and not empty, use it instead of agent id
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			options.AgentName = hostname
-		}
-	}
+	// Note: AgentName initialization moved to NewRunner() after AgentId generation
 
 	configureLogging(options)
 
