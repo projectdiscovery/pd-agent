@@ -1116,7 +1116,7 @@ func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
 
 // fetchAssets fetches assets for an enumeration
 func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/v1/enumerate/%s/export", pkg.PCDPApiServer, enumerationID)
+	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/export", pkg.PCDPApiServer, enumerationID)
 	resp := r.makeRequest(context.Background(), http.MethodGet, apiURL, nil, nil)
 	if resp.Error != nil {
 		return nil, resp.Error
