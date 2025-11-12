@@ -358,7 +358,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		}
 	}()
 
-	// go r.monitorScans(ctx)
+	go r.monitorScans(ctx)
 	go r.monitorEnumerations(ctx)
 
 	defer func() {
