@@ -339,7 +339,7 @@ func prepareInput(task *types.Task) (
 
 func getEnvs() []string {
 	defaultPDCPDashboardURL := envutil.GetEnvOrDefault("PDCP_DASHBOARD_URL", "https://cloud.projectdiscovery.io")
-	defaultPDCPAPIServer := envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
+	defaultPDCPAPIServer := envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
 	envs := []string{
 		"PDCP_DASHBOARD_URL=" + defaultPDCPDashboardURL,
 		"PDCP_API_SERVER=" + defaultPDCPAPIServer,

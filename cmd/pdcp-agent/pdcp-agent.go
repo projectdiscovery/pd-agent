@@ -41,7 +41,7 @@ import (
 var (
 	PDCPApiKey        = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
 	TeamIDEnv         = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy-dev.projectdiscovery.io")
+	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy.projectdiscovery.io")
 	PunchHoleHTTPPort = envutil.GetEnvOrDefault("PUNCH_HOLE_HTTP_PORT", "8880")
 )
 

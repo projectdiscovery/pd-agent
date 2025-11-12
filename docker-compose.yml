@@ -7,17 +7,12 @@ services:
     restart: unless-stopped
     environment:
       - PDCP_API_KEY=your-api-key
-      - PDCP_API_SERVER=https://api.projectdiscovery.io
-      - PUNCH_HOLE_HOST=proxy.projectdiscovery.io
-      - PUNCH_HOLE_HTTP_PORT=8880
       - PDCP_TEAM_ID=your-team-id
-      - PROXY_URL=http://127.0.0.1:8080
       - PDCP_AGENT_TAGS=production
-      - PDCP_AGENT_ID=unique-agent-id
       - PDCP_VERBOSE=true
     volumes:
       - ./output:/output
-    command: -agent-output /output -verbose -agent-tags production -agent-id unique-agent-id
+    command: -agent-output /output -verbose -agent-tags production
     # Uncomment the following lines if you need to run with additional capabilities for passive discovery
     # cap_add:
     #   - NET_RAW
