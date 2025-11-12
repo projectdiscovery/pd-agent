@@ -1401,11 +1401,19 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 		if ip.IsPrivate() {
 			// Create /24 CIDR
 			mask := net.CIDRMask(24, 32)
+			maskedIP := ip.Mask(mask)
+			if maskedIP == nil {
+				return
+			}
 			cidr := &net.IPNet{
-				IP:   ip.Mask(mask),
+				IP:   maskedIP,
 				Mask: mask,
 			}
 			cidrStr := cidr.String()
+			// Additional safety check to prevent "<nil>" or empty strings
+			if cidrStr == "" || cidrStr == "<nil>" || !strings.Contains(cidrStr, "/") {
+				return
+			}
 			if _, exists := seen[cidrStr]; !exists {
 				seen[cidrStr] = struct{}{}
 				targets = append(targets, cidrStr)
