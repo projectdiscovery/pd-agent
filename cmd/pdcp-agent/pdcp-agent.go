@@ -415,7 +415,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 	currentPage := 1
 
 	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
 		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
 		if resp.Error != nil {
 			return resp.Error
@@ -667,7 +667,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	currentPage := 1
 
 	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
 		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
 		if resp.Error != nil {
 			return resp.Error
