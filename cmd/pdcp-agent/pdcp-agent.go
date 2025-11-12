@@ -43,6 +43,7 @@ var (
 	TeamIDEnv         = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
 	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy-dev.projectdiscovery.io")
 	PunchHoleHTTPPort = envutil.GetEnvOrDefault("PUNCH_HOLE_HTTP_PORT", "8880")
+	AgentTagsEnv      = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
 )
 
 // Options contains the configuration options for the agent
@@ -1616,10 +1617,12 @@ func parseOptions() *Options {
 	flagSet := goflags.NewFlagSet()
 	flagSet.SetDescription(`pdcp-agent is an agent for ProjectDiscovery Cloud Platform`)
 
+	agentTags := strings.Split(AgentTagsEnv, ",")
+
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
-		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
