@@ -87,7 +87,7 @@ docker run -d --name pd-agent \
   -e PDCP_API_KEY=your-api-key \
   -e PDCP_TEAM_ID=your-team-id \
   -v /path/to/output:/output \
-  pd-agent:latest \
+  projectdiscovery/pdtm-agent:latest \
   -agent-output /output -verbose -agent-tags production
 ```
 
@@ -98,9 +98,9 @@ Create a `docker-compose.yml` file:
 ```yaml
 version: '3.8'
 services:
-  pdcp-agent:
-    image: pd-agent:latest
-    container_name: pdcp-agent
+  pd-agent:
+    image: projectdiscovery/pdtm-agent:latest
+    container_name: pd-agent
     restart: unless-stopped
     environment:
       - PDCP_API_KEY=your-api-key
@@ -505,7 +505,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: pdcp-agent
-        image: pd-agent:latest
+        image: projectdiscovery/pdtm-agent:latest
         imagePullPolicy: IfNotPresent
         args:
           - -agent-output
@@ -513,8 +513,6 @@ spec:
           - -verbose
           - -agent-tags
           - production
-          - -agent-id
-          - unique-agent-id
         env:
           # Sensitive data from Secret
           - name: PDCP_API_KEY
@@ -527,29 +525,6 @@ spec:
               secretKeyRef:
                 name: pdcp-agent-secret
                 key: PDCP_TEAM_ID
-          # Configuration from ConfigMap
-          - name: PDCP_API_SERVER
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PDCP_API_SERVER
-          - name: PUNCH_HOLE_HOST
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PUNCH_HOLE_HOST
-          - name: PUNCH_HOLE_HTTP_PORT
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PUNCH_HOLE_HTTP_PORT
-          # Agent-specific configuration
-          - name: PDCP_AGENT_ID
-            value: "unique-agent-id"
-          - name: PDCP_AGENT_TAGS
-            value: "production"
-          - name: PDCP_VERBOSE
-            value: "true"
         volumeMounts:
           - name: output
             mountPath: /output
