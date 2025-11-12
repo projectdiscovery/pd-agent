@@ -59,11 +59,6 @@ spec:
               configMapKeyRef:
                 name: pdcp-agent-config
                 key: PUNCH_HOLE_HTTP_PORT
-          - name: PROXY_URL
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PROXY_URL
           # Agent-specific configuration
           - name: PDCP_AGENT_ID
             value: "unique-agent-id"

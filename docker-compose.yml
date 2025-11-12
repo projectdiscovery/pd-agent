@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  pdcp-agent:
-    image: pdcp-agent:latest
-    container_name: pdcp-agent
+  pd-agent:
+    image: pd-agent:latest
+    container_name: pd-agent
     restart: unless-stopped
     environment:
       - PDCP_API_KEY=your-api-key

@@ -61,13 +61,13 @@ chmod +x pdcp-agent
 Build the Docker image:
 
 ```bash
-docker build -t pdcp-agent:latest .
+docker build -t pd-agent:latest .
 ```
 
 Or pull from registry (if available):
 
 ```bash
-docker pull pdcp-agent:latest
+docker pull pd-agent:latest
 ```
 
 ### Quick Start
@@ -83,11 +83,11 @@ pdcp-agent -agent-output /path/to/output -verbose -agent-tags production
 #### One-liner: Docker Execution
 
 ```bash
-docker run -d --name pdcp-agent \
+docker run -d --name pd-agent \
   -e PDCP_API_KEY=your-api-key \
   -e PDCP_TEAM_ID=your-team-id \
   -v /path/to/output:/output \
-  pdcp-agent:latest \
+  pd-agent:latest \
   -agent-output /output -verbose -agent-tags production
 ```
 
@@ -99,7 +99,7 @@ Create a `docker-compose.yml` file:
 version: '3.8'
 services:
   pdcp-agent:
-    image: pdcp-agent:latest
+    image: pd-agent:latest
     container_name: pdcp-agent
     restart: unless-stopped
     environment:
@@ -122,7 +122,6 @@ docker-compose up -d
 |----------|----------|---------|-------------|
 | `PDCP_API_KEY` | Yes | - | API key for authentication |
 | `PDCP_TEAM_ID` | Yes | - | Team identifier |
-| `PROXY_URL` | No | `http://127.0.0.1:8080` | Local proxy URL |
 | `PDCP_AGENT_TAGS` | No | - | Comma-separated agent tags |
 | `PDCP_AGENT_NETWORKS` | No | - | Comma-separated network identifiers |
 | `PDCP_AGENT_OUTPUT` | No | - | Output directory path |
@@ -329,8 +328,6 @@ mkdir -p ~/.pdcp-agent/{output,logs}
         <string>8880</string>
         <key>PDCP_TEAM_ID</key>
         <string>your-team-id</string>
-        <key>PROXY_URL</key>
-        <string>http://127.0.0.1:8080</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -446,7 +443,6 @@ Create a batch file wrapper or use Task Scheduler's environment variable support
 - `PUNCH_HOLE_HOST`
 - `PUNCH_HOLE_HTTP_PORT`
 - `PDCP_TEAM_ID`
-- `PROXY_URL`
 
 **Security considerations:**
 - Use `LOCAL SERVICE` or a dedicated low-privilege account
@@ -509,7 +505,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: pdcp-agent
-        image: pdcp-agent:latest
+        image: pd-agent:latest
         imagePullPolicy: IfNotPresent
         args:
           - -agent-output
@@ -547,11 +543,6 @@ spec:
               configMapKeyRef:
                 name: pdcp-agent-config
                 key: PUNCH_HOLE_HTTP_PORT
-          - name: PROXY_URL
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PROXY_URL
           # Agent-specific configuration
           - name: PDCP_AGENT_ID
             value: "unique-agent-id"
