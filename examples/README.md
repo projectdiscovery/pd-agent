@@ -65,10 +65,7 @@ kubectl create secret generic pdcp-agent-secret \
 
 # Create configmap for configuration
 kubectl create configmap pdcp-agent-config \
-  --from-literal=PDCP_API_SERVER=https://api.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HOST=proxy.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HTTP_PORT=8880 \
-  --from-literal=PROXY_URL=http://127.0.0.1:8080
+# No additional configmap needed - using defaults
 ```
 
 **2. Edit the deployment file** and update placeholder values:

@@ -10,9 +10,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# Build pdcp-agent binary
+# Build pd-agent binary
 # CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/pdcp-agent ./cmd/pdcp-agent/pdcp-agent.go
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pdcp-agent/pdcp-agent.go
 
 # Tools dependencies
 # dnsx
@@ -49,7 +49,7 @@ ENV CHROME_PATH=/usr/bin/
 ENV CHROME_NO_SANDBOX=true
 
 # Copy agent binary
-COPY --from=builder /go/bin/pdcp-agent /usr/local/bin/pdcp-agent
+COPY --from=builder /go/bin/pd-agent /usr/local/bin/pd-agent
 
 # Copy tools binaries
 COPY --from=builder /go/bin/dnsx /usr/local/bin/
@@ -60,12 +60,8 @@ COPY --from=builder /go/bin/nuclei /usr/local/bin/
 
 # Set default environment variables (can be overridden at runtime)
 ENV PDCP_API_KEY=""
-ENV PDCP_API_SERVER="https://api.dev.projectdiscovery.io"
-ENV PUNCH_HOLE_HOST="proxy-dev.projectdiscovery.io"
-ENV PUNCH_HOLE_HTTP_PORT="8880"
 ENV PDCP_TEAM_ID=""
-ENV PROXY_URL="http://127.0.0.1:8080"
 
 # ENTRYPOINT allows passing command-line arguments at runtime
 # Environment variables should be passed via -e flags or docker-compose
-ENTRYPOINT ["pdcp-agent"]
+ENTRYPOINT ["pd-agent"]

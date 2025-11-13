@@ -11,11 +11,7 @@ $NSSMPath = "C:\nssm\nssm-2.24\win64\nssm.exe"
 # Environment variables - Update these values
 $EnvVars = @{
     "PDCP_API_KEY" = "your-api-key"
-    "PDCP_API_SERVER" = "https://api.projectdiscovery.io"
-    "PUNCH_HOLE_HOST" = "proxy.projectdiscovery.io"
-    "PUNCH_HOLE_HTTP_PORT" = "8880"
     "PDCP_TEAM_ID" = "your-team-id"
-    "PROXY_URL" = "http://127.0.0.1:8080"
 }
 
 # Check if running as Administrator
@@ -68,7 +64,7 @@ Write-Host "Installing pdcp-agent service..."
 & $NSSMPath install pdcp-agent $AgentBinaryPath
 
 # Set arguments
-$Arguments = "-agent-output $OutputPath -verbose -agent-tags $AgentTags -agent-id $AgentID"
+$Arguments = "-agent-output $OutputPath -verbose -agent-tags $AgentTags"
 & $NSSMPath set pdcp-agent AppParameters $Arguments
 
 # Set environment variables

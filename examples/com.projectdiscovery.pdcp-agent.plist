@@ -12,23 +12,13 @@
         <string>-verbose</string>
         <string>-agent-tags</string>
         <string>production</string>
-        <string>-agent-id</string>
-        <string>unique-agent-id</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PDCP_API_KEY</key>
         <string>your-api-key</string>
-        <key>PDCP_API_SERVER</key>
-        <string>https://api.projectdiscovery.io</string>
-        <key>PUNCH_HOLE_HOST</key>
-        <string>proxy.projectdiscovery.io</string>
-        <key>PUNCH_HOLE_HTTP_PORT</key>
-        <string>8880</string>
         <key>PDCP_TEAM_ID</key>
         <string>your-team-id</string>
-        <key>PROXY_URL</key>
-        <string>http://127.0.0.1:8080</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

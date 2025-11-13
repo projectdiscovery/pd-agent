@@ -61,13 +61,13 @@ chmod +x pdcp-agent
 Build the Docker image:
 
 ```bash
-docker build -t pdcp-agent:latest .
+docker build -t pd-agent:latest .
 ```
 
 Or pull from registry (if available):
 
 ```bash
-docker pull pdcp-agent:latest
+docker pull pd-agent:latest
 ```
 
 ### Quick Start
@@ -76,27 +76,19 @@ docker pull pdcp-agent:latest
 
 ```bash
 PDCP_API_KEY=your-api-key \
-PDCP_API_SERVER=https://api.projectdiscovery.io \
-PUNCH_HOLE_HOST=proxy.projectdiscovery.io \
-PUNCH_HOLE_HTTP_PORT=8880 \
 PDCP_TEAM_ID=your-team-id \
-PROXY_URL=http://127.0.0.1:8080 \
-pdcp-agent -agent-output /path/to/output -verbose -agent-tags production -agent-id unique-agent-id
+pdcp-agent -agent-output /path/to/output -verbose -agent-tags production
 ```
 
 #### One-liner: Docker Execution
 
 ```bash
-docker run -d --name pdcp-agent \
+docker run -d --name pd-agent \
   -e PDCP_API_KEY=your-api-key \
-  -e PDCP_API_SERVER=https://api.projectdiscovery.io \
-  -e PUNCH_HOLE_HOST=proxy.projectdiscovery.io \
-  -e PUNCH_HOLE_HTTP_PORT=8880 \
   -e PDCP_TEAM_ID=your-team-id \
-  -e PROXY_URL=http://127.0.0.1:8080 \
   -v /path/to/output:/output \
-  pdcp-agent:latest \
-  -agent-output /output -verbose -agent-tags production -agent-id unique-agent-id
+  projectdiscovery/pdtm-agent:latest \
+  -agent-output /output -verbose -agent-tags production
 ```
 
 #### Docker Compose
@@ -106,20 +98,16 @@ Create a `docker-compose.yml` file:
 ```yaml
 version: '3.8'
 services:
-  pdcp-agent:
-    image: pdcp-agent:latest
-    container_name: pdcp-agent
+  pd-agent:
+    image: projectdiscovery/pdtm-agent:latest
+    container_name: pd-agent
     restart: unless-stopped
     environment:
       - PDCP_API_KEY=your-api-key
-      - PDCP_API_SERVER=https://api.projectdiscovery.io
-      - PUNCH_HOLE_HOST=proxy.projectdiscovery.io
-      - PUNCH_HOLE_HTTP_PORT=8880
       - PDCP_TEAM_ID=your-team-id
-      - PROXY_URL=http://127.0.0.1:8080
     volumes:
       - ./output:/output
-    command: -agent-output /output -verbose -agent-tags production -agent-id unique-agent-id
+    command: -agent-output /output -verbose -agent-tags production
 ```
 
 Then run:
@@ -133,18 +121,12 @@ docker-compose up -d
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `PDCP_API_KEY` | Yes | - | API key for authentication |
-| `PDCP_API_SERVER` | No | `https://api.dev.projectdiscovery.io` | API server URL |
-| `PUNCH_HOLE_HOST` | No | `proxy-dev.projectdiscovery.io` | Proxy host for punch hole |
-| `PUNCH_HOLE_HTTP_PORT` | No | `8880` | Proxy HTTP port |
 | `PDCP_TEAM_ID` | Yes | - | Team identifier |
-| `PROXY_URL` | No | `http://127.0.0.1:8080` | Local proxy URL |
-| `PDCP_AGENT_ID` | No | Auto-generated | Agent identifier |
 | `PDCP_AGENT_TAGS` | No | - | Comma-separated agent tags |
 | `PDCP_AGENT_NETWORKS` | No | - | Comma-separated network identifiers |
 | `PDCP_AGENT_OUTPUT` | No | - | Output directory path |
 | `PDCP_AGENT_NAME` | No | Hostname | Agent display name |
 | `PDCP_VERBOSE` | No | `false` | Enable verbose logging (`true`/`1`) |
-| `PASSIVE_DISCOVERY` | No | `false` | Enable passive discovery (`true`/`1`) |
 
 ### Command-Line Flags
 
@@ -261,13 +243,8 @@ Type=simple
 User=pdcp-agent
 Group=pdcp-agent
 Environment="PDCP_API_KEY=your-api-key"
-Environment="PDCP_API_SERVER=https://api.projectdiscovery.io"
-Environment="PUNCH_HOLE_HOST=proxy.projectdiscovery.io"
-Environment="PUNCH_HOLE_HTTP_PORT=8880"
 Environment="PDCP_TEAM_ID=your-team-id"
-Environment="PROXY_URL=http://127.0.0.1:8080"
 Environment="PDCP_AGENT_TAGS=production"
-Environment="PDCP_AGENT_ID=unique-agent-id"
 ExecStart=/usr/local/bin/pdcp-agent -agent-output /var/lib/pdcp-agent/output -verbose
 Restart=always
 RestartSec=10
@@ -351,8 +328,6 @@ mkdir -p ~/.pdcp-agent/{output,logs}
         <string>8880</string>
         <key>PDCP_TEAM_ID</key>
         <string>your-team-id</string>
-        <key>PROXY_URL</key>
-        <string>http://127.0.0.1:8080</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>
@@ -419,10 +394,10 @@ New-Item -ItemType Directory -Path "C:\ProgramData\pdcp-agent\output" -Force
 C:\nssm\nssm-2.24\win64\nssm.exe install pdcp-agent "C:\Program Files\pdcp-agent\pdcp-agent.exe"
 
 # Set arguments
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppParameters "-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production -agent-id unique-agent-id"
+C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppParameters "-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production"
 
 # Set environment variables
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppEnvironmentExtra "PDCP_API_KEY=your-api-key" "PDCP_API_SERVER=https://api.projectdiscovery.io" "PUNCH_HOLE_HOST=proxy.projectdiscovery.io" "PUNCH_HOLE_HTTP_PORT=8880" "PDCP_TEAM_ID=your-team-id" "PROXY_URL=http://127.0.0.1:8080"
+C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppEnvironmentExtra "PDCP_API_KEY=your-api-key" "PDCP_TEAM_ID=your-team-id"
 
 # Set service account (use low-privilege account)
 C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent ObjectName "NT AUTHORITY\LOCAL SERVICE"
@@ -468,7 +443,6 @@ Create a batch file wrapper or use Task Scheduler's environment variable support
 - `PUNCH_HOLE_HOST`
 - `PUNCH_HOLE_HTTP_PORT`
 - `PDCP_TEAM_ID`
-- `PROXY_URL`
 
 **Security considerations:**
 - Use `LOCAL SERVICE` or a dedicated low-privilege account
@@ -480,16 +454,10 @@ Create a batch file wrapper or use Task Scheduler's environment variable support
 **Quick Start (One-liner):**
 
 ```bash
-# Create secret and configmap
+# Create secret
 kubectl create secret generic pdcp-agent-secret \
   --from-literal=PDCP_API_KEY=your-api-key \
   --from-literal=PDCP_TEAM_ID=your-team-id
-
-kubectl create configmap pdcp-agent-config \
-  --from-literal=PDCP_API_SERVER=https://api.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HOST=proxy.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HTTP_PORT=8880 \
-  --from-literal=PROXY_URL=http://127.0.0.1:8080
 
 # Deploy using the manifest file
 kubectl apply -f examples/pdcp-agent-deployment.yaml
@@ -509,15 +477,7 @@ kubectl create secret generic pdcp-agent-secret \
   --from-literal=PDCP_TEAM_ID=your-team-id
 ```
 
-**2. Create a ConfigMap for configuration:**
-
-```bash
-kubectl create configmap pdcp-agent-config \
-  --from-literal=PDCP_API_SERVER=https://api.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HOST=proxy.projectdiscovery.io \
-  --from-literal=PUNCH_HOLE_HTTP_PORT=8880 \
-  --from-literal=PROXY_URL=http://127.0.0.1:8080
-```
+**2. No additional ConfigMap needed (using defaults)**
 
 **3. Create deployment manifest** `pdcp-agent-deployment.yaml`:
 
@@ -545,7 +505,7 @@ spec:
         fsGroup: 1000
       containers:
       - name: pdcp-agent
-        image: pdcp-agent:latest
+        image: projectdiscovery/pdtm-agent:latest
         imagePullPolicy: IfNotPresent
         args:
           - -agent-output
@@ -553,8 +513,6 @@ spec:
           - -verbose
           - -agent-tags
           - production
-          - -agent-id
-          - unique-agent-id
         env:
           # Sensitive data from Secret
           - name: PDCP_API_KEY
@@ -567,34 +525,6 @@ spec:
               secretKeyRef:
                 name: pdcp-agent-secret
                 key: PDCP_TEAM_ID
-          # Configuration from ConfigMap
-          - name: PDCP_API_SERVER
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PDCP_API_SERVER
-          - name: PUNCH_HOLE_HOST
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PUNCH_HOLE_HOST
-          - name: PUNCH_HOLE_HTTP_PORT
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PUNCH_HOLE_HTTP_PORT
-          - name: PROXY_URL
-            valueFrom:
-              configMapKeyRef:
-                name: pdcp-agent-config
-                key: PROXY_URL
-          # Agent-specific configuration
-          - name: PDCP_AGENT_ID
-            value: "unique-agent-id"
-          - name: PDCP_AGENT_TAGS
-            value: "production"
-          - name: PDCP_VERBOSE
-            value: "true"
         volumeMounts:
           - name: output
             mountPath: /output
@@ -792,23 +722,6 @@ PDCP_VERBOSE=1 pdcp-agent ...
 7. **Agent IDs:** Use unique, descriptive agent IDs for easy identification
 
 ### Advanced Configuration
-
-#### Passive Discovery
-
-Enable passive network discovery to automatically discover IPs from network traffic:
-
-```bash
-# Using flag
-pdcp-agent -passive-discovery -verbose
-
-# Using environment variable
-PASSIVE_DISCOVERY=true pdcp-agent -verbose
-```
-
-**Requirements:**
-- Linux: Requires `libpcap-dev` and appropriate permissions (may need `CAP_NET_RAW`)
-- macOS: Requires appropriate permissions
-- Windows: May require WinPcap or Npcap
 
 #### Custom Proxy Configuration
 
