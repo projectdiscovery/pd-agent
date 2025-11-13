@@ -629,13 +629,6 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			gologger.Info().Msgf("scan %s enqueued...\n", scanName)
 
-			// Testing purposes
-			// ------------------------------------------------------------
-			time.Sleep(30 * time.Second)
-			gologger.Info().Msgf("scan %s completed...\n", scanName)
-			return true
-			// ------------------------------------------------------------
-
 			_ = pendingTasks.Set(metaId, struct{}{})
 
 			if isDistributed {
