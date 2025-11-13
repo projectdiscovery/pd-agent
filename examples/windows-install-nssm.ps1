@@ -4,7 +4,6 @@
 # Configuration - Update these values
 $AgentBinaryPath = "C:\Program Files\pdcp-agent\pdcp-agent.exe"
 $OutputPath = "C:\ProgramData\pdcp-agent\output"
-$AgentID = "unique-agent-id"
 $AgentTags = "production"
 $NSSMPath = "C:\nssm\nssm-2.24\win64\nssm.exe"
 

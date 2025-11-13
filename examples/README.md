@@ -68,10 +68,9 @@ kubectl create configmap pdcp-agent-config \
 # No additional configmap needed - using defaults
 ```
 
-**2. Edit the deployment file** and update placeholder values:
-- `PDCP_AGENT_ID`: Change `unique-agent-id` to your desired agent ID
-- `PDCP_AGENT_TAGS`: Change `production` to your desired tags
-- Image: Update `pdcp-agent:latest` to your image registry if needed
+**2. Edit the deployment file** command line arguments:
+- Update agent tags to your desired tags
+- Update agent networks to your desired networks
 
 **3. Deploy:**
 

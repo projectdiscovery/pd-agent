@@ -29,6 +29,8 @@ spec:
           - -verbose
           - -agent-tags
           - production
+          - -agent-networks
+          - kube-prod-cluster
         env:
           # Sensitive data from Secret
           - name: PDCP_API_KEY
