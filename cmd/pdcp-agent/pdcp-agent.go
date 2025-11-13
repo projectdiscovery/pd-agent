@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,20 +28,16 @@ import (
 	"github.com/projectdiscovery/pdtm-agent/pkg/types"
 	envutil "github.com/projectdiscovery/utils/env"
 	mapsutil "github.com/projectdiscovery/utils/maps"
-	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
-
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/pcap"
 )
 
 var (
-	PDCPApiKey        = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv         = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	PunchHoleHost     = envutil.GetEnvOrDefault("PUNCH_HOLE_HOST", "proxy.projectdiscovery.io")
-	PunchHoleHTTPPort = envutil.GetEnvOrDefault("PUNCH_HOLE_HTTP_PORT", "8880")
+	PDCPApiKey    = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv     = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	AgentTagsEnv  = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
+	PdcpApiServer = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
 )
 
 // Options contains the configuration options for the agent
@@ -278,8 +273,8 @@ var (
 			LRU().
 			Expiration(time.Hour).
 			Build()
-	pendingTasks         = mapsutil.NewSyncLockMap[string, struct{}]()
-	passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
+	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
+	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
 )
 
 // NewRunner creates a new runner instance
@@ -312,9 +307,9 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	// Start passive discovery if enabled
-	if r.options.PassiveDiscovery {
-		go r.startPassiveDiscovery()
-	}
+	// if r.options.PassiveDiscovery {
+	// 	go r.startPassiveDiscovery()
+	// }
 
 	return r, nil
 }
@@ -339,6 +334,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	if len(r.options.AgentNetworks) > 0 {
 		infoMessage.WriteString(fmt.Sprintf(" (networks: %s)", strings.Join(r.options.AgentNetworks, ",")))
+	} else {
+		infoMessage.WriteString(" (no networks)")
 	}
 
 	gologger.Info().Msg(infoMessage.String())
@@ -414,7 +411,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 	currentPage := 1
 
 	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
 		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
 		if resp.Error != nil {
 			return resp.Error
@@ -450,12 +447,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 				}
 			}
 
-			// Check if worker tag matches
-			var hasWorkerTag bool
+			// Check if agent tag matches
+			var hasAgentTag bool
 			if value.Get("agent_tags").Exists() {
 				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
 					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasWorkerTag = true
+						hasAgentTag = true
 					}
 					return true
 				})
@@ -482,7 +479,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			}
 
 			id := value.Get("scan_id").String()
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag && !hasNetworkInName && !hasWorkerNetwork {
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
 				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
 				return true
 			}
@@ -666,7 +663,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	currentPage := 1
 
 	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d", apiURL, limit, offset)
+		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
 		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
 		if resp.Error != nil {
 			return resp.Error
@@ -702,12 +699,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				}
 			}
 
-			// Check if worker tag matches
-			var hasWorkerTag bool
+			// Check if agent tag matches
+			var hasAgentTag bool
 			if value.Get("agent_tags").Exists() {
 				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
 					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasWorkerTag = true
+						hasAgentTag = true
 					}
 					return true
 				})
@@ -733,7 +730,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				})
 			}
 
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasWorkerTag && !hasNetworkInName && !hasWorkerNetwork {
+			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
 				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
 				return true
 			}
@@ -831,18 +828,18 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			gologger.Info().Msgf("enumeration %s enqueued...\n", scanName)
 
-			workerBehavior := value.Get("worker_behavior").String()
+			workerBehavior := value.Get("agent_behavior").String()
 			isDistributed := workerBehavior == "distribute"
 
 			// Check if passive discovery is enabled for this enumeration
-			hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
-			if hasPassiveDiscovery && r.options.PassiveDiscovery {
-				discoveredIPs := PopAllPassiveDiscoveredIPs()
-				if len(discoveredIPs) > 0 {
-					gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
-					assets = append(assets, discoveredIPs...)
-				}
-			}
+			// hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
+			// if hasPassiveDiscovery && r.options.PassiveDiscovery {
+			// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
+			// 	if len(discoveredIPs) > 0 {
+			// 		gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
+			// 		assets = append(assets, discoveredIPs...)
+			// 	}
+			// }
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
@@ -1274,7 +1271,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++ // increment /in request counter
 
 	// Fetch agent info from punch_hole /agents/:id
-	endpoint := fmt.Sprintf("http://%s:%s/agents/%s?type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
+	endpoint := fmt.Sprintf("%s/v1/agents/%s?type=agent", PdcpApiServer, r.options.AgentId)
 	headers := map[string]string{"x-api-key": PDCPApiKey}
 	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
 	if resp.Error != nil {
@@ -1316,7 +1313,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	// Build /in endpoint with query parameters
-	inURL := fmt.Sprintf("http://%s:%s/in", PunchHoleHost, PunchHoleHTTPPort)
+	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inURL, nil)
 	if err != nil {
 		gologger.Error().Msgf("failed to create /in request: %v", err)
@@ -1331,14 +1328,6 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("type", "agent")
 	q.Add("tags", strings.Join(tagsToUse, ","))
 	q.Add("networks", strings.Join(networksToUse, ","))
-
-	// Get auto-discovered network subnets and add to query parameters
-	// This is fault-tolerant - if getAutoDiscoveredTargets() returns empty or nil,
-	// we simply send an empty string
-	networkSubnets := r.getAutoDiscoveredTargets()
-	if len(networkSubnets) > 0 {
-		q.Add("network_subnets", strings.Join(networkSubnets, ","))
-	}
 
 	req.URL.RawQuery = q.Encode()
 
@@ -1364,7 +1353,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 // Out handles agent deregistration
 func (r *Runner) Out(ctx context.Context) error {
-	endpoint := fmt.Sprintf("http://%s:%s/out?id=%s&type=agent", PunchHoleHost, PunchHoleHTTPPort, r.options.AgentId)
+	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", PdcpApiServer, r.options.AgentId)
 	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
 		gologger.Error().Msgf("failed to call /out endpoint: %v", resp.Error)
@@ -1384,151 +1373,151 @@ func (r *Runner) Out(ctx context.Context) error {
 }
 
 // getAutoDiscoveredTargets gets the auto discovered targets from the system (only ipv4)
-func (r *Runner) getAutoDiscoveredTargets() []string {
-	var targets []string
-	seen := make(map[string]struct{})
+// func (r *Runner) getAutoDiscoveredTargets() []string {
+// 	var targets []string
+// 	seen := make(map[string]struct{})
 
-	// Helper function to add CIDR if it's a private IP
-	addPrivateCIDR := func(ip net.IP) {
-		if ip == nil {
-			return
-		}
-		// Convert to IPv4 if it's an IPv4-mapped IPv6 address
-		if ip.To4() != nil {
-			ip = ip.To4()
-		}
-		// Check if it's a private IP
-		if ip.IsPrivate() {
-			// Create /24 CIDR
-			mask := net.CIDRMask(24, 32)
-			maskedIP := ip.Mask(mask)
-			if maskedIP == nil {
-				return
-			}
-			cidr := &net.IPNet{
-				IP:   maskedIP,
-				Mask: mask,
-			}
-			cidrStr := cidr.String()
-			// Additional safety check to prevent "<nil>" or empty strings
-			if cidrStr == "" || cidrStr == "<nil>" || !strings.Contains(cidrStr, "/") {
-				return
-			}
-			if _, exists := seen[cidrStr]; !exists {
-				seen[cidrStr] = struct{}{}
-				targets = append(targets, cidrStr)
-			}
-		}
-	}
+// 	// Helper function to add CIDR if it's a private IP
+// 	addPrivateCIDR := func(ip net.IP) {
+// 		if ip == nil {
+// 			return
+// 		}
+// 		// Convert to IPv4 if it's an IPv4-mapped IPv6 address
+// 		if ip.To4() != nil {
+// 			ip = ip.To4()
+// 		}
+// 		// Check if it's a private IP
+// 		if ip.IsPrivate() {
+// 			// Create /24 CIDR
+// 			mask := net.CIDRMask(24, 32)
+// 			maskedIP := ip.Mask(mask)
+// 			if maskedIP == nil {
+// 				return
+// 			}
+// 			cidr := &net.IPNet{
+// 				IP:   maskedIP,
+// 				Mask: mask,
+// 			}
+// 			cidrStr := cidr.String()
+// 			// Additional safety check to prevent "<nil>" or empty strings
+// 			if cidrStr == "" || cidrStr == "<nil>" || !strings.Contains(cidrStr, "/") {
+// 				return
+// 			}
+// 			if _, exists := seen[cidrStr]; !exists {
+// 				seen[cidrStr] = struct{}{}
+// 				targets = append(targets, cidrStr)
+// 			}
+// 		}
+// 	}
 
-	// Get network interfaces
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		gologger.Error().Msgf("Error getting network interfaces: %v", err)
-	} else {
-		for _, iface := range interfaces {
-			addrs, err := iface.Addrs()
-			if err != nil {
-				continue
-			}
-			for _, addr := range addrs {
-				switch v := addr.(type) {
-				case *net.IPNet:
-					addPrivateCIDR(v.IP)
-				case *net.IPAddr:
-					addPrivateCIDR(v.IP)
-				}
-			}
-		}
-	}
+// 	// Get network interfaces
+// 	interfaces, err := net.Interfaces()
+// 	if err != nil {
+// 		gologger.Error().Msgf("Error getting network interfaces: %v", err)
+// 	} else {
+// 		for _, iface := range interfaces {
+// 			addrs, err := iface.Addrs()
+// 			if err != nil {
+// 				continue
+// 			}
+// 			for _, addr := range addrs {
+// 				switch v := addr.(type) {
+// 				case *net.IPNet:
+// 					addPrivateCIDR(v.IP)
+// 				case *net.IPAddr:
+// 					addPrivateCIDR(v.IP)
+// 				}
+// 			}
+// 		}
+// 	}
 
-	// Read hosts file
-	hostsFile := "/etc/hosts"
-	if osutils.IsWindows() {
-		systemRoot := os.Getenv("SystemRoot")
-		if systemRoot == "" {
-			systemRoot = "C:\\Windows" // fallback
-		}
-		hostsFile = filepath.Join(systemRoot, "System32", "drivers", "etc", "hosts")
-	}
+// 	// Read hosts file
+// 	hostsFile := "/etc/hosts"
+// 	if osutils.IsWindows() {
+// 		systemRoot := os.Getenv("SystemRoot")
+// 		if systemRoot == "" {
+// 			systemRoot = "C:\\Windows" // fallback
+// 		}
+// 		hostsFile = filepath.Join(systemRoot, "System32", "drivers", "etc", "hosts")
+// 	}
 
-	content, err := os.ReadFile(hostsFile)
-	if err != nil {
-		gologger.Error().Msgf("Error reading hosts file: %v", err)
-	} else {
-		lines := strings.Split(string(content), "\n")
-		for _, line := range lines {
-			// Skip comments and empty lines
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
+// 	content, err := os.ReadFile(hostsFile)
+// 	if err != nil {
+// 		gologger.Error().Msgf("Error reading hosts file: %v", err)
+// 	} else {
+// 		lines := strings.Split(string(content), "\n")
+// 		for _, line := range lines {
+// 			// Skip comments and empty lines
+// 			line = strings.TrimSpace(line)
+// 			if line == "" || strings.HasPrefix(line, "#") {
+// 				continue
+// 			}
 
-			// Split line into IP and hostnames
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
+// 			// Split line into IP and hostnames
+// 			fields := strings.Fields(line)
+// 			if len(fields) < 2 {
+// 				continue
+// 			}
 
-			// Parse IP address
-			ip := net.ParseIP(fields[0])
-			if ip != nil {
-				addPrivateCIDR(ip)
-			}
-		}
-	}
+// 			// Parse IP address
+// 			ip := net.ParseIP(fields[0])
+// 			if ip != nil {
+// 				addPrivateCIDR(ip)
+// 			}
+// 		}
+// 	}
 
-	return targets
-}
+// 	return targets
+// }
 
 // startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket
-func (r *Runner) startPassiveDiscovery() {
-	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
-	ifs, err := pcap.FindAllDevs()
-	if err != nil {
-		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
-		return
-	}
-	for _, iface := range ifs {
-		go func(iface pcap.Interface) {
-			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
-			if err != nil {
-				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
-				return
-			}
-			defer handle.Close()
-			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-			for packet := range packetSource.Packets() {
-				if netLayer := packet.NetworkLayer(); netLayer != nil {
-					src, dst := netLayer.NetworkFlow().Endpoints()
-					for _, ep := range []gopacket.Endpoint{src, dst} {
-						ip := net.ParseIP(ep.String())
-						if ip != nil && ip.IsPrivate() {
-							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
-						}
-					}
-				}
-			}
-		}(iface)
-	}
-	gologger.Info().Msg("Started passive discovery on all interfaces")
-}
+// func (r *Runner) startPassiveDiscovery() {
+// 	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
+// 	ifs, err := pcap.FindAllDevs()
+// 	if err != nil {
+// 		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
+// 		return
+// 	}
+// 	for _, iface := range ifs {
+// 		go func(iface pcap.Interface) {
+// 			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
+// 			if err != nil {
+// 				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
+// 				return
+// 			}
+// 			defer handle.Close()
+// 			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+// 			for packet := range packetSource.Packets() {
+// 				if netLayer := packet.NetworkLayer(); netLayer != nil {
+// 					src, dst := netLayer.NetworkFlow().Endpoints()
+// 					for _, ep := range []gopacket.Endpoint{src, dst} {
+// 						ip := net.ParseIP(ep.String())
+// 						if ip != nil && ip.IsPrivate() {
+// 							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
+// 						}
+// 					}
+// 				}
+// 			}
+// 		}(iface)
+// 	}
+// 	gologger.Info().Msg("Started passive discovery on all interfaces")
+// }
 
 // PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
-func PopAllPassiveDiscoveredIPs() []string {
-	if passiveDiscoveredIPs == nil {
-		return nil
-	}
-	var ips []string
-	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
-		ips = append(ips, k)
-		return nil
-	})
-	for _, k := range ips {
-		passiveDiscoveredIPs.Delete(k)
-	}
-	return ips
-}
+// func PopAllPassiveDiscoveredIPs() []string {
+// 	if passiveDiscoveredIPs == nil {
+// 		return nil
+// 	}
+// 	var ips []string
+// 	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
+// 		ips = append(ips, k)
+// 		return nil
+// 	})
+// 	for _, k := range ips {
+// 		passiveDiscoveredIPs.Delete(k)
+// 	}
+// 	return ips
+// }
 
 // computeScanConfigHash computes a hash of the scan configuration
 func computeScanConfigHash(scanConfig string, templates []string, assets []string) string {
@@ -1616,10 +1605,12 @@ func parseOptions() *Options {
 	flagSet := goflags.NewFlagSet()
 	flagSet.SetDescription(`pdcp-agent is an agent for ProjectDiscovery Cloud Platform`)
 
+	agentTags := strings.Split(AgentTagsEnv, ",")
+
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
-		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", nil, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
