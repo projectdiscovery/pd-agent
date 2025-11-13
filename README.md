@@ -88,7 +88,7 @@ docker run -d --name pd-agent \
   -e PDCP_TEAM_ID=your-team-id \
   -v /path/to/output:/output \
   projectdiscovery/pdtm-agent:latest \
-  -agent-output /output -verbose -agent-tags production
+  -agent-output /output -verbose -agent-tags production -agent-networks prod-us-east-1
 ```
 
 #### Docker Compose
@@ -107,7 +107,7 @@ services:
       - PDCP_TEAM_ID=your-team-id
     volumes:
       - ./output:/output
-    command: -agent-output /output -verbose -agent-tags production
+    command: -agent-output /output -verbose -agent-tags production -agent-networks prod-us-east-1
 ```
 
 Then run:
@@ -134,7 +134,6 @@ docker-compose up -d
 |------|-------|-------------|
 | `-verbose` | - | Show verbose output |
 | `-agent-output <path>` | - | Agent output folder |
-| `-agent-id <id>` | - | Specify the ID for the agent |
 | `-agent-tags <tags>` | `-at` | Specify tags for the agent (comma-separated) |
 | `-agent-networks <networks>` | `-an` | Specify networks for the agent (comma-separated) |
 | `-agent-name <name>` | - | Specify the name for the agent |
@@ -162,53 +161,13 @@ In **distributed mode**, the scan/enumeration workload is split across multiple 
 ```bash
 # Multiple agents with same tags will share the workload
 # Agent 1
-pdcp-agent -agent-tags production,scanner-1 -agent-id agent-1
+pdcp-agent -agent-tags production,scanner-1  -agent-networks prod-us-east-1
 
 # Agent 2
-pdcp-agent -agent-tags production,scanner-2 -agent-id agent-2
+pdcp-agent -agent-tags production,scanner-2  -agent-networks prod-us-east-1
 
 # Both agents will process different chunks of the same scan
 ```
-
-#### Mirror Mode (default)
-
-In **mirror mode**, every agent executes the complete scan/enumeration independently. All agents run the same work, which is useful for redundancy, local template execution, and privilege escalation scenarios.
-
-**Use Cases:**
-- **Local templates** (e.g., privilege escalation checks)
-- Redundancy and fault tolerance
-- When each agent needs to run the full scan
-- Security assessments that require local context
-
-**How it works:**
-- All agents receive the complete scan/enumeration configuration
-- Each agent executes the full scan independently
-- Results from all agents are collected
-- Useful for local context-dependent scans
-
-**Example:**
-```bash
-# All agents execute the same scan
-# Agent 1 (on server-1)
-pdcp-agent -agent-tags production,server-1 -agent-id agent-1
-
-# Agent 2 (on server-2)
-pdcp-agent -agent-tags production,server-2 -agent-id agent-2
-
-# Both agents execute the complete scan, useful for local privilege escalation checks
-```
-
-**When to use Mirror Mode:**
-- **Privilege Escalation Templates:** These require local execution on each target system
-- **Local Security Audits:** Templates that check local system configuration
-- **Redundancy:** When you want multiple agents to verify results
-- **Network Segmentation:** When agents are in different network segments and need to scan their local networks
-
-**When to use Distributed Mode:**
-- **Large Target Lists:** When you have many targets to scan
-- **Resource Optimization:** To utilize multiple agents efficiently
-- **Time-Sensitive Scans:** When you need results quickly
-- **External Scans:** When scanning external targets that don't require local context
 
 ### System Installation
 
@@ -313,8 +272,8 @@ mkdir -p ~/.pdcp-agent/{output,logs}
         <string>-verbose</string>
         <string>-agent-tags</string>
         <string>production</string>
-        <string>-agent-id</string>
-        <string>unique-agent-id</string>
+        <string>-agent-networks</string>
+        <string>prod-us-east-1</string>
     </array>
     <key>EnvironmentVariables</key>
     <dict>
@@ -427,7 +386,7 @@ Get-Service pdcp-agent
 **4. Actions tab:**
 - New action: Start a program
 - Program: `C:\Program Files\pdcp-agent\pdcp-agent.exe`
-- Arguments: `-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production -agent-id unique-agent-id`
+- Arguments: `-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production -agent-networks prod-us-east-1`
 
 **5. Conditions tab:**
 - Uncheck "Start the task only if the computer is on AC power"
@@ -513,6 +472,8 @@ spec:
           - -verbose
           - -agent-tags
           - production
+          - -agent-networks
+          - kube-prod-cluster
         env:
           # Sensitive data from Secret
           - name: PDCP_API_KEY
@@ -592,47 +553,6 @@ kubectl scale deployment pdcp-agent --replicas=3
 
 # Or update the replicas in the YAML and reapply
 kubectl apply -f pdcp-agent-deployment.yaml
-```
-
-**Using Helm (Optional):**
-
-Create a `values.yaml` for Helm:
-
-```yaml
-replicaCount: 1
-
-image:
-  repository: pdcp-agent
-  tag: latest
-  pullPolicy: IfNotPresent
-
-agent:
-  id: unique-agent-id
-  tags: production
-  output: /output
-
-env:
-  apiServer: https://api.projectdiscovery.io
-  punchHoleHost: proxy.projectdiscovery.io
-  punchHoleHttpPort: "8880"
-  proxyUrl: http://127.0.0.1:8080
-
-secret:
-  apiKey: your-api-key
-  teamId: your-team-id
-
-resources:
-  requests:
-    memory: "256Mi"
-    cpu: "100m"
-  limits:
-    memory: "2Gi"
-    cpu: "1000m"
-
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
 ```
 
 **Security considerations:**
