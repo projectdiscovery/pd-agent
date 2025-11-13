@@ -843,13 +843,6 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
-			// Testing purposes
-			// ------------------------------------------------------------
-			time.Sleep(30 * time.Second)
-			gologger.Info().Msgf("enumeration %s completed...\n", scanName)
-			return true
-			// ------------------------------------------------------------
-
 			if isDistributed {
 				// Process distributed enumeration chunks
 				r.elaborateEnumerationChunks(ctx, id, metaId, steps, assets)
