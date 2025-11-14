@@ -730,8 +730,8 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			})
 
-			workerBehavior := value.Get("worker_behavior").String()
-			isDistributed := workerBehavior == "distribute"
+			agentBehavior := value.Get("agent_behavior").String()
+			isDistributed := agentBehavior == "distribute"
 
 			// Compute hash of the entire configuration
 			configHash := computeScanConfigHash(finalConfig, templates, assets)
@@ -906,8 +906,8 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			gologger.Info().Msgf("enumeration %s enqueued...\n", enumName)
 
-			workerBehavior := value.Get("agent_behavior").String()
-			isDistributed := workerBehavior == "distribute"
+			agentBehavior := value.Get("agent_behavior").String()
+			isDistributed := agentBehavior == "distribute"
 
 			// Check if passive discovery is enabled for this enumeration
 			// hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
