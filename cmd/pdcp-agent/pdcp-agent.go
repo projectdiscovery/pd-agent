@@ -277,6 +277,158 @@ var (
 	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
 )
 
+// shouldSkipTask checks if a task (scan or enumeration) should be skipped based on
+// agent assignment, tags, and networks. Logs each check in verbose mode.
+// Returns true if the task should be skipped (no matching conditions), false if it should continue.
+func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTags, agentNetworks gjson.Result) bool {
+	gologger.Verbose().Msgf("checking %s (%s - %s)", taskType, id, name)
+
+	// Check if agent ID matches (case-insensitive)
+	isAssignedToAgent := strings.EqualFold(taskAgentId, r.options.AgentId)
+	result := "✗"
+	if isAssignedToAgent {
+		result = "✓"
+	}
+	if taskAgentId == "" {
+		gologger.Verbose().Msgf("  checking id: %s (task: <empty>, agent: %s)", result, r.options.AgentId)
+	} else {
+		gologger.Verbose().Msgf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId)
+	}
+
+	// Check if name contains agent ID tag (case-insensitive)
+	nameLower := strings.ToLower(name)
+	agentIdTag := strings.ToLower("[" + r.options.AgentId + "]")
+	hasAgentIdInName := strings.Contains(nameLower, agentIdTag)
+	result = "✗"
+	if hasAgentIdInName {
+		result = "✓"
+	}
+	gologger.Verbose().Msgf("  checking id in name: %s (name: %s, looking for: %s)", result, name, "["+r.options.AgentId+"]")
+
+	// Check if name contains any agent tag (case-insensitive)
+	var hasTagInName bool
+	var taskTagsInName []string
+	for _, tag := range r.options.AgentTags {
+		tagLower := strings.ToLower("[" + tag + "]")
+		if strings.Contains(nameLower, tagLower) {
+			hasTagInName = true
+			break
+		}
+	}
+	// Extract all tags from name for logging
+	if strings.Contains(name, "[") && strings.Contains(name, "]") {
+		parts := strings.Split(name, "[")
+		for _, part := range parts {
+			if idx := strings.Index(part, "]"); idx > 0 {
+				taskTagsInName = append(taskTagsInName, part[:idx])
+			}
+		}
+	}
+	result = "✗"
+	if hasTagInName {
+		result = "✓"
+	}
+	if len(taskTagsInName) > 0 {
+		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: %v, agent tags: %v)", result, taskTagsInName, r.options.AgentTags)
+	} else {
+		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: <none>, agent tags: %v)", result, r.options.AgentTags)
+	}
+
+	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
+	var hasAgentTag bool
+	var taskAgentTags []string
+	if agentTags.Exists() {
+		agentTags.ForEach(func(key, value gjson.Result) bool {
+			tagValue := value.String()
+			taskAgentTags = append(taskAgentTags, tagValue)
+			// Case-insensitive comparison
+			for _, agentTag := range r.options.AgentTags {
+				if strings.EqualFold(tagValue, agentTag) {
+					hasAgentTag = true
+					return false // Stop iteration
+				}
+			}
+			return true
+		})
+	}
+	result = "✗"
+	if hasAgentTag {
+		result = "✓"
+	}
+	if len(taskAgentTags) > 0 {
+		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags)
+	} else {
+		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags)
+	}
+
+	// Check if name contains any agent network (case-insensitive)
+	var hasNetworkInName bool
+	var taskNetworksInName []string
+	for _, network := range r.options.AgentNetworks {
+		networkLower := strings.ToLower("[" + network + "]")
+		if strings.Contains(nameLower, networkLower) {
+			hasNetworkInName = true
+			break
+		}
+	}
+	// Extract all networks from name for logging (same logic as tags)
+	if strings.Contains(name, "[") && strings.Contains(name, "]") {
+		parts := strings.Split(name, "[")
+		for _, part := range parts {
+			if idx := strings.Index(part, "]"); idx > 0 {
+				taskNetworksInName = append(taskNetworksInName, part[:idx])
+			}
+		}
+	}
+	result = "✗"
+	if hasNetworkInName {
+		result = "✓"
+	}
+	if len(taskNetworksInName) > 0 {
+		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: %v, agent networks: %v)", result, taskNetworksInName, r.options.AgentNetworks)
+	} else {
+		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: <none>, agent networks: %v)", result, r.options.AgentNetworks)
+	}
+
+	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
+	var hasAgentNetwork bool
+	var taskAgentNetworks []string
+	if agentNetworks.Exists() {
+		agentNetworks.ForEach(func(key, value gjson.Result) bool {
+			networkValue := value.String()
+			taskAgentNetworks = append(taskAgentNetworks, networkValue)
+			// Case-insensitive comparison
+			for _, agentNetwork := range r.options.AgentNetworks {
+				if strings.EqualFold(networkValue, agentNetwork) {
+					hasAgentNetwork = true
+					return false // Stop iteration
+				}
+			}
+			return true
+		})
+	}
+	result = "✗"
+	if hasAgentNetwork {
+		result = "✓"
+	}
+	if len(taskAgentNetworks) > 0 {
+		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks)
+	} else {
+		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks)
+	}
+
+	// If any condition matches, don't skip
+	shouldContinue := isAssignedToAgent || hasAgentIdInName || hasTagInName || hasAgentTag || hasNetworkInName || hasAgentNetwork
+
+	if shouldContinue {
+		gologger.Verbose().Msgf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name)
+		return false // Don't skip
+	}
+
+	gologger.Verbose().Msgf("  %s (%s - %s) is being skipped (no matching conditions)", taskType, id, name)
+	return true // Skip
+}
+
 // NewRunner creates a new runner instance
 func NewRunner(options *Options) (*Runner, error) {
 	r := &Runner{
@@ -328,14 +480,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
 	}
 	if len(r.options.AgentTags) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (tags: %s)", strings.Join(r.options.AgentTags, ",")))
+		infoMessage.WriteString(fmt.Sprintf(" (tags: [%s])", strings.Join(r.options.AgentTags, ", ")))
 	} else {
-		infoMessage.WriteString(" (no tags)")
+		infoMessage.WriteString(" (tags: [])")
 	}
 	if len(r.options.AgentNetworks) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (networks: %s)", strings.Join(r.options.AgentNetworks, ",")))
+		infoMessage.WriteString(fmt.Sprintf(" (networks: [%s])", strings.Join(r.options.AgentNetworks, ", ")))
 	} else {
-		infoMessage.WriteString(" (no networks)")
+		infoMessage.WriteString(" (networks: [])")
 	}
 
 	gologger.Info().Msg(infoMessage.String())
@@ -433,54 +585,17 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 		// Process scans
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentId
-
-			// Check if it has any tag in name
-			var hasTagInName bool
-			for _, tag := range r.options.AgentTags {
-				if strings.Contains(scanName, "["+tag+"]") {
-					hasTagInName = true
-					break
-				}
-			}
-
-			// Check if agent tag matches
-			var hasAgentTag bool
-			if value.Get("agent_tags").Exists() {
-				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasAgentTag = true
-					}
-					return true
-				})
-			}
-
-			// we also check if it has any network in name
-			var hasNetworkInName bool
-			for _, network := range r.options.AgentNetworks {
-				if strings.Contains(scanName, "["+network+"]") {
-					hasNetworkInName = true
-					break
-				}
-			}
-
-			// we check if worker network matches
-			var hasWorkerNetwork bool
-			if value.Get("agent_networks").Exists() {
-				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
-						hasWorkerNetwork = true
-					}
-					return true
-				})
-			}
-
 			id := value.Get("scan_id").String()
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
-				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
+			if id == "" {
+				return true
+			}
+
+			scanName := value.Get("name").String()
+			agentId := value.Get("agent_id").String()
+			agentTags := value.Get("agent_tags")
+			agentNetworks := value.Get("agent_networks")
+
+			if r.shouldSkipTask("scan", id, scanName, agentId, agentTags, agentNetworks) {
 				return true
 			}
 
@@ -685,53 +800,17 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 		// Process enumerations
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
+			id := value.Get("id").String()
+			if id == "" {
+				return true
+			}
+
+			enumName := value.Get("name").String()
 			agentId := value.Get("agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentId
+			agentTags := value.Get("agent_tags")
+			agentNetworks := value.Get("agent_networks")
 
-			// Check if it has any tag in name
-			var hasTagInName bool
-			for _, tag := range r.options.AgentTags {
-				if strings.Contains(scanName, "["+tag+"]") {
-					hasTagInName = true
-					break
-				}
-			}
-
-			// Check if agent tag matches
-			var hasAgentTag bool
-			if value.Get("agent_tags").Exists() {
-				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasAgentTag = true
-					}
-					return true
-				})
-			}
-
-			// we also check if it has any network in name
-			var hasNetworkInName bool
-			for _, network := range r.options.AgentNetworks {
-				if strings.Contains(scanName, "["+network+"]") {
-					hasNetworkInName = true
-					break
-				}
-			}
-
-			// we check if worker network matches
-			var hasWorkerNetwork bool
-			if value.Get("agent_networks").Exists() {
-				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
-						hasWorkerNetwork = true
-					}
-					return true
-				})
-			}
-
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
+			if r.shouldSkipTask("enumeration", id, enumName, agentId, agentTags, agentNetworks) {
 				return true
 			}
 
@@ -770,22 +849,21 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 				if !targetExecutionTime.IsZero() && !isInRange {
-					gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
+					gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", enumName, targetExecutionTime, now)
 					return true
 				}
 			}
 
-			id := value.Get("id").String()
 			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
 
 			// First check completed and pending tasks
 			if completedTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", enumName)
 				return true
 			}
 
 			if pendingTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already in progress\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it's already in progress\n", enumName)
 				return true
 			}
 
@@ -799,7 +877,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			log.Printf("Before sanitization: %s", enumerationConfig)
 
 			// Sanitize enumeration config (remove unsupported steps)
-			enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, scanName)
+			enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, enumName)
 
 			// Get basic info needed for hash
 			var assets []string
@@ -822,11 +900,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			// Check cache before proceeding
 			if r.localCache.HasEnumerationBeenExecuted(id, configHash) && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping enumeration %s as it was already executed with same configuration\n", scanName)
+				gologger.Verbose().Msgf("skipping enumeration %s as it was already executed with same configuration\n", enumName)
 				return true
 			}
 
-			gologger.Info().Msgf("enumeration %s enqueued...\n", scanName)
+			gologger.Info().Msgf("enumeration %s enqueued...\n", enumName)
 
 			workerBehavior := value.Get("agent_behavior").String()
 			isDistributed := workerBehavior == "distribute"
