@@ -634,7 +634,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 				if !targetExecutionTime.IsZero() && !isInRange {
-					gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
+					gologger.Verbose().Msgf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
 					return true
 				}
 			}
@@ -643,12 +643,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			// First check completed and pending tasks
 			if completedTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping scan %s as it's already completed recently\n", scanName)
+				gologger.Verbose().Msgf("skipping scan \"%s\" as it's already completed recently\n", scanName)
 				return true
 			}
 
 			if pendingTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping scan %s as it's already in progress\n", scanName)
+				gologger.Verbose().Msgf("skipping scan \"%s\" as it's already in progress\n", scanName)
 				return true
 			}
 
@@ -738,11 +738,11 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 			// Skip if this exact configuration was already executed
 			if r.localCache.HasScanBeenExecuted(id, configHash) && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping scan %s as it was already executed with same configuration\n", scanName)
+				gologger.Verbose().Msgf("skipping scan \"%s\" as it was already executed with same configuration\n", scanName)
 				return true
 			}
 
-			gologger.Info().Msgf("scan %s enqueued...\n", scanName)
+			gologger.Info().Msgf("scan \"%s\" enqueued...\n", scanName)
 
 			_ = pendingTasks.Set(metaId, struct{}{})
 
@@ -849,7 +849,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 				if !targetExecutionTime.IsZero() && !isInRange {
-					gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", enumName, targetExecutionTime, now)
+					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", enumName, targetExecutionTime, now)
 					return true
 				}
 			}
@@ -858,12 +858,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			// First check completed and pending tasks
 			if completedTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", enumName)
+				gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already completed recently\n", enumName)
 				return true
 			}
 
 			if pendingTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already in progress\n", enumName)
+				gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already in progress\n", enumName)
 				return true
 			}
 
@@ -900,11 +900,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 			// Check cache before proceeding
 			if r.localCache.HasEnumerationBeenExecuted(id, configHash) && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping enumeration %s as it was already executed with same configuration\n", enumName)
+				gologger.Verbose().Msgf("skipping enumeration \"%s\" as it was already executed with same configuration\n", enumName)
 				return true
 			}
 
-			gologger.Info().Msgf("enumeration %s enqueued...\n", enumName)
+			gologger.Info().Msgf("enumeration \"%s\" enqueued...\n", enumName)
 
 			agentBehavior := value.Get("agent_behavior").String()
 			isDistributed := agentBehavior == "distribute"
@@ -1636,7 +1636,7 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	}
 
 	// Log info about removed steps
-	gologger.Info().Msgf("Removing unsupported steps from enumeration %s: %s", enumerationName, strings.Join(unsupportedSteps, ", "))
+	gologger.Info().Msgf("Removing unsupported steps from enumeration \"%s\": %s", enumerationName, strings.Join(unsupportedSteps, ", "))
 
 	// Parse the entire config as JSON to properly reconstruct it
 	var configMap map[string]interface{}
