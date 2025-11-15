@@ -88,7 +88,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 				outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
 				args = append(args, "-o", outputFile)
 			}
-			hasToolDashboardUpload := stringsutil.EqualFoldAny(args[0], "httpx", "naabu")
+			hasToolDashboardUpload := stringsutil.EqualFoldAny(args[0], "httpx", "naabu", "tlsx")
 			if hasToolDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
 				args = append(args,
 					"-team-id", os.Getenv("PDCP_TEAM_ID"),
@@ -248,19 +248,34 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 
 func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, removeFunc func(), err error) {
 	args = append(args, task.Tool.String())
+
+	tmpInputFile, tmpConfigFile, inputRemoveFunc, err := prepareInput(task)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+
+	var tmpTemplatesFile string
 	if len(task.Options.Templates) > 0 {
-		args = append(args, "-templates", strings.Join(task.Options.Templates, ","))
-		// ODO: temporary to have some results
-		// args = append(args, "-id", "http-missing-security-headers")
+		// Create temporary file for templates to avoid command line length limits
+		tmpTemplatesFile, err = fileutil.GetTempFileName()
+		if err != nil {
+			inputRemoveFunc()
+			return nil, nil, nil, fmt.Errorf("failed to create temp file for templates: %w", err)
+		}
+
+		// Write templates to file, one per line (standard format for nuclei template files)
+		templatesContent := strings.Join(task.Options.Templates, "\n")
+		if err := os.WriteFile(tmpTemplatesFile, conversion.Bytes(templatesContent), os.ModePerm); err != nil {
+			inputRemoveFunc()
+			_ = os.RemoveAll(tmpTemplatesFile)
+			return nil, nil, nil, fmt.Errorf("failed to write templates to temp file: %w", err)
+		}
+
+		args = append(args, "-templates", tmpTemplatesFile)
 	}
 
 	if task.Options.TeamID != "" {
 		args = append(args, "-team-id", task.Options.TeamID)
-	}
-
-	tmpInputFile, tmpConfigFile, removeFunc, err := prepareInput(task)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
 	args = append(args, "-l", tmpInputFile)
@@ -286,6 +301,14 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 		_ = fileutil.CreateFolder(task.Options.Output)
 		outputFile := filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
 		args = append(args, "-o", outputFile)
+	}
+
+	// Create combined remove function that cleans up all temporary files
+	removeFunc = func() {
+		inputRemoveFunc()
+		if tmpTemplatesFile != "" {
+			_ = os.RemoveAll(tmpTemplatesFile)
+		}
 	}
 
 	return envs, args, removeFunc, nil
