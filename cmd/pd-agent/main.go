@@ -1280,8 +1280,8 @@ func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
 }
 
 // UpdateTaskChunkStatus updates the status of a task chunk (ACK, NACK, or in_progress)
-func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskId, chunkID string, status TaskChunkStatus) error {
-	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk/%s", pkg.PCDPApiServer, taskId, chunkID)
+func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskID, chunkID string, status TaskChunkStatus) error {
+	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk/%s", pkg.PCDPApiServer, taskID, chunkID)
 
 	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 	if err != nil {
@@ -1464,7 +1464,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
-	
+
 	// Only add tags if not empty
 	if len(tagsToUse) > 0 {
 		tagsStr := strings.Join(tagsToUse, ",")
@@ -1472,7 +1472,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			q.Add("tags", tagsStr)
 		}
 	}
-	
+
 	// Only add networks if not empty
 	if len(networksToUse) > 0 {
 		networksStr := strings.Join(networksToUse, ",")

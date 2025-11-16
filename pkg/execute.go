@@ -70,12 +70,19 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 			manualAssetId   = task.Options.EnumerationID
 		)
 		for _, tool := range tools {
-			if len(naabuOutput) > 0 {
-				task.Options.Hosts = append(task.Options.Hosts, naabuOutput...)
+			// Use naabu output as input for subsequent tools (httpx, tlsx)
+			currentHosts := task.Options.Hosts
+			if len(naabuOutput) > 0 && tool.Name != "dnsx" && tool.Name != "naabu" {
+				currentHosts = naabuOutput
 			}
+
+			// Create a temporary task with current hosts for this tool
+			currentTask := *task
+			currentTask.Options.Hosts = currentHosts
+
 			// todo: remove this patch for testing
-			// task.Options.Hosts = []string{"192.168.179.2:8000"}
-			envs, args, removeFunc, err := parseGenericArgs(task)
+			// currentTask.Options.Hosts = []string{"192.168.179.2:8000"}
+			envs, args, removeFunc, err := parseGenericArgs(&currentTask)
 			if err != nil {
 				return nil, err
 			}
