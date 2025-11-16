@@ -1746,7 +1746,10 @@ func parseOptions() *Options {
 	agentTags := strings.Split(AgentTagsEnv, ",")
 
 	// Parse default parallelism values from environment
-	defaultChunkParallelism := 1
+	defaultChunkParallelism := runtime.NumCPU()
+	if defaultChunkParallelism <= 0 {
+		defaultChunkParallelism = 1
+	}
 	if val, err := strconv.Atoi(ChunkParallelismEnv); err == nil && val > 0 {
 		defaultChunkParallelism = val
 	}
