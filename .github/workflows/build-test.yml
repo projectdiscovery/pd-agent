@@ -39,7 +39,7 @@ jobs:
       - name: Install libpcap-dev
         run: sudo apt install libpcap-dev
       - run: go build .
-        working-directory: cmd/pdcp-agent/
+        working-directory: cmd/pd-agent/
 
       # - name: Test
       #   run: go test ./...

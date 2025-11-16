@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/projectdiscovery/gologger"
-	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg/types"
 	fileutil "github.com/projectdiscovery/utils/file"
 )
 
@@ -20,9 +20,9 @@ var (
 		return home
 	}()
 
-	DefaultConfigLocation = filepath.Join(HomeDir, ".config/pdtm/config.yaml")
-	CacheFile             = filepath.Join(HomeDir, ".config/pdtm/cache.json")
-	DefaultPath           = filepath.Join(HomeDir, ".pdtm/go/bin")
+	DefaultConfigLocation = filepath.Join(HomeDir, ".config/pd-agent/config.yaml")
+	CacheFile             = filepath.Join(HomeDir, ".config/pd-agent/cache.json")
+	DefaultPath           = filepath.Join(HomeDir, ".pd-agent/go/bin")
 )
 
 // UpdateCache creates/updates cache file

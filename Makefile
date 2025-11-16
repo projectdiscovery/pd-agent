@@ -13,7 +13,7 @@ endif
     
 all: build
 build:
-	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pdtm" cmd/pdtm-agent/pdtm-agent.go
+	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent" cmd/pd-agent/main.go
 test:
 	$(GOTEST) $(GOFLAGS) ./...
 tidy:

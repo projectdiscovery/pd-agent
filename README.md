@@ -7,26 +7,26 @@
 
 <p align="center">
 <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-_red.svg"></a>
-<a href="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm-agent"><img src="https://goreportcard.com/badge/github.com/projectdiscovery/pdtm-agent"></a>
-<a href="https://github.com/projectdiscovery/pdtm-agent/releases"><img src="https://img.shields.io/github/release/projectdiscovery/pdtm-agent"></a>
+<a href="https://goreportcard.com/badge/github.com/projectdiscovery/pd-agent"><img src="https://goreportcard.com/badge/github.com/projectdiscovery/pd-agent"></a>
+<a href="https://github.com/projectdiscovery/pd-agent/releases"><img src="https://img.shields.io/github/release/projectdiscovery/pd-agent"></a>
 <a href="https://twitter.com/pdiscoveryio"><img src="https://img.shields.io/twitter/follow/pdiscoveryio.svg?logo=twitter"></a>
 <a href="https://discord.gg/projectdiscovery"><img src="https://img.shields.io/discord/695645237418131507.svg?logo=discord"></a>
 </p>
 
 <p align="center">
-  <a href="#pdcp-agent">PDCP Agent</a> •
+  <a href="#pd-agent">PD Agent</a> •
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#system-installation">System Installation</a> •
   <a href="https://discord.gg/projectdiscovery">Join Discord</a>
 
-**pdcp-agent** is an agent for ProjectDiscovery Cloud Platform that executes scans and enumerations remotely.
+**pd-agent** is an agent for ProjectDiscovery Cloud Platform that executes scans and enumerations remotely.
 
 </p>
 
-## PDCP Agent
+## PD Agent
 
-**pdcp-agent** is an agent for ProjectDiscovery Cloud Platform that executes scans and enumerations remotely. It connects to the PDCP platform, receives scan configurations, and executes them locally using ProjectDiscovery tools.
+**pd-agent** is an agent for ProjectDiscovery Cloud Platform that executes scans and enumerations remotely. It connects to the PDCP platform, receives scan configurations, and executes them locally using ProjectDiscovery tools.
 
 ### Features
 
@@ -41,19 +41,19 @@
 
 #### Binary Installation
 
-Download the latest binary from [releases](https://github.com/projectdiscovery/pdtm-agent/releases):
+Download the latest binary from [releases](https://github.com/projectdiscovery/pd-agent/releases):
 
 ```bash
 # Linux
-wget https://github.com/projectdiscovery/pdtm-agent/releases/latest/download/pdcp-agent-linux-amd64 -O pdcp-agent
-chmod +x pdcp-agent
+wget https://github.com/projectdiscovery/pd-agent/releases/latest/download/pd-agent-linux-amd64 -O pd-agent
+chmod +x pd-agent
 
 # macOS
-wget https://github.com/projectdiscovery/pdtm-agent/releases/latest/download/pdcp-agent-darwin-amd64 -O pdcp-agent
-chmod +x pdcp-agent
+wget https://github.com/projectdiscovery/pd-agent/releases/latest/download/pd-agent-darwin-amd64 -O pd-agent
+chmod +x pd-agent
 
 # Windows
-# Download pdcp-agent-windows-amd64.exe and rename to pdcp-agent.exe
+# Download pd-agent-windows-amd64.exe and rename to pd-agent.exe
 ```
 
 #### Docker Installation
@@ -77,7 +77,7 @@ docker pull pd-agent:latest
 ```bash
 PDCP_API_KEY=your-api-key \
 PDCP_TEAM_ID=your-team-id \
-pdcp-agent -agent-output /path/to/output -verbose -agent-tags production
+pd-agent -agent-output /path/to/output -verbose -agent-tags production
 ```
 
 #### One-liner: Docker Execution
@@ -87,7 +87,7 @@ docker run -d --name pd-agent \
   -e PDCP_API_KEY=your-api-key \
   -e PDCP_TEAM_ID=your-team-id \
   -v /path/to/output:/output \
-  projectdiscovery/pdtm-agent:latest \
+  projectdiscovery/pd-agent:latest \
   -agent-output /output -verbose -agent-tags production -agent-networks prod-us-east-1
 ```
 
@@ -99,7 +99,7 @@ Create a `docker-compose.yml` file:
 version: '3.8'
 services:
   pd-agent:
-    image: projectdiscovery/pdtm-agent:latest
+    image: projectdiscovery/pd-agent:latest
     container_name: pd-agent
     restart: unless-stopped
     environment:
@@ -161,10 +161,10 @@ In **distributed mode**, the scan/enumeration workload is split across multiple 
 ```bash
 # Multiple agents with same tags will share the workload
 # Agent 1
-pdcp-agent -agent-tags production,scanner-1  -agent-networks prod-us-east-1
+pd-agent -agent-tags production,scanner-1  -agent-networks prod-us-east-1
 
 # Agent 2
-pdcp-agent -agent-tags production,scanner-2  -agent-networks prod-us-east-1
+pd-agent -agent-tags production,scanner-2  -agent-networks prod-us-east-1
 
 # Both agents will process different chunks of the same scan
 ```
@@ -177,20 +177,20 @@ pdcp-agent -agent-tags production,scanner-2  -agent-networks prod-us-east-1
 
 ```bash
 # Download binary
-wget https://github.com/projectdiscovery/pdtm-agent/releases/latest/download/pdcp-agent-linux-amd64 -O /usr/local/bin/pdcp-agent
-chmod +x /usr/local/bin/pdcp-agent
+wget https://github.com/projectdiscovery/pd-agent/releases/latest/download/pd-agent-linux-amd64 -O /usr/local/bin/pd-agent
+chmod +x /usr/local/bin/pd-agent
 ```
 
 **2. Create a dedicated user:**
 
 ```bash
 # Create user with low privileges
-sudo useradd -r -s /bin/false -d /var/lib/pdcp-agent pdcp-agent
-sudo mkdir -p /var/lib/pdcp-agent/output
-sudo chown -R pdcp-agent:pdcp-agent /var/lib/pdcp-agent
+sudo useradd -r -s /bin/false -d /var/lib/pd-agent pd-agent
+sudo mkdir -p /var/lib/pd-agent/output
+sudo chown -R pd-agent:pd-agent /var/lib/pd-agent
 ```
 
-**3. Create systemd service file** `/etc/systemd/system/pdcp-agent.service`:
+**3. Create systemd service file** `/etc/systemd/system/pd-agent.service`:
 
 ```ini
 [Unit]
@@ -199,12 +199,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=pdcp-agent
-Group=pdcp-agent
+User=pd-agent
+Group=pd-agent
 Environment="PDCP_API_KEY=your-api-key"
 Environment="PDCP_TEAM_ID=your-team-id"
 Environment="PDCP_AGENT_TAGS=production"
-ExecStart=/usr/local/bin/pdcp-agent -agent-output /var/lib/pdcp-agent/output -verbose
+ExecStart=/usr/local/bin/pd-agent -agent-output /var/lib/pd-agent/output -verbose
 Restart=always
 RestartSec=10
 
@@ -219,20 +219,20 @@ WantedBy=multi-user.target
 sudo systemctl daemon-reload
 
 # Enable service to start on boot
-sudo systemctl enable pdcp-agent
+sudo systemctl enable pd-agent
 
 # Start the service
-sudo systemctl start pdcp-agent
+sudo systemctl start pd-agent
 
 # Check status
-sudo systemctl status pdcp-agent
+sudo systemctl status pd-agent
 
 # View logs
-sudo journalctl -u pdcp-agent -f
+sudo journalctl -u pd-agent -f
 ```
 
 **Security considerations:**
-- Run as non-root user (`pdcp-agent`)
+- Run as non-root user (`pd-agent`)
 - Limit file system access to necessary directories
 - Use AppArmor/SELinux if available
 - Set appropriate file permissions (output directory)
@@ -243,17 +243,17 @@ sudo journalctl -u pdcp-agent -f
 
 ```bash
 # Download binary
-curl -L https://github.com/projectdiscovery/pdtm-agent/releases/latest/download/pdcp-agent-darwin-amd64 -o /usr/local/bin/pdcp-agent
-chmod +x /usr/local/bin/pdcp-agent
+curl -L https://github.com/projectdiscovery/pd-agent/releases/latest/download/pd-agent-darwin-amd64 -o /usr/local/bin/pd-agent
+chmod +x /usr/local/bin/pd-agent
 ```
 
 **2. Create directories:**
 
 ```bash
-mkdir -p ~/.pdcp-agent/{output,logs}
+mkdir -p ~/.pd-agent/{output,logs}
 ```
 
-**3. Create launchd plist** `~/Library/LaunchAgents/com.projectdiscovery.pdcp-agent.plist`:
+**3. Create launchd plist** `~/Library/LaunchAgents/com.projectdiscovery.pd-agent.plist`:
 
 > **Note:** Replace `YOUR_USERNAME` in the plist file with your actual macOS username.
 
@@ -263,12 +263,12 @@ mkdir -p ~/.pdcp-agent/{output,logs}
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.projectdiscovery.pdcp-agent</string>
+    <string>com.projectdiscovery.pd-agent</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/pdcp-agent</string>
+        <string>/usr/local/bin/pd-agent</string>
         <string>-agent-output</string>
-        <string>/Users/YOUR_USERNAME/.pdcp-agent/output</string>
+        <string>/Users/YOUR_USERNAME/.pd-agent/output</string>
         <string>-verbose</string>
         <string>-agent-tags</string>
         <string>production</string>
@@ -293,9 +293,9 @@ mkdir -p ~/.pdcp-agent/{output,logs}
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.pdcp-agent/logs/stdout.log</string>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.pdcp-agent/logs/stderr.log</string>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stderr.log</string>
 </dict>
 </plist>
 ```
@@ -304,17 +304,17 @@ mkdir -p ~/.pdcp-agent/{output,logs}
 
 ```bash
 # Load service
-launchctl load ~/Library/LaunchAgents/com.projectdiscovery.pdcp-agent.plist
+launchctl load ~/Library/LaunchAgents/com.projectdiscovery.pd-agent.plist
 
 # Start service
-launchctl start com.projectdiscovery.pdcp-agent
+launchctl start com.projectdiscovery.pd-agent
 
 # Check status
-launchctl list | grep pdcp-agent
+launchctl list | grep pd-agent
 
 # View logs
-tail -f ~/.pdcp-agent/logs/stdout.log
-tail -f ~/.pdcp-agent/logs/stderr.log
+tail -f ~/.pd-agent/logs/stdout.log
+tail -f ~/.pd-agent/logs/stderr.log
 ```
 
 **Security considerations:**
@@ -330,10 +330,10 @@ tail -f ~/.pdcp-agent/logs/stderr.log
 
 ```powershell
 # Create directory
-New-Item -ItemType Directory -Path "C:\Program Files\pdcp-agent" -Force
+New-Item -ItemType Directory -Path "C:\Program Files\pd-agent" -Force
 
 # Download binary
-Invoke-WebRequest -Uri "https://github.com/projectdiscovery/pdtm-agent/releases/latest/download/pdcp-agent-windows-amd64.exe" -OutFile "C:\Program Files\pdcp-agent\pdcp-agent.exe"
+Invoke-WebRequest -Uri "https://github.com/projectdiscovery/pd-agent/releases/latest/download/pd-agent-windows-amd64.exe" -OutFile "C:\Program Files\pd-agent\pd-agent.exe"
 
 # Download NSSM
 Invoke-WebRequest -Uri "https://nssm.cc/release/nssm-2.24.zip" -OutFile "$env:TEMP\nssm.zip"
@@ -343,32 +343,32 @@ Expand-Archive -Path "$env:TEMP\nssm.zip" -DestinationPath "C:\nssm" -Force
 **2. Create output directory:**
 
 ```powershell
-New-Item -ItemType Directory -Path "C:\ProgramData\pdcp-agent\output" -Force
+New-Item -ItemType Directory -Path "C:\ProgramData\pd-agent\output" -Force
 ```
 
 **3. Install service:**
 
 ```powershell
 # Install service
-C:\nssm\nssm-2.24\win64\nssm.exe install pdcp-agent "C:\Program Files\pdcp-agent\pdcp-agent.exe"
+C:\nssm\nssm-2.24\win64\nssm.exe install pd-agent "C:\Program Files\pd-agent\pd-agent.exe"
 
 # Set arguments
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppParameters "-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production"
+C:\nssm\nssm-2.24\win64\nssm.exe set pd-agent AppParameters "-agent-output C:\ProgramData\pd-agent\output -verbose -agent-tags production"
 
 # Set environment variables
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent AppEnvironmentExtra "PDCP_API_KEY=your-api-key" "PDCP_TEAM_ID=your-team-id"
+C:\nssm\nssm-2.24\win64\nssm.exe set pd-agent AppEnvironmentExtra "PDCP_API_KEY=your-api-key" "PDCP_TEAM_ID=your-team-id"
 
 # Set service account (use low-privilege account)
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent ObjectName "NT AUTHORITY\LOCAL SERVICE"
+C:\nssm\nssm-2.24\win64\nssm.exe set pd-agent ObjectName "NT AUTHORITY\LOCAL SERVICE"
 
 # Set startup type
-C:\nssm\nssm-2.24\win64\nssm.exe set pdcp-agent Start SERVICE_AUTO_START
+C:\nssm\nssm-2.24\win64\nssm.exe set pd-agent Start SERVICE_AUTO_START
 
 # Start service
-C:\nssm\nssm-2.24\win64\nssm.exe start pdcp-agent
+C:\nssm\nssm-2.24\win64\nssm.exe start pd-agent
 
 # Check status
-Get-Service pdcp-agent
+Get-Service pd-agent
 ```
 
 **Option B: Using Task Scheduler**
@@ -385,8 +385,8 @@ Get-Service pdcp-agent
 
 **4. Actions tab:**
 - New action: Start a program
-- Program: `C:\Program Files\pdcp-agent\pdcp-agent.exe`
-- Arguments: `-agent-output C:\ProgramData\pdcp-agent\output -verbose -agent-tags production -agent-networks prod-us-east-1`
+- Program: `C:\Program Files\pd-agent\pd-agent.exe`
+- Arguments: `-agent-output C:\ProgramData\pd-agent\output -verbose -agent-tags production -agent-networks prod-us-east-1`
 
 **5. Conditions tab:**
 - Uncheck "Start the task only if the computer is on AC power"
@@ -414,12 +414,12 @@ Create a batch file wrapper or use Task Scheduler's environment variable support
 
 ```bash
 # Create secret
-kubectl create secret generic pdcp-agent-secret \
+kubectl create secret generic pd-agent-secret \
   --from-literal=PDCP_API_KEY=your-api-key \
   --from-literal=PDCP_TEAM_ID=your-team-id
 
 # Deploy using the manifest file
-kubectl apply -f examples/pdcp-agent-deployment.yaml
+kubectl apply -f examples/pd-agent-deployment.yaml
 ```
 
 > **Note:** For a production-ready deployment, use the full deployment manifest below which properly references Secrets and ConfigMaps.
@@ -431,31 +431,31 @@ Create a Kubernetes deployment with proper configuration:
 **1. Create a Secret for sensitive data:**
 
 ```bash
-kubectl create secret generic pdcp-agent-secret \
+kubectl create secret generic pd-agent-secret \
   --from-literal=PDCP_API_KEY=your-api-key \
   --from-literal=PDCP_TEAM_ID=your-team-id
 ```
 
 **2. No additional ConfigMap needed (using defaults)**
 
-**3. Create deployment manifest** `pdcp-agent-deployment.yaml`:
+**3. Create deployment manifest** `pd-agent-deployment.yaml`:
 
 ```yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pdcp-agent
+  name: pd-agent
   labels:
-    app: pdcp-agent
+    app: pd-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pdcp-agent
+      app: pd-agent
   template:
     metadata:
       labels:
-        app: pdcp-agent
+        app: pd-agent
     spec:
       # Run as non-root user for security
       securityContext:
@@ -463,8 +463,8 @@ spec:
         runAsUser: 1000
         fsGroup: 1000
       containers:
-      - name: pdcp-agent
-        image: projectdiscovery/pdtm-agent:latest
+      - name: pd-agent
+        image: projectdiscovery/pd-agent:latest
         imagePullPolicy: IfNotPresent
         args:
           - -agent-output
@@ -479,12 +479,12 @@ spec:
           - name: PDCP_API_KEY
             valueFrom:
               secretKeyRef:
-                name: pdcp-agent-secret
+                name: pd-agent-secret
                 key: PDCP_API_KEY
           - name: PDCP_TEAM_ID
             valueFrom:
               secretKeyRef:
-                name: pdcp-agent-secret
+                name: pd-agent-secret
                 key: PDCP_TEAM_ID
         volumeMounts:
           - name: output
@@ -502,7 +502,7 @@ spec:
             command:
               - /bin/sh
               - -c
-              - "pgrep pdcp-agent || exit 1"
+              - "pgrep pd-agent || exit 1"
           initialDelaySeconds: 30
           periodSeconds: 30
         readinessProbe:
@@ -510,7 +510,7 @@ spec:
             command:
               - /bin/sh
               - -c
-              - "pgrep pdcp-agent || exit 1"
+              - "pgrep pd-agent || exit 1"
           initialDelaySeconds: 10
           periodSeconds: 10
       volumes:
@@ -530,29 +530,29 @@ spec:
 
 ```bash
 # Apply the deployment
-kubectl apply -f pdcp-agent-deployment.yaml
+kubectl apply -f pd-agent-deployment.yaml
 
 # Check deployment status
-kubectl get deployments pdcp-agent
+kubectl get deployments pd-agent
 
 # Check pods
-kubectl get pods -l app=pdcp-agent
+kubectl get pods -l app=pd-agent
 
 # View logs
-kubectl logs -l app=pdcp-agent -f
+kubectl logs -l app=pd-agent -f
 
 # Describe pod for troubleshooting
-kubectl describe pod -l app=pdcp-agent
+kubectl describe pod -l app=pd-agent
 ```
 
 **5. Scale the deployment (for multiple agents):**
 
 ```bash
 # Scale to 3 replicas
-kubectl scale deployment pdcp-agent --replicas=3
+kubectl scale deployment pd-agent --replicas=3
 
 # Or update the replicas in the YAML and reapply
-kubectl apply -f pdcp-agent-deployment.yaml
+kubectl apply -f pd-agent-deployment.yaml
 ```
 
 **Security considerations:**
@@ -576,7 +576,7 @@ kubectl apply -f pdcp-agent-deployment.yaml
 volumes:
   - name: output
     persistentVolumeClaim:
-      claimName: pdcp-agent-pvc
+      claimName: pd-agent-pvc
 ```
 
 Create the PVC:
@@ -585,7 +585,7 @@ Create the PVC:
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: pdcp-agent-pvc
+  name: pd-agent-pvc
 spec:
   accessModes:
     - ReadWriteOnce
@@ -616,11 +616,11 @@ spec:
 
 #### Log Locations
 
-- **Linux (systemd):** `journalctl -u pdcp-agent -f`
-- **macOS (launchd):** `~/.pdcp-agent/logs/stdout.log` and `stderr.log`
+- **Linux (systemd):** `journalctl -u pd-agent -f`
+- **macOS (launchd):** `~/.pd-agent/logs/stdout.log` and `stderr.log`
 - **Windows:** Event Viewer → Windows Logs → Application
-- **Docker:** `docker logs pdcp-agent -f`
-- **Kubernetes:** `kubectl logs -l app=pdcp-agent -f`
+- **Docker:** `docker logs pd-agent -f`
+- **Kubernetes:** `kubectl logs -l app=pd-agent -f`
 
 #### Enable Verbose Logging
 
@@ -628,7 +628,7 @@ Add `-verbose` flag or set environment variable:
 ```bash
 export PDCP_VERBOSE=true
 # or
-PDCP_VERBOSE=1 pdcp-agent ...
+PDCP_VERBOSE=1 pd-agent ...
 ```
 
 ### Best Practices
@@ -649,7 +649,7 @@ Configure a custom proxy for agent communication:
 
 ```bash
 export PROXY_URL=http://proxy.example.com:8080
-pdcp-agent -verbose
+pd-agent -verbose
 ```
 
 #### Agent Grouping
@@ -658,17 +658,17 @@ Use tags and networks to group agents:
 
 ```bash
 # Production agents
-pdcp-agent -agent-tags production,us-east -agent-networks prod-network
+pd-agent -agent-tags production,us-east -agent-networks prod-network
 
 # Staging agents
-pdcp-agent -agent-tags staging,us-west -agent-networks staging-network
+pd-agent -agent-tags staging,us-west -agent-networks staging-network
 ```
 
 --------
 
 <div align="center">
 
-**pdcp-agent** is made with ❤️ by the [projectdiscovery](https://projectdiscovery.io) team and distributed under [MIT License](LICENSE).
+**pd-agent** is made with ❤️ by the [projectdiscovery](https://projectdiscovery.io) team and distributed under [MIT License](LICENSE).
 
 
 <a href="https://discord.gg/projectdiscovery"><img src="https://raw.githubusercontent.com/projectdiscovery/nuclei-burp-plugin/main/static/join-discord.png" width="300" alt="Join Discord"></a>

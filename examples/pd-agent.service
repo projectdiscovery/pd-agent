@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-User=pdcp-agent
-Group=pdcp-agent
+User=pd-agent
+Group=pd-agent
 Environment="PDCP_API_KEY=your-api-key"
 Environment="PDCP_TEAM_ID=your-team-id"
 Environment="PDCP_AGENT_TAGS=production"
-ExecStart=/usr/local/bin/pdcp-agent -agent-output /var/lib/pdcp-agent/output -verbose
+ExecStart=/usr/local/bin/pd-agent -agent-output /var/lib/pd-agent/output -verbose
 Restart=always
 RestartSec=10
 

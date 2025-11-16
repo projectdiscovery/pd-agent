@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: pdcp-agent-pvc
+  name: pd-agent-pvc
 spec:
   accessModes:
     - ReadWriteOnce

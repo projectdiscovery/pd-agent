@@ -12,7 +12,7 @@ COPY . .
 
 # Build pd-agent binary
 # CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
-RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pdcp-agent/pdcp-agent.go
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
 
 # Tools dependencies
 # dnsx

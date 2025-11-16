@@ -1,18 +1,18 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pdcp-agent
+  name: pd-agent
   labels:
-    app: pdcp-agent
+    app: pd-agent
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: pdcp-agent
+      app: pd-agent
   template:
     metadata:
       labels:
-        app: pdcp-agent
+        app: pd-agent
     spec:
       # Run as non-root user for security
       securityContext:
@@ -20,8 +20,8 @@ spec:
         runAsUser: 1000
         fsGroup: 1000
       containers:
-      - name: pdcp-agent
-        image: pdcp-agent:latest
+      - name: pd-agent
+        image: pd-agent:latest
         imagePullPolicy: IfNotPresent
         args:
           - -agent-output
@@ -36,12 +36,12 @@ spec:
           - name: PDCP_API_KEY
             valueFrom:
               secretKeyRef:
-                name: pdcp-agent-secret
+                name: pd-agent-secret
                 key: PDCP_API_KEY
           - name: PDCP_TEAM_ID
             valueFrom:
               secretKeyRef:
-                name: pdcp-agent-secret
+                name: pd-agent-secret
                 key: PDCP_TEAM_ID
         volumeMounts:
           - name: output
@@ -59,7 +59,7 @@ spec:
             command:
               - /bin/sh
               - -c
-              - "pgrep pdcp-agent || exit 1"
+              - "pgrep pd-agent || exit 1"
           initialDelaySeconds: 30
           periodSeconds: 30
         readinessProbe:
@@ -67,7 +67,7 @@ spec:
             command:
               - /bin/sh
               - -c
-              - "pgrep pdcp-agent || exit 1"
+              - "pgrep pd-agent || exit 1"
           initialDelaySeconds: 10
           periodSeconds: 10
       volumes:

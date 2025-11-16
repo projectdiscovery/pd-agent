@@ -24,9 +24,9 @@ import (
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/levels"
-	"github.com/projectdiscovery/pdtm-agent/pkg"
-	"github.com/projectdiscovery/pdtm-agent/pkg/client"
-	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg"
+	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/types"
 	envutil "github.com/projectdiscovery/utils/env"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -96,7 +96,7 @@ func (c *LocalCache) Save() error {
 		return fmt.Errorf("error getting home directory: %v", err)
 	}
 
-	cacheDir := filepath.Join(homeDir, ".pdcp-agent")
+	cacheDir := filepath.Join(homeDir, ".pd-agent")
 	if err := os.MkdirAll(cacheDir, 0755); err != nil {
 		return fmt.Errorf("error creating cache directory: %v", err)
 	}
@@ -112,7 +112,7 @@ func (c *LocalCache) Load() error {
 		return fmt.Errorf("error getting home directory: %v", err)
 	}
 
-	cacheFile := filepath.Join(homeDir, ".pdcp-agent", "execution-cache.json")
+	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
 	data, err := os.ReadFile(cacheFile)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -988,7 +988,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 }
 
 // executeNucleiScan is the shared implementation for executing nuclei scans
-// using the same logic as pdtm-agent
+// using the same logic as pd-agent
 func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
 	// Set output directory if agent output is specified
 	var outputDir string
@@ -996,7 +996,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 		outputDir = filepath.Join(r.options.AgentOutput, metaID)
 	}
 
-	// Create task similar to pdtm-agent
+	// Create task similar to pd-agent
 	task := &types.Task{
 		Tool: types.Nuclei,
 		Options: types.Options{
@@ -1011,7 +1011,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 		Id: metaID,
 	}
 
-	// Execute using the same pkg.Run logic as pdtm-agent
+	// Execute using the same pkg.Run logic as pd-agent
 	gologger.Info().Msgf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID)
 	taskResult, err := pkg.Run(ctx, task)
 	if err != nil {
@@ -1148,7 +1148,7 @@ Complete:
 	_, _ = r.getTaskChunk(ctx, taskID, true)
 }
 
-// elaborateScanChunks processes distributed scan chunks using the same logic as pdtm-agent
+// elaborateScanChunks processes distributed scan chunks using the same logic as pd-agent
 func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
 	r.processChunks(ctx, scanID, "scan", func(ctx context.Context, chunk *TaskChunk) error {
 		// Execute the chunk using the shared scan execution logic
@@ -1157,14 +1157,14 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 	})
 }
 
-// elaborateScan processes a non-distributed scan using the same logic as pdtm-agent
+// elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
 	gologger.Info().Msgf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets))
 	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets)
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
-// using the same logic as pdtm-agent
+// using the same logic as pd-agent
 func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
 	gologger.Info().Msgf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets))
 
@@ -1189,7 +1189,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 		Id: metaID,
 	}
 
-	// Execute using the same pkg.Run logic as pdtm-agent
+	// Execute using the same pkg.Run logic as pd-agent
 	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
 	taskResult, err := pkg.Run(ctx, task)
 	if err != nil {
@@ -1204,7 +1204,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	}
 }
 
-// elaborateEnumerationChunks processes distributed enumeration chunks using the same logic as pdtm-agent
+// elaborateEnumerationChunks processes distributed enumeration chunks using the same logic as pd-agent
 func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID string, steps, assets []string) {
 	r.processChunks(ctx, enumID, "enumeration", func(ctx context.Context, chunk *TaskChunk) error {
 		// Execute the chunk using the shared enumeration execution logic
@@ -1464,8 +1464,22 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
-	q.Add("tags", strings.Join(tagsToUse, ","))
-	q.Add("networks", strings.Join(networksToUse, ","))
+	
+	// Only add tags if not empty
+	if len(tagsToUse) > 0 {
+		tagsStr := strings.Join(tagsToUse, ",")
+		if tagsStr != "" {
+			q.Add("tags", tagsStr)
+		}
+	}
+	
+	// Only add networks if not empty
+	if len(networksToUse) > 0 {
+		networksStr := strings.Join(networksToUse, ",")
+		if networksStr != "" {
+			q.Add("networks", networksStr)
+		}
+	}
 
 	req.URL.RawQuery = q.Encode()
 
@@ -1741,7 +1755,7 @@ func parseOptions() *Options {
 	}
 
 	flagSet := goflags.NewFlagSet()
-	flagSet.SetDescription(`pdcp-agent is an agent for ProjectDiscovery Cloud Platform`)
+	flagSet.SetDescription(`pd-agent is an agent for ProjectDiscovery Cloud Platform`)
 
 	agentTags := strings.Split(AgentTagsEnv, ",")
 
@@ -1836,7 +1850,7 @@ func configureLogging(options *Options) {
 // 		return
 // 	}
 
-// 	cacheFile := filepath.Join(homeDir, ".pdcp-agent", "execution-cache.json")
+// 	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
 // 	if err := os.Remove(cacheFile); err != nil {
 // 		if !os.IsNotExist(err) {
 // 			gologger.Warning().Msgf("Could not delete cache file (this is ok if it doesn't exist): %v", err)
@@ -1872,6 +1886,6 @@ func main() {
 
 	err = pdcpRunner.Run(ctx)
 	if err != nil {
-		gologger.Fatal().Msgf("Could not run pdcp-agent: %s\n", err)
+		gologger.Fatal().Msgf("Could not run pd-agent: %s\n", err)
 	}
 }

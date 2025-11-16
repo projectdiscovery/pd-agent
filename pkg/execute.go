@@ -13,9 +13,9 @@ import (
 	"strings"
 
 	"github.com/projectdiscovery/gologger"
-	"github.com/projectdiscovery/pdtm-agent/pkg/client"
-	"github.com/projectdiscovery/pdtm-agent/pkg/tools"
-	"github.com/projectdiscovery/pdtm-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/tools"
+	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/conversion"
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"

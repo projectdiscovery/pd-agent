@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.projectdiscovery.pdcp-agent</string>
+    <string>com.projectdiscovery.pd-agent</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/bin/pdcp-agent</string>
+        <string>/usr/local/bin/pd-agent</string>
         <string>-agent-output</string>
-        <string>/Users/YOUR_USERNAME/.pdcp-agent/output</string>
+        <string>/Users/YOUR_USERNAME/.pd-agent/output</string>
         <string>-verbose</string>
         <string>-agent-tags</string>
         <string>production</string>
@@ -25,9 +25,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.pdcp-agent/logs/stdout.log</string>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stdout.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.pdcp-agent/logs/stderr.log</string>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stderr.log</string>
 </dict>
 </plist>
 

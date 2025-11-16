@@ -1,4 +1,4 @@
-/pdtm
+/pd-agent
 dist/
 .idea
 .vscode
@@ -6,5 +6,4 @@ dist/
 
 cmd/openapi-mcp/openapi-mcp
 cmd/fleetx/fleetx
-cmd/pdtm-agent/pdtm-agent
-cmd/pdcp-agent/pdcp-agent
+cmd/pd-agent/pd-agent

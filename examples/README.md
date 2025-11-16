@@ -1,14 +1,14 @@
 # PDCP Agent Installation Examples
 
-This directory contains example configuration files for installing and running `pdcp-agent` as a system service on different platforms.
+This directory contains example configuration files for installing and running `pd-agent` as a system service on different platforms.
 
 ## Files
 
-- **pdcp-agent.service** - systemd service file for Linux
-- **com.projectdiscovery.pdcp-agent.plist** - launchd plist file for macOS
+- **pd-agent.service** - systemd service file for Linux
+- **com.projectdiscovery.pd-agent.plist** - launchd plist file for macOS
 - **windows-install-nssm.ps1** - PowerShell script for Windows installation using NSSM
-- **pdcp-agent-deployment.yaml** - Kubernetes Deployment manifest
-- **pdcp-agent-pvc.yaml** - Kubernetes PersistentVolumeClaim for persistent storage
+- **pd-agent-deployment.yaml** - Kubernetes Deployment manifest
+- **pd-agent-pvc.yaml** - Kubernetes PersistentVolumeClaim for persistent storage
 
 ## Usage
 
@@ -16,12 +16,12 @@ This directory contains example configuration files for installing and running `
 
 1. Copy the service file to `/etc/systemd/system/`:
    ```bash
-   sudo cp pdcp-agent.service /etc/systemd/system/
+   sudo cp pd-agent.service /etc/systemd/system/
    ```
 
 2. Edit the service file and update the environment variables with your actual values:
    ```bash
-   sudo nano /etc/systemd/system/pdcp-agent.service
+   sudo nano /etc/systemd/system/pd-agent.service
    ```
 
 3. Follow the installation steps in the main README.md
@@ -30,12 +30,12 @@ This directory contains example configuration files for installing and running `
 
 1. Copy the plist file to your LaunchAgents directory:
    ```bash
-   cp com.projectdiscovery.pdcp-agent.plist ~/Library/LaunchAgents/
+   cp com.projectdiscovery.pd-agent.plist ~/Library/LaunchAgents/
    ```
 
 2. Edit the plist file and replace `YOUR_USERNAME` with your actual macOS username:
    ```bash
-   nano ~/Library/LaunchAgents/com.projectdiscovery.pdcp-agent.plist
+   nano ~/Library/LaunchAgents/com.projectdiscovery.pd-agent.plist
    ```
 
 3. Update all placeholder values (API keys, team ID, etc.)
@@ -59,12 +59,12 @@ This directory contains example configuration files for installing and running `
 
 ```bash
 # Create secret for sensitive data
-kubectl create secret generic pdcp-agent-secret \
+kubectl create secret generic pd-agent-secret \
   --from-literal=PDCP_API_KEY=your-api-key \
   --from-literal=PDCP_TEAM_ID=your-team-id
 
 # Create configmap for configuration
-kubectl create configmap pdcp-agent-config \
+kubectl create configmap pd-agent-config \
 # No additional configmap needed - using defaults
 ```
 
@@ -76,23 +76,23 @@ kubectl create configmap pdcp-agent-config \
 
 ```bash
 # Optional: Create PVC for persistent storage
-kubectl apply -f pdcp-agent-pvc.yaml
+kubectl apply -f pd-agent-pvc.yaml
 
 # Deploy the agent
-kubectl apply -f pdcp-agent-deployment.yaml
+kubectl apply -f pd-agent-deployment.yaml
 
 # Check status
-kubectl get pods -l app=pdcp-agent
+kubectl get pods -l app=pd-agent
 
 # View logs
-kubectl logs -l app=pdcp-agent -f
+kubectl logs -l app=pd-agent -f
 ```
 
 **4. Scale deployment:**
 
 ```bash
 # Scale to multiple replicas
-kubectl scale deployment pdcp-agent --replicas=3
+kubectl scale deployment pd-agent --replicas=3
 ```
 
 ## Important Notes
