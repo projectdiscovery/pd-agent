@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,27 +30,34 @@ import (
 	envutil "github.com/projectdiscovery/utils/env"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
+	syncutil "github.com/projectdiscovery/utils/sync"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
 )
 
 var (
-	PDCPApiKey    = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv     = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	AgentTagsEnv  = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
-	PdcpApiServer = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
+	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
+	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
+	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
+	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
+	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
 )
 
 // Options contains the configuration options for the agent
 type Options struct {
-	TeamID           string
-	AgentId          string
-	AgentTags        goflags.StringSlice
-	AgentNetworks    goflags.StringSlice
-	AgentOutput      string
-	AgentName        string
-	Verbose          bool
-	PassiveDiscovery bool // Enable passive discovery
+	TeamID                 string
+	AgentId                string
+	AgentTags              goflags.StringSlice
+	AgentNetworks          goflags.StringSlice
+	AgentOutput            string
+	AgentName              string
+	Verbose                bool
+	PassiveDiscovery       bool // Enable passive discovery
+	ChunkParallelism       int  // Number of chunks to process in parallel
+	ScanParallelism        int  // Number of scans to process in parallel
+	EnumerationParallelism int  // Number of enumerations to process in parallel
 }
 
 // ScanCache represents cached scan execution information
@@ -277,6 +285,158 @@ var (
 	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
 )
 
+// shouldSkipTask checks if a task (scan or enumeration) should be skipped based on
+// agent assignment, tags, and networks. Logs each check in verbose mode.
+// Returns true if the task should be skipped (no matching conditions), false if it should continue.
+func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTags, agentNetworks gjson.Result) bool {
+	gologger.Verbose().Msgf("checking %s (%s - %s)", taskType, id, name)
+
+	// Check if agent ID matches (case-insensitive)
+	isAssignedToAgent := strings.EqualFold(taskAgentId, r.options.AgentId)
+	result := "✗"
+	if isAssignedToAgent {
+		result = "✓"
+	}
+	if taskAgentId == "" {
+		gologger.Verbose().Msgf("  checking id: %s (task: <empty>, agent: %s)", result, r.options.AgentId)
+	} else {
+		gologger.Verbose().Msgf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId)
+	}
+
+	// Check if name contains agent ID tag (case-insensitive)
+	nameLower := strings.ToLower(name)
+	agentIdTag := strings.ToLower("[" + r.options.AgentId + "]")
+	hasAgentIdInName := strings.Contains(nameLower, agentIdTag)
+	result = "✗"
+	if hasAgentIdInName {
+		result = "✓"
+	}
+	gologger.Verbose().Msgf("  checking id in name: %s (name: %s, looking for: %s)", result, name, "["+r.options.AgentId+"]")
+
+	// Check if name contains any agent tag (case-insensitive)
+	var hasTagInName bool
+	var taskTagsInName []string
+	for _, tag := range r.options.AgentTags {
+		tagLower := strings.ToLower("[" + tag + "]")
+		if strings.Contains(nameLower, tagLower) {
+			hasTagInName = true
+			break
+		}
+	}
+	// Extract all tags from name for logging
+	if strings.Contains(name, "[") && strings.Contains(name, "]") {
+		parts := strings.Split(name, "[")
+		for _, part := range parts {
+			if idx := strings.Index(part, "]"); idx > 0 {
+				taskTagsInName = append(taskTagsInName, part[:idx])
+			}
+		}
+	}
+	result = "✗"
+	if hasTagInName {
+		result = "✓"
+	}
+	if len(taskTagsInName) > 0 {
+		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: %v, agent tags: %v)", result, taskTagsInName, r.options.AgentTags)
+	} else {
+		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: <none>, agent tags: %v)", result, r.options.AgentTags)
+	}
+
+	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
+	var hasAgentTag bool
+	var taskAgentTags []string
+	if agentTags.Exists() {
+		agentTags.ForEach(func(key, value gjson.Result) bool {
+			tagValue := value.String()
+			taskAgentTags = append(taskAgentTags, tagValue)
+			// Case-insensitive comparison
+			for _, agentTag := range r.options.AgentTags {
+				if strings.EqualFold(tagValue, agentTag) {
+					hasAgentTag = true
+					return false // Stop iteration
+				}
+			}
+			return true
+		})
+	}
+	result = "✗"
+	if hasAgentTag {
+		result = "✓"
+	}
+	if len(taskAgentTags) > 0 {
+		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags)
+	} else {
+		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags)
+	}
+
+	// Check if name contains any agent network (case-insensitive)
+	var hasNetworkInName bool
+	var taskNetworksInName []string
+	for _, network := range r.options.AgentNetworks {
+		networkLower := strings.ToLower("[" + network + "]")
+		if strings.Contains(nameLower, networkLower) {
+			hasNetworkInName = true
+			break
+		}
+	}
+	// Extract all networks from name for logging (same logic as tags)
+	if strings.Contains(name, "[") && strings.Contains(name, "]") {
+		parts := strings.Split(name, "[")
+		for _, part := range parts {
+			if idx := strings.Index(part, "]"); idx > 0 {
+				taskNetworksInName = append(taskNetworksInName, part[:idx])
+			}
+		}
+	}
+	result = "✗"
+	if hasNetworkInName {
+		result = "✓"
+	}
+	if len(taskNetworksInName) > 0 {
+		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: %v, agent networks: %v)", result, taskNetworksInName, r.options.AgentNetworks)
+	} else {
+		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: <none>, agent networks: %v)", result, r.options.AgentNetworks)
+	}
+
+	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
+	var hasAgentNetwork bool
+	var taskAgentNetworks []string
+	if agentNetworks.Exists() {
+		agentNetworks.ForEach(func(key, value gjson.Result) bool {
+			networkValue := value.String()
+			taskAgentNetworks = append(taskAgentNetworks, networkValue)
+			// Case-insensitive comparison
+			for _, agentNetwork := range r.options.AgentNetworks {
+				if strings.EqualFold(networkValue, agentNetwork) {
+					hasAgentNetwork = true
+					return false // Stop iteration
+				}
+			}
+			return true
+		})
+	}
+	result = "✗"
+	if hasAgentNetwork {
+		result = "✓"
+	}
+	if len(taskAgentNetworks) > 0 {
+		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks)
+	} else {
+		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks)
+	}
+
+	// If any condition matches, don't skip
+	shouldContinue := isAssignedToAgent || hasAgentIdInName || hasTagInName || hasAgentTag || hasNetworkInName || hasAgentNetwork
+
+	if shouldContinue {
+		gologger.Verbose().Msgf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name)
+		return false // Don't skip
+	}
+
+	gologger.Verbose().Msgf("  %s (%s - %s) is being skipped (no matching conditions)", taskType, id, name)
+	return true // Skip
+}
+
 // NewRunner creates a new runner instance
 func NewRunner(options *Options) (*Runner, error) {
 	r := &Runner{
@@ -328,14 +488,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
 	}
 	if len(r.options.AgentTags) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (tags: %s)", strings.Join(r.options.AgentTags, ",")))
+		infoMessage.WriteString(fmt.Sprintf(" (tags: [%s])", strings.Join(r.options.AgentTags, ", ")))
 	} else {
-		infoMessage.WriteString(" (no tags)")
+		infoMessage.WriteString(" (tags: [])")
 	}
 	if len(r.options.AgentNetworks) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (networks: %s)", strings.Join(r.options.AgentNetworks, ",")))
+		infoMessage.WriteString(fmt.Sprintf(" (networks: [%s])", strings.Join(r.options.AgentNetworks, ", ")))
 	} else {
-		infoMessage.WriteString(" (no networks)")
+		infoMessage.WriteString(" (networks: [])")
 	}
 
 	gologger.Info().Msg(infoMessage.String())
@@ -405,6 +565,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving scans...")
 	apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
 
+	awg, err := syncutil.New(syncutil.WithSize(r.options.ScanParallelism))
+	if err != nil {
+		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		return err
+	}
+
 	limit := 100
 	offset := 0
 	totalPages := 1
@@ -431,183 +597,20 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
 
-		// Process scans
+		// Process scans in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentId
-
-			// Check if it has any tag in name
-			var hasTagInName bool
-			for _, tag := range r.options.AgentTags {
-				if strings.Contains(scanName, "["+tag+"]") {
-					hasTagInName = true
-					break
-				}
-			}
-
-			// Check if agent tag matches
-			var hasAgentTag bool
-			if value.Get("agent_tags").Exists() {
-				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasAgentTag = true
-					}
-					return true
-				})
-			}
-
-			// we also check if it has any network in name
-			var hasNetworkInName bool
-			for _, network := range r.options.AgentNetworks {
-				if strings.Contains(scanName, "["+network+"]") {
-					hasNetworkInName = true
-					break
-				}
-			}
-
-			// we check if worker network matches
-			var hasWorkerNetwork bool
-			if value.Get("agent_networks").Exists() {
-				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
-						hasWorkerNetwork = true
-					}
-					return true
-				})
-			}
-
 			id := value.Get("scan_id").String()
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
-				gologger.Verbose().Msgf("skipping scan %s as it's not assigned|tagged|has-tag-in-name to %s\n", scanName, r.options.AgentId)
+			if id == "" {
 				return true
 			}
 
-			// Parse schedule and start time
-			var targetExecutionTime time.Time
+			// Capture all data from gjson.Result before passing to goroutine
+			scanName := value.Get("name").String()
+			agentId := value.Get("agent_id").String()
+			agentTags := value.Get("agent_tags")
+			agentNetworks := value.Get("agent_networks")
 			startTime := value.Get("start_time").String()
-			if startTime != "" {
-				parsedStartTime, err := time.Parse(time.RFC3339, startTime)
-				if err != nil {
-					gologger.Error().Msgf("Error parsing start time: %v", err)
-					return true
-				}
-				targetExecutionTime = parsedStartTime
-			}
-
 			scheduleData := value.Get("schedule")
-			if scheduleData.Exists() {
-				nextRun := scheduleData.Get("schedule_next_run").String()
-				if nextRun != "" {
-					nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-					if err != nil {
-						gologger.Error().Msgf("Error parsing next run time: %v", err)
-						return true
-					}
-					if !targetExecutionTime.IsZero() {
-						targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-					} else {
-						targetExecutionTime = nextRunTime
-					}
-				}
-
-				now := time.Now().UTC()
-
-				// Skip if the combined execution time is in the future
-				// we accept up to 10 minutes before/after the scheduled time
-				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-				if !targetExecutionTime.IsZero() && !isInRange {
-					gologger.Verbose().Msgf("skipping scan %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
-					return true
-				}
-			}
-
-			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
-
-			// First check completed and pending tasks
-			if completedTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping scan %s as it's already completed recently\n", scanName)
-				return true
-			}
-
-			if pendingTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping scan %s as it's already in progress\n", scanName)
-				return true
-			}
-
-			// Fetch minimal config first to compute hash
-			scanConfig, err := r.fetchScanConfig(id)
-			if err != nil {
-				gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
-				return true
-			}
-
-			// Continue with full config processing
-			scanConfigIds := make(map[string]string)
-			gjson.Parse(scanConfig).Get("scan_config_ids").ForEach(func(key, value gjson.Result) bool {
-				id := value.Get("id").String()
-				if id != "" {
-					scanConfigIds[id] = ""
-				}
-				return true
-			})
-
-			for id := range scanConfigIds {
-				scanConfig, err := r.fetchSingleConfig(id)
-				if err != nil {
-					gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
-				}
-				scanConfigIds[id] = scanConfig
-			}
-
-			// Merge all configs into one
-			var finalConfig string
-			if len(scanConfigIds) > 0 {
-				var mergedConfig strings.Builder
-				for _, scanConfig := range scanConfigIds {
-					// Parse the JSON to get the config field
-					configValue := gjson.Get(scanConfig, "config").String()
-					if configValue != "" {
-						// Decode base64
-						decoded, err := base64.StdEncoding.DecodeString(configValue)
-						if err != nil {
-							gologger.Error().Msgf("Error decoding base64 config: %v", err)
-							continue
-						}
-						mergedConfig.Write(decoded)
-						mergedConfig.WriteString("\n")
-					}
-				}
-				finalConfig = mergedConfig.String()
-			}
-
-			// Fetch assets if enumeration ID is defined
-			var enumerationIDs []string
-			gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
-				id := value.Get("id").String()
-				if id != "" {
-					enumerationIDs = append(enumerationIDs, id)
-				}
-				return true
-			})
-
-			// Get assets from enumeration id
-			var assets []string
-			for _, enumerationID := range enumerationIDs {
-				asset, err := r.fetchAssets(enumerationID)
-				if err != nil {
-					gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
-				}
-				assets = append(assets, strings.Split(string(asset), "\n")...)
-			}
-
-			// Get assets from scan config
-			gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
-				assets = append(assets, value.String())
-				return true
-			})
 
 			var templates []string
 			value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
@@ -615,32 +618,167 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			})
 
-			workerBehavior := value.Get("worker_behavior").String()
-			isDistributed := workerBehavior == "distribute"
+			agentBehavior := value.Get("agent_behavior").String()
 
-			// Compute hash of the entire configuration
-			configHash := computeScanConfigHash(finalConfig, templates, assets)
-
-			// Skip if this exact configuration was already executed
-			if r.localCache.HasScanBeenExecuted(id, configHash) && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping scan %s as it was already executed with same configuration\n", scanName)
+			// Early skip checks that don't require API calls
+			if r.shouldSkipTask("scan", id, scanName, agentId, agentTags, agentNetworks) {
 				return true
 			}
 
-			gologger.Info().Msgf("scan %s enqueued...\n", scanName)
+			// Add to wait group and process in parallel
+			awg.Add()
+			go func(scanID, name, agentID string, tags, networks gjson.Result, startTimeStr string, schedule gjson.Result, tmpls []string, behavior string) {
+				defer awg.Done()
 
-			_ = pendingTasks.Set(metaId, struct{}{})
+				// Parse schedule and start time
+				var targetExecutionTime time.Time
+				if startTimeStr != "" {
+					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing start time: %v", err)
+						return
+					}
+					targetExecutionTime = parsedStartTime
+				}
 
-			if isDistributed {
-				// Process distributed scan chunks
-				r.elaborateScanChunks(ctx, id, metaId, finalConfig, templates, assets)
-			} else {
-				// Process non-distributed scan
-				r.elaborateScan(ctx, id, metaId, finalConfig, templates, assets)
-			}
+				if schedule.Exists() {
+					nextRun := schedule.Get("schedule_next_run").String()
+					if nextRun != "" {
+						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+						if err != nil {
+							gologger.Error().Msgf("Error parsing next run time: %v", err)
+							return
+						}
+						if !targetExecutionTime.IsZero() {
+							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+						} else {
+							targetExecutionTime = nextRunTime
+						}
+					}
 
-			// After queueing the task, mark it as executed
-			r.localCache.MarkScanExecuted(id, configHash)
+					now := time.Now().UTC()
+
+					// Skip if the combined execution time is in the future
+					// we accept up to 10 minutes before/after the scheduled time
+					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
+
+					if !targetExecutionTime.IsZero() && !isInRange {
+						gologger.Verbose().Msgf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now)
+						return
+					}
+				}
+
+				metaId := fmt.Sprintf("%s-%s", scanID, targetExecutionTime)
+
+				// First check completed and pending tasks
+				if completedTasks.Has(metaId) {
+					gologger.Verbose().Msgf("skipping scan \"%s\" as it's already completed recently\n", name)
+					return
+				}
+
+				if pendingTasks.Has(metaId) {
+					gologger.Verbose().Msgf("skipping scan \"%s\" as it's already in progress\n", name)
+					return
+				}
+
+				// Fetch minimal config first to compute hash
+				scanConfig, err := r.fetchScanConfig(scanID)
+				if err != nil {
+					gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
+					return
+				}
+
+				// Continue with full config processing
+				scanConfigIds := make(map[string]string)
+				gjson.Parse(scanConfig).Get("scan_config_ids").ForEach(func(key, value gjson.Result) bool {
+					id := value.Get("id").String()
+					if id != "" {
+						scanConfigIds[id] = ""
+					}
+					return true
+				})
+
+				for id := range scanConfigIds {
+					scanConfig, err := r.fetchSingleConfig(id)
+					if err != nil {
+						gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
+					}
+					scanConfigIds[id] = scanConfig
+				}
+
+				// Merge all configs into one
+				var finalConfig string
+				if len(scanConfigIds) > 0 {
+					var mergedConfig strings.Builder
+					for _, scanConfig := range scanConfigIds {
+						// Parse the JSON to get the config field
+						configValue := gjson.Get(scanConfig, "config").String()
+						if configValue != "" {
+							// Decode base64
+							decoded, err := base64.StdEncoding.DecodeString(configValue)
+							if err != nil {
+								gologger.Error().Msgf("Error decoding base64 config: %v", err)
+								continue
+							}
+							mergedConfig.Write(decoded)
+							mergedConfig.WriteString("\n")
+						}
+					}
+					finalConfig = mergedConfig.String()
+				}
+
+				// Fetch assets if enumeration ID is defined
+				var enumerationIDs []string
+				gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
+					id := value.Get("id").String()
+					if id != "" {
+						enumerationIDs = append(enumerationIDs, id)
+					}
+					return true
+				})
+
+				// Get assets from enumeration id
+				var assets []string
+				for _, enumerationID := range enumerationIDs {
+					asset, err := r.fetchAssets(enumerationID)
+					if err != nil {
+						gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+					}
+					assets = append(assets, strings.Split(string(asset), "\n")...)
+				}
+
+				// Get assets from scan config
+				gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
+					assets = append(assets, value.String())
+					return true
+				})
+
+				isDistributed := behavior == "distribute"
+
+				// Compute hash of the entire configuration
+				configHash := computeScanConfigHash(finalConfig, tmpls, assets)
+
+				// Skip if this exact configuration was already executed
+				if r.localCache.HasScanBeenExecuted(scanID, configHash) && !schedule.Exists() {
+					gologger.Verbose().Msgf("skipping scan \"%s\" as it was already executed with same configuration\n", name)
+					return
+				}
+
+				gologger.Info().Msgf("scan \"%s\" enqueued...\n", name)
+
+				_ = pendingTasks.Set(metaId, struct{}{})
+
+				if isDistributed {
+					// Process distributed scan chunks
+					r.elaborateScanChunks(ctx, scanID, metaId, finalConfig, tmpls, assets)
+				} else {
+					// Process non-distributed scan
+					r.elaborateScan(ctx, scanID, metaId, finalConfig, tmpls, assets)
+				}
+
+				// After queueing the task, mark it as executed
+				r.localCache.MarkScanExecuted(scanID, configHash)
+			}(id, scanName, agentId, agentTags, agentNetworks, startTime, scheduleData, templates, agentBehavior)
 
 			return true
 		})
@@ -648,6 +786,10 @@ func (r *Runner) getScans(ctx context.Context) error {
 		currentPage++
 		offset += limit
 	}
+
+	// Wait for all scans to complete
+	gologger.Verbose().Msg("Waiting for all scans to complete...")
+	awg.Wait()
 
 	return nil
 }
@@ -657,6 +799,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	gologger.Verbose().Msg("Retrieving enumerations...")
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
 
+	awg, err := syncutil.New(syncutil.WithSize(r.options.EnumerationParallelism))
+	if err != nil {
+		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		return err
+	}
+
 	limit := 100
 	offset := 0
 	totalPages := 1
@@ -683,176 +831,147 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
 
-		// Process enumerations
+		// Process enumerations in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			scanName := value.Get("name").String()
-			hasScanNameTag := strings.Contains(scanName, "["+r.options.AgentId+"]")
-			agentId := value.Get("agent_id").String()
-			isAssignedToagent := agentId == r.options.AgentId
-
-			// Check if it has any tag in name
-			var hasTagInName bool
-			for _, tag := range r.options.AgentTags {
-				if strings.Contains(scanName, "["+tag+"]") {
-					hasTagInName = true
-					break
-				}
-			}
-
-			// Check if agent tag matches
-			var hasAgentTag bool
-			if value.Get("agent_tags").Exists() {
-				value.Get("agent_tags").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentTags, value.String()) {
-						hasAgentTag = true
-					}
-					return true
-				})
-			}
-
-			// we also check if it has any network in name
-			var hasNetworkInName bool
-			for _, network := range r.options.AgentNetworks {
-				if strings.Contains(scanName, "["+network+"]") {
-					hasNetworkInName = true
-					break
-				}
-			}
-
-			// we check if worker network matches
-			var hasWorkerNetwork bool
-			if value.Get("agent_networks").Exists() {
-				value.Get("agent_networks").ForEach(func(key, value gjson.Result) bool {
-					if sliceutil.Contains(r.options.AgentNetworks, value.String()) {
-						hasWorkerNetwork = true
-					}
-					return true
-				})
-			}
-
-			if !isAssignedToagent && !hasScanNameTag && !hasTagInName && !hasAgentTag && !hasNetworkInName && !hasWorkerNetwork {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's not assigned|tagged to %s\n", scanName, r.options.AgentId)
-				return true
-			}
-
-			// Parse schedule and start time
-			var targetExecutionTime time.Time
-			startTime := value.Get("start_time").String()
-			if startTime != "" {
-				parsedStartTime, err := time.Parse(time.RFC3339, startTime)
-				if err != nil {
-					gologger.Error().Msgf("Error parsing start time: %v", err)
-					return true
-				}
-				targetExecutionTime = parsedStartTime
-			}
-
-			scheduleData := value.Get("schedule")
-			if scheduleData.Exists() {
-				nextRun := scheduleData.Get("schedule_next_run").String()
-				if nextRun != "" {
-					nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-					if err != nil {
-						gologger.Error().Msgf("Error parsing next run time: %v", err)
-						return true
-					}
-					if !targetExecutionTime.IsZero() {
-						targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-					} else {
-						targetExecutionTime = nextRunTime
-					}
-				}
-
-				now := time.Now().UTC()
-
-				// Skip if the combined execution time is in the future
-				// we accept up to 10 minutes before/after the scheduled time
-				isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-				if !targetExecutionTime.IsZero() && !isInRange {
-					gologger.Verbose().Msgf("skipping enumeration %s as it's scheduled for %s (current time: %s)\n", scanName, targetExecutionTime, now)
-					return true
-				}
-			}
-
 			id := value.Get("id").String()
-			metaId := fmt.Sprintf("%s-%s", id, targetExecutionTime)
-
-			// First check completed and pending tasks
-			if completedTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already completed recently\n", scanName)
+			if id == "" {
 				return true
 			}
 
-			if pendingTasks.Has(metaId) {
-				gologger.Verbose().Msgf("skipping enumeration %s as it's already in progress\n", scanName)
+			// Capture all data from gjson.Result before passing to goroutine
+			enumName := value.Get("name").String()
+			agentId := value.Get("agent_id").String()
+			agentTags := value.Get("agent_tags")
+			agentNetworks := value.Get("agent_networks")
+			startTime := value.Get("start_time").String()
+			scheduleData := value.Get("schedule")
+			agentBehavior := value.Get("agent_behavior").String()
+
+			// Early skip checks that don't require API calls
+			if r.shouldSkipTask("enumeration", id, enumName, agentId, agentTags, agentNetworks) {
 				return true
 			}
 
-			// Fetch minimal config first
-			enumerationConfig, err := r.fetchEnumerationConfig(id)
-			if err != nil {
-				gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", id, err)
-				return true
-			}
+			// Add to wait group and process in parallel
+			awg.Add()
+			go func(enumID, name, agentID string, tags, networks gjson.Result, startTimeStr string, schedule gjson.Result, behavior string) {
+				defer awg.Done()
 
-			log.Printf("Before sanitization: %s", enumerationConfig)
+				// Parse schedule and start time
+				var targetExecutionTime time.Time
+				if startTimeStr != "" {
+					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
+					if err != nil {
+						gologger.Error().Msgf("Error parsing start time: %v", err)
+						return
+					}
+					targetExecutionTime = parsedStartTime
+				}
 
-			// Sanitize enumeration config (remove unsupported steps)
-			enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, scanName)
+				if schedule.Exists() {
+					nextRun := schedule.Get("schedule_next_run").String()
+					if nextRun != "" {
+						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
+						if err != nil {
+							gologger.Error().Msgf("Error parsing next run time: %v", err)
+							return
+						}
+						if !targetExecutionTime.IsZero() {
+							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
+						} else {
+							targetExecutionTime = nextRunTime
+						}
+					}
 
-			// Get basic info needed for hash
-			var assets []string
-			gjson.Parse(enumerationConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
-				assets = append(assets, value.String())
-				return true
-			})
-			gjson.Parse(enumerationConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
-				assets = append(assets, value.String())
-				return true
-			})
+					now := time.Now().UTC()
 
-			var steps []string
-			gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
-				steps = append(steps, value.String())
-				return true
-			})
+					// Skip if the combined execution time is in the future
+					// we accept up to 10 minutes before/after the scheduled time
+					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
-			configHash := computeEnumerationConfigHash(steps, assets)
+					if !targetExecutionTime.IsZero() && !isInRange {
+						gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now)
+						return
+					}
+				}
 
-			// Check cache before proceeding
-			if r.localCache.HasEnumerationBeenExecuted(id, configHash) && !scheduleData.Exists() {
-				gologger.Verbose().Msgf("skipping enumeration %s as it was already executed with same configuration\n", scanName)
-				return true
-			}
+				metaId := fmt.Sprintf("%s-%s", enumID, targetExecutionTime)
 
-			gologger.Info().Msgf("enumeration %s enqueued...\n", scanName)
+				// First check completed and pending tasks
+				if completedTasks.Has(metaId) {
+					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already completed recently\n", name)
+					return
+				}
 
-			workerBehavior := value.Get("agent_behavior").String()
-			isDistributed := workerBehavior == "distribute"
+				if pendingTasks.Has(metaId) {
+					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already in progress\n", name)
+					return
+				}
 
-			// Check if passive discovery is enabled for this enumeration
-			// hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
-			// if hasPassiveDiscovery && r.options.PassiveDiscovery {
-			// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
-			// 	if len(discoveredIPs) > 0 {
-			// 		gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
-			// 		assets = append(assets, discoveredIPs...)
-			// 	}
-			// }
+				// Fetch minimal config first
+				enumerationConfig, err := r.fetchEnumerationConfig(enumID)
+				if err != nil {
+					gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", enumID, err)
+					return
+				}
 
-			_ = pendingTasks.Set(metaId, struct{}{})
+				log.Printf("Before sanitization: %s", enumerationConfig)
 
-			if isDistributed {
-				// Process distributed enumeration chunks
-				r.elaborateEnumerationChunks(ctx, id, metaId, steps, assets)
-			} else {
-				// Process non-distributed enumeration
-				r.elaborateEnumeration(ctx, id, metaId, steps, assets)
-			}
+				// Sanitize enumeration config (remove unsupported steps)
+				enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, name)
 
-			// After queueing the task, mark it as executed
-			r.localCache.MarkEnumerationExecuted(id, configHash)
+				// Get basic info needed for hash
+				var assets []string
+				gjson.Parse(enumerationConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
+					assets = append(assets, value.String())
+					return true
+				})
+				gjson.Parse(enumerationConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
+					assets = append(assets, value.String())
+					return true
+				})
+
+				var steps []string
+				gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
+					steps = append(steps, value.String())
+					return true
+				})
+
+				configHash := computeEnumerationConfigHash(steps, assets)
+
+				// Check cache before proceeding
+				if r.localCache.HasEnumerationBeenExecuted(enumID, configHash) && !schedule.Exists() {
+					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it was already executed with same configuration\n", name)
+					return
+				}
+
+				gologger.Info().Msgf("enumeration \"%s\" enqueued...\n", name)
+
+				isDistributed := behavior == "distribute"
+
+				// Check if passive discovery is enabled for this enumeration
+				// hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
+				// if hasPassiveDiscovery && r.options.PassiveDiscovery {
+				// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
+				// 	if len(discoveredIPs) > 0 {
+				// 		gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
+				// 		assets = append(assets, discoveredIPs...)
+				// 	}
+				// }
+
+				_ = pendingTasks.Set(metaId, struct{}{})
+
+				if isDistributed {
+					// Process distributed enumeration chunks
+					r.elaborateEnumerationChunks(ctx, enumID, metaId, steps, assets)
+				} else {
+					// Process non-distributed enumeration
+					r.elaborateEnumeration(ctx, enumID, metaId, steps, assets)
+				}
+
+				// After queueing the task, mark it as executed
+				r.localCache.MarkEnumerationExecuted(enumID, configHash)
+			}(id, enumName, agentId, agentTags, agentNetworks, startTime, scheduleData, agentBehavior)
 
 			return true
 		})
@@ -860,6 +979,10 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		currentPage++
 		offset += limit
 	}
+
+	// Wait for all enumerations to complete
+	gologger.Verbose().Msg("Waiting for all enumerations to complete...")
+	awg.Wait()
 
 	return nil
 }
@@ -908,6 +1031,12 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, executeChunk func(ctx context.Context, chunk *TaskChunk) error) {
 	gologger.Info().Msgf("Starting distributed %s processing for %s ID: %s", taskType, taskType, taskID)
 
+	awg, err := syncutil.New(syncutil.WithSize(r.options.ChunkParallelism))
+	if err != nil {
+		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		return
+	}
+
 	chunkCount := 0
 	for {
 		chunkCount++
@@ -948,62 +1077,71 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			break
 		}
 
-		gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
-			chunkCount,
-			chunk.ChunkID,
-			len(chunk.Targets))
+		currentChunkCount := chunkCount
+		currentChunk := chunk
 
-		// Set initial status to in_progress
-		if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-			gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
-		} else {
-			gologger.Info().Msgf("Updated chunk %s status to in_progress", chunk.ChunkID)
-		}
+		// Add chunk to wait group and process in parallel
+		awg.Add()
+		go func(chunkNum int, chunk *TaskChunk) {
+			defer awg.Done()
 
-		// Start a goroutine to periodically update status (heartbeat)
-		timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
-		go func(ctx context.Context, taskID, chunkID string) {
-			ticker := time.NewTicker(10 * time.Second)
-			defer ticker.Stop()
+			gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
+				chunkNum,
+				chunk.ChunkID,
+				len(chunk.Targets))
 
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
-						gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
-					} else {
-						gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+			// Set initial status to in_progress
+			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
+				gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+			} else {
+				gologger.Info().Msgf("Updated chunk %s status to in_progress", chunk.ChunkID)
+			}
+
+			// Start a goroutine to periodically update status (heartbeat)
+			timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
+			go func(ctx context.Context, taskID, chunkID string) {
+				ticker := time.NewTicker(10 * time.Second)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
+							gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+						} else {
+							gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+						}
 					}
 				}
+			}(timerCtx, taskID, chunk.ChunkID)
+
+			// Execute the chunk using the provided callback
+			if err := executeChunk(ctx, chunk); err != nil {
+				gologger.Error().Msgf("Error executing %s chunk: %v", taskType, err)
 			}
-		}(timerCtx, taskID, chunk.ChunkID)
 
-		// Execute the chunk using the provided callback
-		if err := executeChunk(ctx, chunk); err != nil {
-			gologger.Error().Msgf("Error executing %s chunk: %v", taskType, err)
-		}
+			// Stop the heartbeat timer
+			timerCtxCancel()
+			gologger.Debug().Msgf("Stopped status update timer for chunk %s", chunk.ChunkID)
 
-		// Stop the heartbeat timer
-		timerCtxCancel()
-		gologger.Debug().Msgf("Stopped status update timer for chunk %s", chunk.ChunkID)
+			// Wait 1 second before marking as complete
+			time.Sleep(time.Second)
 
-		// Wait 1 second before marking as complete
-		time.Sleep(time.Second)
-
-		// Mark the chunk as completed with ACK
-		if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusAck); err != nil {
-			gologger.Error().Msgf("Error updating %s chunk status to ACK: %v", taskType, err)
-		} else {
-			gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkCount, chunk.ChunkID)
-		}
-
-		gologger.Debug().Msgf("Waiting 10 seconds before processing next chunk...")
-		time.Sleep(time.Second * 10)
+			// Mark the chunk as completed with ACK
+			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusAck); err != nil {
+				gologger.Error().Msgf("Error updating %s chunk status to ACK: %v", taskType, err)
+			} else {
+				gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkNum, chunk.ChunkID)
+			}
+		}(currentChunkCount, currentChunk)
 	}
 
 Complete:
+	// Wait for all chunks to complete
+	gologger.Info().Msgf("Waiting for all chunks to complete for %s ID: %s", taskType, taskID)
+	awg.Wait()
 	gologger.Info().Msgf("Completed processing all chunks for %s ID: %s (total chunks: %d)", taskType, taskID, chunkCount)
 
 	// Mark the task as done
@@ -1558,7 +1696,7 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	}
 
 	// Log info about removed steps
-	gologger.Info().Msgf("Removing unsupported steps from enumeration %s: %s", enumerationName, strings.Join(unsupportedSteps, ", "))
+	gologger.Info().Msgf("Removing unsupported steps from enumeration \"%s\": %s", enumerationName, strings.Join(unsupportedSteps, ", "))
 
 	// Parse the entire config as JSON to properly reconstruct it
 	var configMap map[string]interface{}
@@ -1607,6 +1745,25 @@ func parseOptions() *Options {
 
 	agentTags := strings.Split(AgentTagsEnv, ",")
 
+	// Parse default parallelism values from environment
+	defaultChunkParallelism := runtime.NumCPU()
+	if defaultChunkParallelism <= 0 {
+		defaultChunkParallelism = 1
+	}
+	if val, err := strconv.Atoi(ChunkParallelismEnv); err == nil && val > 0 {
+		defaultChunkParallelism = val
+	}
+
+	defaultScanParallelism := 1
+	if val, err := strconv.Atoi(ScanParallelismEnv); err == nil && val > 0 {
+		defaultScanParallelism = val
+	}
+
+	defaultEnumerationParallelism := 1
+	if val, err := strconv.Atoi(EnumerationParallelismEnv); err == nil && val > 0 {
+		defaultEnumerationParallelism = val
+	}
+
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
@@ -1614,6 +1771,9 @@ func parseOptions() *Options {
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
+		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
+		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
+		flagSet.IntVarP(&options.EnumerationParallelism, "enumeration-parallelism", "e", defaultEnumerationParallelism, "number of enumerations to process in parallel"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
@@ -1644,6 +1804,17 @@ func parseOptions() *Options {
 	// Also support env variable PASSIVE_DISCOVERY
 	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
 		options.PassiveDiscovery = true
+	}
+
+	// Ensure parallelism values are at least 1
+	if options.ChunkParallelism < 1 {
+		options.ChunkParallelism = 1
+	}
+	if options.ScanParallelism < 1 {
+		options.ScanParallelism = 1
+	}
+	if options.EnumerationParallelism < 1 {
+		options.EnumerationParallelism = 1
 	}
 
 	return options
