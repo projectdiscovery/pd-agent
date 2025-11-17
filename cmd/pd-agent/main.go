@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1481,6 +1482,17 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		}
 	}
 
+	// Get auto-discovered network subnets and add to query parameters
+	// This is fault-tolerant - if getAutoDiscoveredTargets() returns empty or nil,
+	// we simply send an empty string
+	networkSubnets := r.getAutoDiscoveredTargets()
+	if len(networkSubnets) > 0 {
+		gologger.Info().Msgf("Discovered network subnets: %v", networkSubnets)
+		q.Add("network_subnets", strings.Join(networkSubnets, ","))
+	} else {
+		gologger.Info().Msg("No network subnets discovered")
+	}
+
 	req.URL.RawQuery = q.Encode()
 
 	inResp := r.makeRequest(ctx, http.MethodPost, req.URL.String(), nil, headers)
@@ -1525,102 +1537,102 @@ func (r *Runner) Out(ctx context.Context) error {
 }
 
 // getAutoDiscoveredTargets gets the auto discovered targets from the system (only ipv4)
-// func (r *Runner) getAutoDiscoveredTargets() []string {
-// 	var targets []string
-// 	seen := make(map[string]struct{})
+func (r *Runner) getAutoDiscoveredTargets() []string {
+	var targets []string
+	seen := make(map[string]struct{})
 
-// 	// Helper function to add CIDR if it's a private IP
-// 	addPrivateCIDR := func(ip net.IP) {
-// 		if ip == nil {
-// 			return
-// 		}
-// 		// Convert to IPv4 if it's an IPv4-mapped IPv6 address
-// 		if ip.To4() != nil {
-// 			ip = ip.To4()
-// 		}
-// 		// Check if it's a private IP
-// 		if ip.IsPrivate() {
-// 			// Create /24 CIDR
-// 			mask := net.CIDRMask(24, 32)
-// 			maskedIP := ip.Mask(mask)
-// 			if maskedIP == nil {
-// 				return
-// 			}
-// 			cidr := &net.IPNet{
-// 				IP:   maskedIP,
-// 				Mask: mask,
-// 			}
-// 			cidrStr := cidr.String()
-// 			// Additional safety check to prevent "<nil>" or empty strings
-// 			if cidrStr == "" || cidrStr == "<nil>" || !strings.Contains(cidrStr, "/") {
-// 				return
-// 			}
-// 			if _, exists := seen[cidrStr]; !exists {
-// 				seen[cidrStr] = struct{}{}
-// 				targets = append(targets, cidrStr)
-// 			}
-// 		}
-// 	}
+	// Helper function to add CIDR if it's a private IP
+	addPrivateCIDR := func(ip net.IP) {
+		if ip == nil {
+			return
+		}
+		// Convert to IPv4 if it's an IPv4-mapped IPv6 address
+		if ip.To4() != nil {
+			ip = ip.To4()
+		}
+		// Check if it's a private IP
+		if ip.IsPrivate() {
+			// Create /24 CIDR
+			mask := net.CIDRMask(24, 32)
+			maskedIP := ip.Mask(mask)
+			if maskedIP == nil {
+				return
+			}
+			cidr := &net.IPNet{
+				IP:   maskedIP,
+				Mask: mask,
+			}
+			cidrStr := cidr.String()
+			// Additional safety check to prevent "<nil>" or empty strings
+			if cidrStr == "" || cidrStr == "<nil>" || !strings.Contains(cidrStr, "/") {
+				return
+			}
+			if _, exists := seen[cidrStr]; !exists {
+				seen[cidrStr] = struct{}{}
+				targets = append(targets, cidrStr)
+			}
+		}
+	}
 
-// 	// Get network interfaces
-// 	interfaces, err := net.Interfaces()
-// 	if err != nil {
-// 		gologger.Error().Msgf("Error getting network interfaces: %v", err)
-// 	} else {
-// 		for _, iface := range interfaces {
-// 			addrs, err := iface.Addrs()
-// 			if err != nil {
-// 				continue
-// 			}
-// 			for _, addr := range addrs {
-// 				switch v := addr.(type) {
-// 				case *net.IPNet:
-// 					addPrivateCIDR(v.IP)
-// 				case *net.IPAddr:
-// 					addPrivateCIDR(v.IP)
-// 				}
-// 			}
-// 		}
-// 	}
+	// Get network interfaces
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		gologger.Error().Msgf("Error getting network interfaces: %v", err)
+	} else {
+		for _, iface := range interfaces {
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				switch v := addr.(type) {
+				case *net.IPNet:
+					addPrivateCIDR(v.IP)
+				case *net.IPAddr:
+					addPrivateCIDR(v.IP)
+				}
+			}
+		}
+	}
 
-// 	// Read hosts file
-// 	hostsFile := "/etc/hosts"
-// 	if osutils.IsWindows() {
-// 		systemRoot := os.Getenv("SystemRoot")
-// 		if systemRoot == "" {
-// 			systemRoot = "C:\\Windows" // fallback
-// 		}
-// 		hostsFile = filepath.Join(systemRoot, "System32", "drivers", "etc", "hosts")
-// 	}
+	// Read hosts file
+	hostsFile := "/etc/hosts"
+	if runtime.GOOS == "windows" {
+		systemRoot := os.Getenv("SystemRoot")
+		if systemRoot == "" {
+			systemRoot = "C:\\Windows" // fallback
+		}
+		hostsFile = filepath.Join(systemRoot, "System32", "drivers", "etc", "hosts")
+	}
 
-// 	content, err := os.ReadFile(hostsFile)
-// 	if err != nil {
-// 		gologger.Error().Msgf("Error reading hosts file: %v", err)
-// 	} else {
-// 		lines := strings.Split(string(content), "\n")
-// 		for _, line := range lines {
-// 			// Skip comments and empty lines
-// 			line = strings.TrimSpace(line)
-// 			if line == "" || strings.HasPrefix(line, "#") {
-// 				continue
-// 			}
+	content, err := os.ReadFile(hostsFile)
+	if err != nil {
+		gologger.Error().Msgf("Error reading hosts file: %v", err)
+	} else {
+		lines := strings.Split(string(content), "\n")
+		for _, line := range lines {
+			// Skip comments and empty lines
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
 
-// 			// Split line into IP and hostnames
-// 			fields := strings.Fields(line)
-// 			if len(fields) < 2 {
-// 				continue
-// 			}
+			// Split line into IP and hostnames
+			fields := strings.Fields(line)
+			if len(fields) < 2 {
+				continue
+			}
 
-// 			// Parse IP address
-// 			ip := net.ParseIP(fields[0])
-// 			if ip != nil {
-// 				addPrivateCIDR(ip)
-// 			}
-// 		}
-// 	}
+			// Parse IP address
+			ip := net.ParseIP(fields[0])
+			if ip != nil {
+				addPrivateCIDR(ip)
+			}
+		}
+	}
 
-// 	return targets
-// }
+	return targets
+}
 
 // startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket
 // func (r *Runner) startPassiveDiscovery() {
