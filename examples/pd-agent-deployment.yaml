@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pd-agent
+  labels:
+    app: pd-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pd-agent
+  template:
+    metadata:
+      labels:
+        app: pd-agent
+    spec:
+      # Run as non-root user for security
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: pd-agent
+        image: pd-agent:latest
+        imagePullPolicy: IfNotPresent
+        args:
+          - -agent-output
+          - /output
+          - -verbose
+          - -agent-tags
+          - production
+          - -agent-networks
+          - kube-prod-cluster
+        env:
+          # Sensitive data from Secret
+          - name: PDCP_API_KEY
+            valueFrom:
+              secretKeyRef:
+                name: pd-agent-secret
+                key: PDCP_API_KEY
+          - name: PDCP_TEAM_ID
+            valueFrom:
+              secretKeyRef:
+                name: pd-agent-secret
+                key: PDCP_TEAM_ID
+        volumeMounts:
+          - name: output
+            mountPath: /output
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        # Health checks (optional)
+        livenessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep pd-agent || exit 1"
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - "pgrep pd-agent || exit 1"
+          initialDelaySeconds: 10
+          periodSeconds: 10
+      volumes:
+        - name: output
+          emptyDir: {}
+      # Enable host network for subnet discovery
+      hostNetwork: true
+      # Add network capabilities for subnet discovery
+      securityContext:
+        capabilities:
+          add:
+            - NET_RAW
+            - NET_ADMIN
+

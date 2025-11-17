@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  pd-agent:
+    image: pd-agent:latest
+    container_name: pd-agent
+    restart: unless-stopped
+    environment:
+      - PDCP_API_KEY=your-api-key
+      - PDCP_TEAM_ID=your-team-id
+      - PDCP_AGENT_TAGS=production
+      - PDCP_VERBOSE=true
+    volumes:
+      - ./output:/output
+    command: -agent-output /output -verbose -agent-tags production
+    # Enable host network mode for subnet discovery
+    network_mode: host
+    # Add network capabilities for full network access
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+

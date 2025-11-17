@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.projectdiscovery.pd-agent</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/pd-agent</string>
+        <string>-agent-output</string>
+        <string>/Users/YOUR_USERNAME/.pd-agent/output</string>
+        <string>-verbose</string>
+        <string>-agent-tags</string>
+        <string>production</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PDCP_API_KEY</key>
+        <string>your-api-key</string>
+        <key>PDCP_TEAM_ID</key>
+        <string>your-team-id</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USERNAME/.pd-agent/logs/stderr.log</string>
+</dict>
+</plist>
+

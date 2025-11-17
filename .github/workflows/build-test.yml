@@ -1,0 +1,48 @@
+name: 🔨 Build Test
+
+on:
+  pull_request:
+    paths:
+      - '**.go'
+      - '**.mod'
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint Test
+    if: "${{ !endsWith(github.actor, '[bot]') }}"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: projectdiscovery/actions/setup/go@v1
+      - name: Install libpcap-dev
+        run: sudo apt install libpcap-dev
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@v5
+        with:
+          version: latest
+          args: --timeout 5m
+          working-directory: .
+
+  build:
+    name: Test Builds
+    needs: [lint]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        # os: [ubuntu-latest, windows-latest, macOS-latest]
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: projectdiscovery/actions/setup/go@v1
+      - name: Install libpcap-dev
+        run: sudo apt install libpcap-dev
+      - run: go build .
+        working-directory: cmd/pd-agent/
+
+      # - name: Test
+      #   run: go test ./...
+      #   working-directory: .
+      #   env:
+      #     PDCP_API_KEY: "${{ secrets.PDCP_API_KEY }}"

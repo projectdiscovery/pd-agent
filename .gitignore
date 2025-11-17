@@ -1,0 +1,9 @@
+/pd-agent
+dist/
+.idea
+.vscode
+.devcontainer
+
+cmd/openapi-mcp/openapi-mcp
+cmd/fleetx/fleetx
+cmd/pd-agent/pd-agent
