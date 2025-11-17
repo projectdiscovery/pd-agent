@@ -18,13 +18,13 @@ RUN CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /go/bin/p
 # dnsx
 RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 # naabu
-RUN go install -v github.com/projectdiscovery/naabu/cmd/naabu@latest
+RUN go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 # httpx
 RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
 # tlsx
 RUN go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
 # nuclei
-RUN go install -v github.com/projectdiscovery/nuclei/cmd/nuclei@latest
+RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 
 FROM --platform=linux/amd64 ubuntu:latest
 # install dependencies
