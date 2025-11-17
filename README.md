@@ -58,6 +58,8 @@ chmod +x pd-agent
 
 #### Docker Installation
 
+> **Note:** Docker installation with host network mode is preferred for optimal network access and performance. See the [Docker Execution](#one-liner-docker-execution) section for details.
+
 Build the Docker image:
 
 ```bash
@@ -74,6 +76,8 @@ docker pull pd-agent:latest
 
 #### One-liner: Direct Binary Execution
 
+> **Note:** This one-liner works on all platforms (Linux, macOS, Windows) once you have downloaded the correct binary for your operating system. See [Binary Installation](#binary-installation) for platform-specific download instructions.
+
 ```bash
 PDCP_API_KEY=your-api-key \
 PDCP_TEAM_ID=your-team-id \
@@ -82,8 +86,10 @@ pd-agent -agent-output /path/to/output -verbose -agent-tags production
 
 #### One-liner: Docker Execution
 
+> **Note:** Using host network mode (`--network host`) is preferred for Docker installations as it provides better network access and performance. On Docker Desktop for Mac/Windows, use `--network host` only if supported, otherwise use port mappings.
+
 ```bash
-docker run -d --name pd-agent \
+docker run -d --name pd-agent --network host \
   -e PDCP_API_KEY=your-api-key \
   -e PDCP_TEAM_ID=your-team-id \
   -v /path/to/output:/output \
@@ -92,6 +98,8 @@ docker run -d --name pd-agent \
 ```
 
 #### Docker Compose
+
+> **Note:** Using host network mode (`network_mode: host`) is preferred for Docker installations. On Docker Desktop for Mac/Windows, this may not be supported; in that case, remove the `network_mode` line.
 
 Create a `docker-compose.yml` file:
 
@@ -102,6 +110,7 @@ services:
     image: projectdiscovery/pd-agent:latest
     container_name: pd-agent
     restart: unless-stopped
+    network_mode: host
     environment:
       - PDCP_API_KEY=your-api-key
       - PDCP_TEAM_ID=your-team-id
@@ -324,7 +333,11 @@ tail -f ~/.pd-agent/logs/stderr.log
 
 #### Windows
 
+> **Note:** Windows users can also use Windows Subsystem for Linux (WSL). If using WSL, follow the [Linux (systemd)](#linux-systemd) installation instructions, as WSL behaves like a Linux environment.
+
 **Option A: Using NSSM (Non-Sucking Service Manager)**
+
+> **Note:** NSSM is used to ensure that the pd-agent service runs continuously and automatically restarts if it stops. This is the recommended method for running pd-agent as a Windows service.
 
 **1. Download and install:**
 
