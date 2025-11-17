@@ -40,7 +40,7 @@ var (
 	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
 	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
 	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
-	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.dev.projectdiscovery.io")
+	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
 	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
 	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
 	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
