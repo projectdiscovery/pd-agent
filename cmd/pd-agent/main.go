@@ -1119,7 +1119,8 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			}(timerCtx, taskID, chunk.ChunkID)
 
 			// Execute the chunk using the provided callback
-			if err := executeChunk(ctx, chunk); err != nil {
+			executionErr := executeChunk(ctx, chunk)
+			if executionErr != nil {
 				gologger.Error().Msgf("Error executing %s chunk: %v", taskType, err)
 			}
 
@@ -1130,9 +1131,14 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			// Wait 1 second before marking as complete
 			time.Sleep(time.Second)
 
+			status := TaskChunkStatusAck
+			if executionErr != nil {
+				status = TaskChunkStatusNack
+			}
+
 			// Mark the chunk as completed with ACK
-			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusAck); err != nil {
-				gologger.Error().Msgf("Error updating %s chunk status to ACK: %v", taskType, err)
+			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, status); err != nil {
+				gologger.Error().Msgf("Error updating %s chunk status to %s: %v", taskType, status, err)
 			} else {
 				gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkNum, chunk.ChunkID)
 			}
