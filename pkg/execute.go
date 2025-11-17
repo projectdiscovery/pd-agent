@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -181,7 +180,7 @@ func getToolsFromSteps(steps []string) []Tool {
 }
 
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
-	log.Printf("uploading to cloud: %s", outputFile)
+	gologger.Verbose().Msgf("uploading to cloud: %s", outputFile)
 	f, err := os.Open(outputFile)
 	if err != nil {
 		return "", err

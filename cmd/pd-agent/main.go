@@ -1,13 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -217,55 +217,105 @@ type Response struct {
 }
 
 // makeRequest performs an HTTP request and returns a simplified response
+// It includes retry logic that retries up to 5 times on errors with minimal sleep time between retries
 func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Reader, headers map[string]string) *Response {
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
-	if err != nil {
-		return &Response{
-			StatusCode: 0,
-			Body:       nil,
-			Error:      fmt.Errorf("error creating authenticated client: %v", err),
+	// Read body into bytes if provided, so we can reuse it for retries
+	var bodyBytes []byte
+	var err error
+	if body != nil {
+		bodyBytes, err = io.ReadAll(body)
+		if err != nil {
+			return &Response{
+				StatusCode: 0,
+				Body:       nil,
+				Error:      fmt.Errorf("error reading request body: %v", err),
+			}
 		}
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
-	if err != nil {
-		return &Response{
-			StatusCode: 0,
-			Body:       nil,
-			Error:      fmt.Errorf("error creating request: %v", err),
+	maxRetries := 5
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+		if err != nil {
+			if attempt < maxRetries {
+				gologger.Warning().Msgf("error creating authenticated client (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			return &Response{
+				StatusCode: 0,
+				Body:       nil,
+				Error:      fmt.Errorf("error creating authenticated client after %d attempts: %v", maxRetries, err),
+			}
 		}
-	}
 
-	// Add custom headers if provided
-	for key, value := range headers {
-		req.Header.Set(key, value)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return &Response{
-			StatusCode: 0,
-			Body:       nil,
-			Error:      fmt.Errorf("error sending request: %v", err),
+		var bodyReader io.Reader
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
 		}
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
 
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
+		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
+		if err != nil {
+			if attempt < maxRetries {
+				gologger.Warning().Msgf("error creating request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			return &Response{
+				StatusCode: 0,
+				Body:       nil,
+				Error:      fmt.Errorf("error creating request after %d attempts: %v", maxRetries, err),
+			}
+		}
+
+		// Add custom headers if provided
+		for key, value := range headers {
+			req.Header.Set(key, value)
+		}
+
+		resp, err := client.Do(req)
+		if err != nil {
+			if attempt < maxRetries {
+				gologger.Warning().Msgf("error sending request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			return &Response{
+				StatusCode: 0,
+				Body:       nil,
+				Error:      fmt.Errorf("error sending request after %d attempts: %v", maxRetries, err),
+			}
+		}
+
+		respBodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			if attempt < maxRetries {
+				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				time.Sleep(200 * time.Millisecond)
+				continue
+			}
+			return &Response{
+				StatusCode: resp.StatusCode,
+				Body:       nil,
+				Error:      fmt.Errorf("error reading response after %d attempts: %v", maxRetries, err),
+			}
+		}
+
+		// Success - return the response
 		return &Response{
 			StatusCode: resp.StatusCode,
-			Body:       nil,
-			Error:      fmt.Errorf("error reading response: %v", err),
+			Body:       respBodyBytes,
+			Error:      nil,
 		}
 	}
 
+	// This should never be reached
 	return &Response{
-		StatusCode: resp.StatusCode,
-		Body:       bodyBytes,
-		Error:      nil,
+		StatusCode: 0,
+		Body:       nil,
+		Error:      fmt.Errorf("request failed after %d attempts", maxRetries),
 	}
 }
 
@@ -916,7 +966,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					return
 				}
 
-				log.Printf("Before sanitization: %s", enumerationConfig)
+				gologger.Verbose().Msgf("Before sanitization: %s", enumerationConfig)
 
 				// Sanitize enumeration config (remove unsupported steps)
 				enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, name)
