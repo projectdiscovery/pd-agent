@@ -2,7 +2,6 @@ package pkg
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,7 +13,6 @@ import (
 
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
-	"github.com/projectdiscovery/pd-agent/pkg/tools"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/conversion"
 	envutil "github.com/projectdiscovery/utils/env"
@@ -25,22 +23,19 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
-	toolList, err := tools.FetchFromCache()
+// verifyToolInPath checks if a tool exists in the system PATH
+func verifyToolInPath(toolName string) error {
+	_, err := exec.LookPath(toolName)
 	if err != nil {
-		return nil, errors.New("pdtm api is down, please try again later")
+		return fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
 	}
+	return nil
+}
 
-	var tool *types.Tool
-	for _, candidateTool := range toolList {
-		if candidateTool.Name == task.Tool.String() {
-			tool = &candidateTool
-			break
-		}
-	}
-
-	if tool == nil {
-		return nil, fmt.Errorf("tool '%s' not found", task.Tool.String())
+func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
+	// Verify tool exists in PATH
+	if err := verifyToolInPath(task.Tool.String()); err != nil {
+		return nil, err
 	}
 
 	if task.Options.ScanID != "" {
@@ -70,6 +65,11 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 			manualAssetId   = task.Options.EnumerationID
 		)
 		for _, tool := range tools {
+			// Verify tool exists in PATH
+			if err := verifyToolInPath(tool.Name); err != nil {
+				return nil, err
+			}
+
 			// Use naabu output as input for subsequent tools (httpx, tlsx)
 			currentHosts := task.Options.Hosts
 			if len(naabuOutput) > 0 && tool.Name != "dnsx" && tool.Name != "naabu" {
