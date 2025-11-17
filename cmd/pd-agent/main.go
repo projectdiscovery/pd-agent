@@ -217,7 +217,7 @@ type Response struct {
 }
 
 // makeRequest performs an HTTP request and returns a simplified response
-// It includes retry logic that retries up to 5 times on errors with minimal sleep time between retries
+// It includes retry logic that retries up to 5 times on errors with exponential backoff
 func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Reader, headers map[string]string) *Response {
 	// Read body into bytes if provided, so we can reuse it for retries
 	var bodyBytes []byte
@@ -234,13 +234,16 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 	}
 
 	maxRetries := 5
+	baseDelay := 500 * time.Millisecond
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Create a new client for each attempt to avoid reusing bad connections
 		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error creating authenticated client (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
-				time.Sleep(200 * time.Millisecond)
+				delay := time.Duration(attempt) * baseDelay
+				gologger.Warning().Msgf("error creating authenticated client (attempt %d/%d): %v, retrying in %v...", attempt, maxRetries, err, delay)
+				time.Sleep(delay)
 				continue
 			}
 			return &Response{
@@ -258,8 +261,9 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error creating request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
-				time.Sleep(200 * time.Millisecond)
+				delay := time.Duration(attempt) * baseDelay
+				gologger.Warning().Msgf("error creating request (attempt %d/%d): %v, retrying in %v...", attempt, maxRetries, err, delay)
+				time.Sleep(delay)
 				continue
 			}
 			return &Response{
@@ -276,9 +280,27 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 
 		resp, err := client.Do(req)
 		if err != nil {
+			// Check if this is a connection-related error that might benefit from longer delay
+			errStr := err.Error()
+			isConnectionError := strings.Contains(errStr, "socket is not connected") ||
+				strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "connection refused") ||
+				strings.Contains(errStr, "no such host") ||
+				strings.Contains(errStr, "network is unreachable")
+
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error sending request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
-				time.Sleep(200 * time.Millisecond)
+				// Use exponential backoff with longer delay for connection errors
+				delay := time.Duration(attempt) * baseDelay
+				if isConnectionError {
+					// Longer delay for connection errors to allow network to stabilize
+					delay = time.Duration(attempt*attempt) * baseDelay
+					if delay > 5*time.Second {
+						delay = 5 * time.Second
+					}
+				}
+				gologger.Warning().Msgf("error sending request (attempt %d/%d): %v, retrying in %v...", attempt, maxRetries, err, delay)
+				time.Sleep(delay)
 				continue
 			}
 			return &Response{
@@ -292,8 +314,9 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
-				time.Sleep(200 * time.Millisecond)
+				delay := time.Duration(attempt) * baseDelay
+				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying in %v...", attempt, maxRetries, err, delay)
+				time.Sleep(delay)
 				continue
 			}
 			return &Response{
