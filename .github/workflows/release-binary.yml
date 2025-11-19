@@ -3,7 +3,7 @@ name: 🎉 Release Binary
 on:
   push:
     tags:
-      - v*
+      - '*'
   workflow_dispatch:
 
 jobs:
@@ -19,13 +19,14 @@ jobs:
         uses: actions/setup-go@v4
         with: 
           go-version: 1.21.x
-          check-latest: true
-          cache: true
+      
+      - name: Install libpcap-dev
+        run: sudo apt install libpcap-dev
       
       - name: "Create release on GitHub"
         uses: goreleaser/goreleaser-action@v4
         with: 
-          args: "release --rm-dist"
+          args: "release --clean"
           version: latest
           workdir: .
         env:
