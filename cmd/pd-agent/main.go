@@ -354,45 +354,6 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		gologger.Verbose().Msgf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId)
 	}
 
-	// Check if name contains agent ID tag (case-insensitive)
-	nameLower := strings.ToLower(name)
-	agentIdTag := strings.ToLower("[" + r.options.AgentId + "]")
-	hasAgentIdInName := strings.Contains(nameLower, agentIdTag)
-	result = "✗"
-	if hasAgentIdInName {
-		result = "✓"
-	}
-	gologger.Verbose().Msgf("  checking id in name: %s (name: %s, looking for: %s)", result, name, "["+r.options.AgentId+"]")
-
-	// Check if name contains any agent tag (case-insensitive)
-	var hasTagInName bool
-	var taskTagsInName []string
-	for _, tag := range r.options.AgentTags {
-		tagLower := strings.ToLower("[" + tag + "]")
-		if strings.Contains(nameLower, tagLower) {
-			hasTagInName = true
-			break
-		}
-	}
-	// Extract all tags from name for logging
-	if strings.Contains(name, "[") && strings.Contains(name, "]") {
-		parts := strings.Split(name, "[")
-		for _, part := range parts {
-			if idx := strings.Index(part, "]"); idx > 0 {
-				taskTagsInName = append(taskTagsInName, part[:idx])
-			}
-		}
-	}
-	result = "✗"
-	if hasTagInName {
-		result = "✓"
-	}
-	if len(taskTagsInName) > 0 {
-		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: %v, agent tags: %v)", result, taskTagsInName, r.options.AgentTags)
-	} else {
-		gologger.Verbose().Msgf("  checking tags in name: %s (task tags in name: <none>, agent tags: %v)", result, r.options.AgentTags)
-	}
-
 	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
 	var hasAgentTag bool
 	var taskAgentTags []string
@@ -418,35 +379,6 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags)
 	} else {
 		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags)
-	}
-
-	// Check if name contains any agent network (case-insensitive)
-	var hasNetworkInName bool
-	var taskNetworksInName []string
-	for _, network := range r.options.AgentNetworks {
-		networkLower := strings.ToLower("[" + network + "]")
-		if strings.Contains(nameLower, networkLower) {
-			hasNetworkInName = true
-			break
-		}
-	}
-	// Extract all networks from name for logging (same logic as tags)
-	if strings.Contains(name, "[") && strings.Contains(name, "]") {
-		parts := strings.Split(name, "[")
-		for _, part := range parts {
-			if idx := strings.Index(part, "]"); idx > 0 {
-				taskNetworksInName = append(taskNetworksInName, part[:idx])
-			}
-		}
-	}
-	result = "✗"
-	if hasNetworkInName {
-		result = "✓"
-	}
-	if len(taskNetworksInName) > 0 {
-		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: %v, agent networks: %v)", result, taskNetworksInName, r.options.AgentNetworks)
-	} else {
-		gologger.Verbose().Msgf("  checking networks in name: %s (task networks in name: <none>, agent networks: %v)", result, r.options.AgentNetworks)
 	}
 
 	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
@@ -477,7 +409,7 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 	}
 
 	// If any condition matches, don't skip
-	shouldContinue := isAssignedToAgent || hasAgentIdInName || hasTagInName || hasAgentTag || hasNetworkInName || hasAgentNetwork
+	shouldContinue := isAssignedToAgent || hasAgentTag || hasAgentNetwork
 
 	if shouldContinue {
 		gologger.Verbose().Msgf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name)
