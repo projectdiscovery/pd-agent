@@ -1479,28 +1479,32 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	networksToUse := r.options.AgentNetworks
 	var lastUpdate time.Time
 	if resp.Error == nil && resp.StatusCode == http.StatusOK {
-		var agentInfo struct {
-			Id         string    `json:"id"`
-			Tags       []string  `json:"tags"`
-			Networks   []string  `json:"networks"`
-			LastUpdate time.Time `json:"last_update"`
-			Name       string    `json:"name"`
+		var response struct {
+			Agent struct {
+				Id         string    `json:"id"`
+				Tags       []string  `json:"tags"`
+				Networks   []string  `json:"networks"`
+				LastUpdate time.Time `json:"last_update"`
+				Name       string    `json:"name"`
+			} `json:"agent"`
 		}
-		if err := json.Unmarshal(resp.Body, &agentInfo); err == nil {
+		if err := json.Unmarshal(resp.Body, &response); err == nil {
+			agentInfo := response.Agent
 			lastUpdate = agentInfo.LastUpdate
+
 			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
-				gologger.Info().Msgf("Using tags from punch_hole server: %v (was: %v)", agentInfo.Tags, tagsToUse)
+				gologger.Info().Msgf("Using tags from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Tags, tagsToUse)
 				tagsToUse = agentInfo.Tags
 				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
 			}
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
-				gologger.Info().Msgf("Using networks from punch_hole server: %v (was: %v)", agentInfo.Networks, networksToUse)
+				gologger.Info().Msgf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse)
 				networksToUse = agentInfo.Networks
 				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
-				gologger.Info().Msgf("Using agent name from punch_hole server: %s (was: %s)", agentInfo.Name, r.options.AgentName)
+				gologger.Info().Msgf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName)
 				r.options.AgentName = agentInfo.Name
 			}
 			gologger.Info().Msgf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339))
