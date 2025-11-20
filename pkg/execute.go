@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/projectdiscovery/gologger"
@@ -19,6 +20,7 @@ import (
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
+	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/tidwall/gjson"
 )
 
@@ -298,10 +300,18 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 		)
 	}
 
-	// Always add -code, -headless, and -lfa flags for nuclei
-	// if task.Tool == types.Nuclei {
-	// 	args = append(args, "-code", "-headless", "-lfa")
-	// }
+	if task.Tool == types.Nuclei {
+		// Always add -lfa flag
+		args = append(args, "-lfa")
+		// Enable -code only if there are more than 2GB of RAM
+		if hasMoreThan2GBRAM() {
+			args = append(args, "-code")
+		}
+		// Enable -headless only if there are more than 8GB of RAM and architecture is AMD64
+		if hasMoreThan8GBRAM() && isAMD64() {
+			args = append(args, "-headless")
+		}
+	}
 
 	if task.Options.Output != "" {
 		_ = fileutil.CreateFolder(task.Options.Output)
@@ -318,6 +328,52 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	}
 
 	return envs, args, removeFunc, nil
+}
+
+// getTotalRAM returns the total physical/installed RAM in bytes (not virtual memory)
+// Returns 0 and an error if unable to determine RAM
+// Note: mem.VirtualMemory().Total returns the total physical RAM installed on the system
+func getTotalRAM() (uint64, error) {
+	vmStat, err := mem.VirtualMemory()
+	if err != nil {
+		return 0, err
+	}
+	// Total field represents the total physical RAM installed, not virtual memory
+	return vmStat.Total, nil
+}
+
+// hasMoreThan2GBRAM checks if the system has more than 2GB of RAM
+// Returns true if RAM > 2GB, false otherwise or if unable to determine
+func hasMoreThan2GBRAM() bool {
+	const minRAMBytes = 2 * 1024 * 1024 * 1024 // 2GB in bytes
+
+	totalRAM, err := getTotalRAM()
+	if err != nil {
+		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling code templates", err)
+		return false
+	}
+
+	return totalRAM > minRAMBytes
+}
+
+// hasMoreThan8GBRAM checks if the system has more than 8GB of RAM
+// Returns true if RAM > 8GB, false otherwise or if unable to determine
+func hasMoreThan8GBRAM() bool {
+	const minRAMBytes = 8 * 1024 * 1024 * 1024 // 8GB in bytes
+
+	totalRAM, err := getTotalRAM()
+	if err != nil {
+		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling headless mode", err)
+		return false
+	}
+
+	return totalRAM > minRAMBytes
+}
+
+// isAMD64 checks if the system architecture is AMD64 (x86_64)
+// Returns true if architecture is amd64, false otherwise
+func isAMD64() bool {
+	return runtime.GOARCH == "amd64"
 }
 
 var UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
