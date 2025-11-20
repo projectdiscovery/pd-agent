@@ -427,6 +427,13 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
+		// -----------
+		// Recoverable error, return the task result with the error
+		// NUCLEI
+		// - [FTL] Could not run nuclei: no templates provided for scan => no templates compatible with provided flags
+		if strings.Contains(taskResult.Stderr, "no templates provided for scan") {
+			return taskResult, nil
+		}
 		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStdout: %s\nStderr: %s", args[0], err, string(stdoutOutput), string(stderrOutput))
 	}
 
