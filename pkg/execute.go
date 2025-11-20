@@ -18,6 +18,7 @@ import (
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	mapsutil "github.com/projectdiscovery/utils/maps"
+	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/shirou/gopsutil/v3/mem"
@@ -31,6 +32,51 @@ func verifyToolInPath(toolName string) error {
 		return fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
 	}
 	return nil
+}
+
+// checkToolInPath checks if a tool exists in the system PATH, handling Windows .exe extension
+func checkToolInPath(toolName string) (string, error) {
+	if osutils.IsWindows() {
+		toolName = toolName + ".exe"
+	}
+	path, err := exec.LookPath(toolName)
+	if err != nil {
+		return "", fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
+	}
+	return path, nil
+}
+
+// PrerequisiteCheckResult represents the result of checking a single prerequisite
+type PrerequisiteCheckResult struct {
+	ToolName string
+	Found    bool
+	Path     string
+	Error    error
+}
+
+// CheckPrerequisites checks if all required prerequisites are installed
+// Returns a map of tool names to their check results
+func CheckPrerequisites(tools []string) map[string]PrerequisiteCheckResult {
+	results := make(map[string]PrerequisiteCheckResult)
+
+	for _, tool := range tools {
+		path, err := checkToolInPath(tool)
+		result := PrerequisiteCheckResult{
+			ToolName: tool,
+			Found:    err == nil,
+			Path:     path,
+			Error:    err,
+		}
+		results[tool] = result
+	}
+
+	return results
+}
+
+// CheckAllPrerequisites checks the default set of prerequisites: dnsx, nuclei, httpx, naabu, nmap
+func CheckAllPrerequisites() map[string]PrerequisiteCheckResult {
+	prerequisites := []string{"dnsx", "nuclei", "httpx", "naabu", "nmap"}
+	return CheckPrerequisites(prerequisites)
 }
 
 func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
