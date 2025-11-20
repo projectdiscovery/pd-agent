@@ -299,9 +299,9 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	}
 
 	// Always add -code, -headless, and -lfa flags for nuclei
-	if task.Tool == types.Nuclei {
-		args = append(args, "-code", "-headless", "-lfa")
-	}
+	// if task.Tool == types.Nuclei {
+	// 	args = append(args, "-code", "-headless", "-lfa")
+	// }
 
 	if task.Options.Output != "" {
 		_ = fileutil.CreateFolder(task.Options.Output)
