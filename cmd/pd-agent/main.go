@@ -289,7 +289,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		}
 
 		respBodyBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries {
 				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
