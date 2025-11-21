@@ -1,7 +1,47 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: pd-agent
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pd-agent
+  namespace: pd-agent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pd-agent
+rules:
+- apiGroups: [""]
+  resources: ["nodes", "services", "pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses", "servicecidrs"]
+  verbs: ["get", "list"]
+- apiGroups: ["gateway.networking.k8s.io"]
+  resources: ["gateways", "httproutes", "tlsroutes", "grpcroutes"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pd-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pd-agent
+subjects:
+- kind: ServiceAccount
+  name: pd-agent
+  namespace: pd-agent
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: pd-agent
+  namespace: pd-agent
   labels:
     app: pd-agent
 spec:
@@ -14,6 +54,7 @@ spec:
       labels:
         app: pd-agent
     spec:
+      serviceAccountName: pd-agent
       # Run as non-root user for security
       securityContext:
         runAsNonRoot: true
@@ -21,12 +62,12 @@ spec:
         fsGroup: 1000
       containers:
       - name: pd-agent
-        image: pd-agent:latest
-        imagePullPolicy: IfNotPresent
+        image: projectdiscovery/pd-agent:latest
+        securityContext:
+          capabilities:
+            add: ["NET_RAW", "NET_ADMIN"]
+        imagePullPolicy: Always
         args:
-          - -agent-output
-          - /output
-          - -verbose
           - -agent-tags
           - production
           - -agent-networks
@@ -43,9 +84,6 @@ spec:
               secretKeyRef:
                 name: pd-agent-secret
                 key: PDCP_TEAM_ID
-        volumeMounts:
-          - name: output
-            mountPath: /output
         resources:
           requests:
             memory: "256Mi"
@@ -70,15 +108,5 @@ spec:
               - "pgrep pd-agent || exit 1"
           initialDelaySeconds: 10
           periodSeconds: 10
-      volumes:
-        - name: output
-          emptyDir: {}
       # Enable host network for subnet discovery
       hostNetwork: true
-      # Add network capabilities for subnet discovery
-      securityContext:
-        capabilities:
-          add:
-            - NET_RAW
-            - NET_ADMIN
-

@@ -55,45 +55,46 @@ This directory contains example configuration files for installing and running `
 
 ### Kubernetes
 
-**1. Create Secret and ConfigMap:**
+The deployment manifest includes everything needed: namespace, service account, RBAC permissions, and deployment configuration. The agent automatically discovers Kubernetes cluster CIDRs (nodes, pods, services) for scanning.
+
+**1. (Optional) Customize the deployment:**
+
+Edit `pd-agent-deployment.yaml` to update:
+- **Namespace**: Change `pd-agent` to your desired namespace (update in all resources)
+- **Agent tags** (line 72): Change `production` to your desired tag
+- **Agent networks** (line 74): Change `kube-prod-cluster` to your cluster identifier
+- **Replicas**: Change `1` to your desired number of replicas
+
+**2. Create secret:**
 
 ```bash
-# Create secret for sensitive data
+# Create namespace (should be the same as the namespace in the deployment file)
+kubectl create namespace pd-agent
+
+# Create secret with your PDCP credentials (update namespace if customized)
 kubectl create secret generic pd-agent-secret \
+  --namespace pd-agent \
   --from-literal=PDCP_API_KEY=your-api-key \
   --from-literal=PDCP_TEAM_ID=your-team-id
-
-# Create configmap for configuration
-kubectl create configmap pd-agent-config \
-# No additional configmap needed - using defaults
 ```
-
-**2. Edit the deployment file** command line arguments:
-- Update agent tags to your desired tags
-- Update agent networks to your desired networks
 
 **3. Deploy:**
 
 ```bash
-# Optional: Create PVC for persistent storage
-kubectl apply -f pd-agent-pvc.yaml
-
-# Deploy the agent
+# Deploy the agent (creates namespace, RBAC, and deployment)
 kubectl apply -f pd-agent-deployment.yaml
 
 # Check status
-kubectl get pods -l app=pd-agent
+kubectl get pods -n pd-agent
 
 # View logs
-kubectl logs -l app=pd-agent -f
+kubectl logs -n pd-agent -l app=pd-agent -f
 ```
 
-**4. Scale deployment:**
-
-```bash
-# Scale to multiple replicas
-kubectl scale deployment pd-agent --replicas=3
-```
+**Notes:**
+- The agent requires `ClusterRole` permissions to discover cluster subnets (nodes, pods, service CIDRs)
+- Uses `hostNetwork: true` for network discovery and scanning
+- Agent automatically caches and aggregates discovered subnets for efficient scanning
 
 ## Important Notes
 
