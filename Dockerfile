@@ -57,10 +57,17 @@ COPY --from=builder /go/bin/nuclei /usr/local/bin/
 # Copy agent binary
 COPY --from=builder /go/bin/pd-agent /usr/local/bin/pd-agent
 
+# Create writable output directory for existing ubuntu user (UID 1000)
+RUN mkdir -p /home/ubuntu/output && \
+    chown -R ubuntu:ubuntu /home/ubuntu
 
 # Set default environment variables (can be overridden at runtime)
 ENV PDCP_API_KEY=""
 ENV PDCP_TEAM_ID=""
+
+# Switch to non-root user
+USER ubuntu
+WORKDIR /home/ubuntu
 
 # ENTRYPOINT allows passing command-line arguments at runtime
 # Environment variables should be passed via -e flags or docker-compose
