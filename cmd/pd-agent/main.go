@@ -293,7 +293,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		}
 
 		respBodyBytes, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries {
 				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
@@ -2145,6 +2145,20 @@ func main() {
 	// deleteCacheFileForTesting()
 
 	options := parseOptions()
+
+	// Check prerequisites before starting the agent
+	prerequisites := pkg.CheckAllPrerequisites()
+	var missingTools []string
+	for toolName, result := range prerequisites {
+		if !result.Found {
+			missingTools = append(missingTools, toolName)
+		}
+	}
+
+	if len(missingTools) > 0 {
+		gologger.Fatal().Msgf("Missing required prerequisites: %s", strings.Join(missingTools, ", "))
+	}
+
 	pdcpRunner, err := NewRunner(options)
 	if err != nil {
 		gologger.Fatal().Msgf("Could not create runner: %s\n", err)

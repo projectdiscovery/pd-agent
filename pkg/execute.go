@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/projectdiscovery/gologger"
@@ -17,8 +18,10 @@ import (
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	mapsutil "github.com/projectdiscovery/utils/maps"
+	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	stringsutil "github.com/projectdiscovery/utils/strings"
+	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/tidwall/gjson"
 )
 
@@ -29,6 +32,51 @@ func verifyToolInPath(toolName string) error {
 		return fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
 	}
 	return nil
+}
+
+// checkToolInPath checks if a tool exists in the system PATH, handling Windows .exe extension
+func checkToolInPath(toolName string) (string, error) {
+	if osutils.IsWindows() {
+		toolName = toolName + ".exe"
+	}
+	path, err := exec.LookPath(toolName)
+	if err != nil {
+		return "", fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
+	}
+	return path, nil
+}
+
+// PrerequisiteCheckResult represents the result of checking a single prerequisite
+type PrerequisiteCheckResult struct {
+	ToolName string
+	Found    bool
+	Path     string
+	Error    error
+}
+
+// CheckPrerequisites checks if all required prerequisites are installed
+// Returns a map of tool names to their check results
+func CheckPrerequisites(tools []string) map[string]PrerequisiteCheckResult {
+	results := make(map[string]PrerequisiteCheckResult)
+
+	for _, tool := range tools {
+		path, err := checkToolInPath(tool)
+		result := PrerequisiteCheckResult{
+			ToolName: tool,
+			Found:    err == nil,
+			Path:     path,
+			Error:    err,
+		}
+		results[tool] = result
+	}
+
+	return results
+}
+
+// CheckAllPrerequisites checks the default set of prerequisites: dnsx, nuclei, httpx, naabu, nmap
+func CheckAllPrerequisites() map[string]PrerequisiteCheckResult {
+	prerequisites := []string{"dnsx", "nuclei", "httpx", "naabu", "nmap"}
+	return CheckPrerequisites(prerequisites)
 }
 
 func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
@@ -298,9 +346,17 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 		)
 	}
 
-	// Always add -code, -headless, and -lfa flags for nuclei
 	if task.Tool == types.Nuclei {
-		args = append(args, "-code", "-headless", "-lfa")
+		// Always add -lfa flag
+		args = append(args, "-lfa")
+		// Enable -code only if there are more than 2GB of RAM
+		if hasMoreThan2GBRAM() {
+			args = append(args, "-code")
+		}
+		// Enable -headless only if there are more than 8GB of RAM and architecture is AMD64
+		if hasMoreThan8GBRAM() && isAMD64() {
+			args = append(args, "-headless")
+		}
 	}
 
 	if task.Options.Output != "" {
@@ -318,6 +374,52 @@ func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, re
 	}
 
 	return envs, args, removeFunc, nil
+}
+
+// getTotalRAM returns the total physical/installed RAM in bytes (not virtual memory)
+// Returns 0 and an error if unable to determine RAM
+// Note: mem.VirtualMemory().Total returns the total physical RAM installed on the system
+func getTotalRAM() (uint64, error) {
+	vmStat, err := mem.VirtualMemory()
+	if err != nil {
+		return 0, err
+	}
+	// Total field represents the total physical RAM installed, not virtual memory
+	return vmStat.Total, nil
+}
+
+// hasMoreThan2GBRAM checks if the system has more than 2GB of RAM
+// Returns true if RAM > 2GB, false otherwise or if unable to determine
+func hasMoreThan2GBRAM() bool {
+	const minRAMBytes = 2 * 1024 * 1024 * 1024 // 2GB in bytes
+
+	totalRAM, err := getTotalRAM()
+	if err != nil {
+		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling code templates", err)
+		return false
+	}
+
+	return totalRAM > minRAMBytes
+}
+
+// hasMoreThan8GBRAM checks if the system has more than 8GB of RAM
+// Returns true if RAM > 8GB, false otherwise or if unable to determine
+func hasMoreThan8GBRAM() bool {
+	const minRAMBytes = 8 * 1024 * 1024 * 1024 // 8GB in bytes
+
+	totalRAM, err := getTotalRAM()
+	if err != nil {
+		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling headless mode", err)
+		return false
+	}
+
+	return totalRAM > minRAMBytes
+}
+
+// isAMD64 checks if the system architecture is AMD64 (x86_64)
+// Returns true if architecture is amd64, false otherwise
+func isAMD64() bool {
+	return runtime.GOARCH == "amd64"
 }
 
 var UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
@@ -427,6 +529,13 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 
 	// Wait for the command to finish
 	if err := cmd.Wait(); err != nil {
+		// -----------
+		// Recoverable error, return the task result with the error
+		// NUCLEI
+		// - [FTL] Could not run nuclei: no templates provided for scan => no templates compatible with provided flags
+		if strings.Contains(taskResult.Stderr, "no templates provided for scan") {
+			return taskResult, nil
+		}
 		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStdout: %s\nStderr: %s", args[0], err, string(stdoutOutput), string(stderrOutput))
 	}
 
