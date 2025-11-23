@@ -34,6 +34,10 @@ import (
 	syncutil "github.com/projectdiscovery/utils/sync"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
 var (
@@ -334,6 +338,10 @@ var (
 			Build()
 	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
 	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
+
+	// K8s subnets cache
+	k8sSubnetsCache     []string
+	k8sSubnetsCacheOnce sync.Once
 )
 
 // shouldSkipTask checks if a task (scan or enumeration) should be skipped based on
@@ -1623,7 +1631,274 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 		}
 	}
 
+	// Detect Kubernetes environment: allow LOCAL_K8S override or auto-detect in-cluster
+	_, err = os.Stat("/var/run/secrets/kubernetes.io/serviceaccount/token")
+	if err == nil {
+		// if kubernetes environment is detected, get the subnets from the cluster (cached)
+		if k8sSubnets := getCachedK8sSubnets(); len(k8sSubnets) > 0 {
+			targets = appendUniqueStrings(targets, k8sSubnets)
+		}
+	}
+
 	return targets
+}
+
+// appendUniqueStrings appends only strings from src that are not already present in dst.
+func appendUniqueStrings(dst []string, src []string) []string {
+	if len(src) == 0 {
+		return dst
+	}
+	existing := make(map[string]struct{}, len(dst))
+	for _, s := range dst {
+		existing[s] = struct{}{}
+	}
+	for _, s := range src {
+		if _, ok := existing[s]; ok {
+			continue
+		}
+		existing[s] = struct{}{}
+		dst = append(dst, s)
+	}
+	return dst
+}
+
+// getCachedK8sSubnets returns the cached K8s subnets, fetching them only once
+func getCachedK8sSubnets() []string {
+	k8sSubnetsCacheOnce.Do(func() {
+		k8sSubnetsCache = getK8sSubnets()
+		if len(k8sSubnetsCache) > 0 {
+			gologger.Info().Msgf("Cached %d Kubernetes subnets for reuse", len(k8sSubnetsCache))
+		}
+	})
+	return k8sSubnetsCache
+}
+
+func getK8sSubnets() []string {
+	var config *rest.Config
+	var err error
+
+	// Build kubeconfig based on environment
+	if os.Getenv("LOCAL_K8S") == "true" {
+		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
+		if err != nil {
+			gologger.Error().Msgf("Error building kubeconfig: %v", err)
+			return []string{}
+		}
+	} else {
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			gologger.Error().Msgf("Error getting in-cluster config: %v", err)
+			return []string{}
+		}
+	}
+
+	kubeapiClient, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		gologger.Error().Msgf("Error getting kubeapi client: %v", err)
+		return []string{}
+	}
+
+	assets := make([]string, 0)
+
+	// Get Service CIDRs
+	var serviceCidrs []string
+	// Try GA first
+	if svcCIDRListV1, err := kubeapiClient.NetworkingV1().ServiceCIDRs().List(context.Background(), v1.ListOptions{}); err == nil {
+		for _, item := range svcCIDRListV1.Items {
+			serviceCidrs = append(serviceCidrs, item.Spec.CIDRs...)
+		}
+	} else {
+		// Fallback to v1beta1
+		if svcCIDRListBeta, errBeta := kubeapiClient.NetworkingV1beta1().ServiceCIDRs().List(context.Background(), v1.ListOptions{}); errBeta == nil {
+			for _, item := range svcCIDRListBeta.Items {
+				serviceCidrs = append(serviceCidrs, item.Spec.CIDRs...)
+			}
+		} else {
+			gologger.Debug().Msgf("ServiceCIDR list failed (v1: %v, v1beta1: %v)", err, errBeta)
+		}
+	}
+
+	if len(serviceCidrs) > 0 {
+		gologger.Info().Msgf("Found %d service CIDRs: %v", len(serviceCidrs), serviceCidrs)
+		assets = append(assets, serviceCidrs...)
+	}
+
+	// Get Cluster CIDRs (Node IPs and Pod CIDRs)
+	nodes, err := kubeapiClient.CoreV1().Nodes().List(context.Background(), v1.ListOptions{})
+	if err != nil {
+		gologger.Error().Msgf("Error listing nodes to derive cluster CIDRs: %v", err)
+		return assets
+	}
+
+	var nodeIPs []string
+	var podCidrs []string
+	seen := make(map[string]struct{})
+
+	for _, n := range nodes.Items {
+		// Collect node internal IPs as /24 CIDRs
+		if len(n.Status.Addresses) > 0 {
+			for _, a := range n.Status.Addresses {
+				if a.Type == "InternalIP" {
+					ip := net.ParseIP(a.Address)
+					if ip != nil {
+						ip = ip.To4()
+						ipnet := &net.IPNet{
+							IP:   ip,
+							Mask: net.CIDRMask(24, 32),
+						}
+						nodeIPs = append(nodeIPs, ipnet.String())
+
+						if _, ok := seen[a.Address]; !ok {
+							seen[a.Address] = struct{}{}
+						}
+					}
+				}
+			}
+		}
+
+		// Collect pod CIDRs (prefer multi-CIDR if present)
+		if len(n.Spec.PodCIDRs) > 0 {
+			for _, c := range n.Spec.PodCIDRs {
+				if _, ok := seen[c]; !ok && c != "" {
+					seen[c] = struct{}{}
+					podCidrs = append(podCidrs, c)
+				}
+			}
+			continue
+		}
+
+		// Fallback to single PodCIDR
+		if n.Spec.PodCIDR != "" {
+			if _, ok := seen[n.Spec.PodCIDR]; !ok {
+				seen[n.Spec.PodCIDR] = struct{}{}
+				podCidrs = append(podCidrs, n.Spec.PodCIDR)
+			}
+		}
+	}
+
+	// Calculate supernets for node IPs and pod CIDRs
+	if len(nodeIPs) > 0 {
+		nodeSupernets := supernetMultiple(nodeIPs)
+		gologger.Info().Msgf("Aggregated %d node IPs into %d supernets: %v", len(nodeIPs), len(nodeSupernets), nodeSupernets)
+		assets = append(assets, nodeSupernets...)
+	}
+
+	if len(podCidrs) > 0 {
+		podSupernets := supernetMultiple(podCidrs)
+		gologger.Info().Msgf("Aggregated %d pod CIDRs into %d supernets: %v", len(podCidrs), len(podSupernets), podSupernets)
+		assets = append(assets, podSupernets...)
+	}
+
+	return assets
+}
+
+// supernetMultiple returns multiple supernets, avoiding wasteful large ranges
+// Groups CIDRs by second octet (10.X.*.*/Y) to avoid massive supernets
+func supernetMultiple(cidrs []string) []string {
+	if len(cidrs) == 0 {
+		return []string{}
+	}
+	if len(cidrs) == 1 {
+		return cidrs
+	}
+
+	// Parse all CIDRs and group by second octet
+	type cidrRange struct {
+		cidr  string
+		minIP net.IP
+		maxIP net.IP
+	}
+
+	// Group by "10.X.*.*" pattern (first two octets)
+	groups := make(map[string][]cidrRange)
+
+	for _, cidr := range cidrs {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+
+		lastIP := make(net.IP, len(ipnet.IP))
+		copy(lastIP, ipnet.IP)
+		for i := range lastIP {
+			lastIP[i] |= ^ipnet.Mask[i]
+		}
+
+		// Group key based on first two octets (e.g., "10.60", "10.68", "10.80")
+		ip4 := ipnet.IP.To4()
+		groupKey := fmt.Sprintf("%d.%d", ip4[0], ip4[1])
+
+		groups[groupKey] = append(groups[groupKey], cidrRange{
+			cidr:  cidr,
+			minIP: ipnet.IP,
+			maxIP: lastIP,
+		})
+	}
+
+	// Calculate supernet for each group
+	result := make([]string, 0, len(groups))
+	for _, group := range groups {
+		if len(group) == 0 {
+			continue
+		}
+
+		minIP := group[0].minIP
+		maxIP := group[0].maxIP
+
+		for _, r := range group[1:] {
+			if compareIP(r.minIP, minIP) < 0 {
+				minIP = r.minIP
+			}
+			if compareIP(r.maxIP, maxIP) > 0 {
+				maxIP = r.maxIP
+			}
+		}
+
+		result = append(result, calculateSupernet(minIP, maxIP))
+	}
+
+	// Sort for consistent output
+	sort.Strings(result)
+
+	return result
+}
+
+func compareIP(ip1, ip2 net.IP) int {
+	ip1 = ip1.To4()
+	ip2 = ip2.To4()
+	for i := 0; i < len(ip1); i++ {
+		if ip1[i] < ip2[i] {
+			return -1
+		}
+		if ip1[i] > ip2[i] {
+			return 1
+		}
+	}
+	return 0
+}
+
+func calculateSupernet(minIP, maxIP net.IP) string {
+	minIP = minIP.To4()
+	maxIP = maxIP.To4()
+
+	// XOR to find differing bits
+	var diff uint32
+	for i := 0; i < 4; i++ {
+		diff = (diff << 8) | uint32(minIP[i]^maxIP[i])
+	}
+
+	// Count leading zeros to find common prefix length
+	prefixLen := 32
+	for diff > 0 {
+		diff >>= 1
+		prefixLen--
+	}
+
+	// Create mask and apply to minIP
+	mask := net.CIDRMask(prefixLen, 32)
+	network := minIP.Mask(mask)
+
+	return fmt.Sprintf("%s/%d", network, prefixLen)
 }
 
 // startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket

@@ -45,9 +45,34 @@ docker run -d --name pd-agent \
   -agent-tags production
 ```
 
+#### Kubernetes
+```bash
+# Create namespace
+kubectl create namespace pd-agent
+
+# Create secret with credentials
+kubectl create secret generic pd-agent-secret \
+  --namespace pd-agent \
+  --from-literal=PDCP_API_KEY=your-api-key \
+  --from-literal=PDCP_TEAM_ID=your-team-id
+
+# Deploy the agent
+kubectl apply -f https://raw.githubusercontent.com/projectdiscovery/pd-agent/main/examples/pd-agent-deployment.yaml
+
+# Check status
+kubectl get pods -n pd-agent -l app=pd-agent
+```
+
+The agent automatically discovers Kubernetes cluster subnets (nodes, pods, services) for scanning. See [examples/README.md](examples/README.md) for detailed instructions and customization options.
+
 ### Network Discovery
 
-The agent automatically discovers local network subnets and reports them to the platform. For Docker/K8s deployments, use `--network host` and network capabilities to enable this feature.
+The agent automatically discovers local network subnets and reports them to the platform:
+- **Local networks:** Discovers private IP ranges from network interfaces and routing tables
+- **Kubernetes:** Automatically discovers and aggregates cluster subnets (node IPs, pod CIDRs, service CIDRs)
+- **Docker:** Use `--network host` and network capabilities (`NET_RAW`, `NET_ADMIN`) to enable discovery
+
+For Kubernetes deployments, the agent requires `ClusterRole` permissions to discover cluster resources (included in the deployment manifest).
 
 ### Environment Variables
 
@@ -96,7 +121,7 @@ The agent uses environment variables or command-line flags for configuration. Se
 - **macOS (launchd):** `~/.pd-agent/logs/stdout.log` and `stderr.log`
 - **Windows:** Event Viewer → Windows Logs → Application
 - **Docker:** `docker logs pd-agent -f`
-- **Kubernetes:** `kubectl logs -l app=pd-agent -f`
+- **Kubernetes:** `kubectl logs -n pd-agent -l app=pd-agent -f`
 
 #### Enable Verbose Logging
 
@@ -116,6 +141,7 @@ PDCP_VERBOSE=1 pd-agent ...
 5. **Monitoring:** Set up monitoring and alerting for agent health
 6. **Output Management:** Regularly clean up output directories to prevent disk space issues
 7. **Agent IDs:** Use unique, descriptive agent IDs for easy identification
+8. **Kubernetes:** For K8s deployments, use one agent per cluster to efficiently discover and scan cluster subnets
 
 ### Advanced Configuration
 
