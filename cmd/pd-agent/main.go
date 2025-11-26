@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -29,6 +30,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	envutil "github.com/projectdiscovery/utils/env"
+	fileutil "github.com/projectdiscovery/utils/file"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	syncutil "github.com/projectdiscovery/utils/sync"
@@ -39,6 +41,28 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// getAllNucleiTemplates recursively finds all .yaml and .yml files in the nuclei template directory
+func getAllNucleiTemplates(templateDir string) ([]string, error) {
+	var templates []string
+	err := filepath.Walk(templateDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			ext := filepath.Ext(path)
+			if ext == ".yaml" || ext == ".yml" {
+				// Get relative path from template directory
+				relPath, err := filepath.Rel(templateDir, path)
+				if err == nil {
+					templates = append(templates, relPath)
+				}
+			}
+		}
+		return nil
+	})
+	return templates, err
+}
 
 var (
 	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
@@ -166,7 +190,7 @@ func (c *LocalCache) MarkScanExecuted(id string, configHash string) {
 	// Async save
 	go func() {
 		if err := c.Save(); err != nil {
-			gologger.Warning().Msgf("error saving cache: %v", err)
+			slog.Warn("error saving cache", "error", err)
 		}
 	}()
 }
@@ -183,7 +207,7 @@ func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
 	// Async save
 	go func() {
 		if err := c.Save(); err != nil {
-			gologger.Warning().Msgf("error saving cache: %v", err)
+			slog.Warn("error saving cache", "error", err)
 		}
 	}()
 }
@@ -243,7 +267,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error creating authenticated client (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				slog.Warn("error creating authenticated client, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -262,7 +286,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error creating request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				slog.Warn("error creating request, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -281,7 +305,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		resp, err := client.Do(req)
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error sending request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				slog.Warn("error sending request, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -296,7 +320,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		_ = resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries {
-				gologger.Warning().Msgf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err)
+				slog.Warn("error reading response, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -348,7 +372,7 @@ var (
 // agent assignment, tags, and networks. Logs each check in verbose mode.
 // Returns true if the task should be skipped (no matching conditions), false if it should continue.
 func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTags, agentNetworks gjson.Result) bool {
-	gologger.Verbose().Msgf("checking %s (%s - %s)", taskType, id, name)
+	slog.Debug("checking task", "task_type", taskType, "id", id, "name", name)
 
 	// Check if agent ID matches (case-insensitive)
 	isAssignedToAgent := strings.EqualFold(taskAgentId, r.options.AgentId)
@@ -357,9 +381,9 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if taskAgentId == "" {
-		gologger.Verbose().Msgf("  checking id: %s (task: <empty>, agent: %s)", result, r.options.AgentId)
+		slog.Debug("checking id", "result", result, "task_agent_id", "<empty>", "agent_id", r.options.AgentId)
 	} else {
-		gologger.Verbose().Msgf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId)
+		slog.Debug("checking id", "result", result, "task_agent_id", taskAgentId, "agent_id", r.options.AgentId)
 	}
 
 	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
@@ -384,9 +408,9 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if len(taskAgentTags) > 0 {
-		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags)
+		slog.Debug("checking tags", "result", result, "task_agent_tags", taskAgentTags, "agent_tags", r.options.AgentTags)
 	} else {
-		gologger.Verbose().Msgf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags)
+		slog.Debug("checking tags", "result", result, "task_agent_tags", "<none>", "agent_tags", r.options.AgentTags)
 	}
 
 	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
@@ -411,20 +435,20 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if len(taskAgentNetworks) > 0 {
-		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks)
+		slog.Debug("checking networks", "result", result, "task_agent_networks", taskAgentNetworks, "agent_networks", r.options.AgentNetworks)
 	} else {
-		gologger.Verbose().Msgf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks)
+		slog.Debug("checking networks", "result", result, "task_agent_networks", "<none>", "agent_networks", r.options.AgentNetworks)
 	}
 
 	// If any condition matches, don't skip
 	shouldContinue := isAssignedToAgent || hasAgentTag || hasAgentNetwork
 
 	if shouldContinue {
-		gologger.Verbose().Msgf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name)
+		slog.Debug("task is being enqueued (matching conditions found)", "task_type", taskType, "id", id, "name", name)
 		return false // Don't skip
 	}
 
-	gologger.Verbose().Msgf("  %s (%s - %s) is being skipped (no matching conditions)", taskType, id, name)
+	slog.Debug("task is being skipped (no matching conditions)", "task_type", taskType, "id", id, "name", name)
 	return true // Skip
 }
 
@@ -437,7 +461,7 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	if err := r.localCache.Load(); err != nil {
-		gologger.Warning().Msgf("error loading cache: %v", err)
+		slog.Warn("error loading cache", "error", err)
 	}
 
 	// Generate a unique agent ID using xid (similar to tunnelx)
@@ -468,10 +492,10 @@ func NewRunner(options *Options) (*Runner, error) {
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
 	// Recommend the time to use on platform dashboard to schedule the scans
-	gologger.Info().Msg("platform dashboard uses UTC timezone")
+	slog.Info("platform dashboard uses UTC timezone")
 	now := time.Now().UTC()
 	recommendedTime := now.Add(5 * time.Minute)
-	gologger.Info().Msgf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST"))
+	slog.Info("recommended time to schedule scans", "time", recommendedTime.Format("2006-01-02 03:04:05 PM MST"), "timezone", "UTC")
 
 	var infoMessage strings.Builder
 	infoMessage.WriteString("running in agent mode")
@@ -489,7 +513,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		infoMessage.WriteString(" (networks: [])")
 	}
 
-	gologger.Info().Msg(infoMessage.String())
+	slog.Info(infoMessage.String())
 
 	return r.agentMode(ctx)
 }
@@ -505,7 +529,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		defer wg.Done()
 
 		if err := r.In(ctx); err != nil {
-			gologger.Fatal().Msgf("error registering agent: %v", err)
+			slog.Error("error registering agent", "error", err)
 		}
 	}()
 
@@ -529,7 +553,7 @@ func (r *Runner) monitorScans(ctx context.Context) {
 			return
 		default:
 			if err := r.getScans(ctx); err != nil {
-				gologger.Error().Msgf("Error getting scans: %v", err)
+				slog.Error("Error getting scans", "error", err)
 			}
 			time.Sleep(time.Minute)
 		}
@@ -544,7 +568,7 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 			return
 		default:
 			if err := r.getEnumerations(ctx); err != nil {
-				gologger.Error().Msgf("Error getting enumerations: %v", err)
+				slog.Error("Error getting enumerations", "error", err)
 			}
 			time.Sleep(time.Minute)
 		}
@@ -553,12 +577,12 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 
 // getScans fetches and processes scans from the API
 func (r *Runner) getScans(ctx context.Context) error {
-	gologger.Verbose().Msg("Retrieving scans...")
+	slog.Debug("Retrieving scans")
 	apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.ScanParallelism))
 	if err != nil {
-		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		slog.Error("Error creating syncutil", "error", err)
 		return err
 	}
 
@@ -583,15 +607,21 @@ func (r *Runner) getScans(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			gologger.Verbose().Msgf("Total pages: %d", totalPages)
+			slog.Debug("Total pages", "total_pages", totalPages)
 		}
 
-		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
+		slog.Debug("Processing page", "current_page", currentPage, "total_pages", totalPages)
 
 		// Process scans in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
 			id := value.Get("scan_id").String()
 			if id == "" {
+				return true
+			}
+
+			// Skip scans in finished state
+			status := value.Get("status").String()
+			if strings.EqualFold(status, "finished") {
 				return true
 			}
 
@@ -608,6 +638,20 @@ func (r *Runner) getScans(ctx context.Context) error {
 				templates = append(templates, value.String())
 				return true
 			})
+
+			// If no templates specified, use all default nuclei templates
+			if len(templates) == 0 {
+				defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+				if defaultTemplateDir != "" {
+					allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+					if err == nil && len(allTemplates) > 0 {
+						templates = allTemplates
+						slog.Info("No templates specified, using all default nuclei templates", "scan_id", id, "template_count", len(allTemplates), "template_dir", defaultTemplateDir)
+					} else if err != nil {
+						slog.Warn("Failed to get default nuclei templates", "scan_id", id, "template_dir", defaultTemplateDir, "error", err)
+					}
+				}
+			}
 
 			agentBehavior := value.Get("agent_behavior").String()
 
@@ -626,7 +670,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				if startTimeStr != "" {
 					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
 					if err != nil {
-						gologger.Error().Msgf("Error parsing start time: %v", err)
+						slog.Error("Error parsing start time", "error", err)
 						return
 					}
 					targetExecutionTime = parsedStartTime
@@ -637,7 +681,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					if nextRun != "" {
 						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
 						if err != nil {
-							gologger.Error().Msgf("Error parsing next run time: %v", err)
+							slog.Error("Error parsing next run time", "error", err)
 							return
 						}
 						if !targetExecutionTime.IsZero() {
@@ -654,7 +698,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						gologger.Verbose().Msgf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now)
+						slog.Debug("skipping scan as it's scheduled", "name", name, "scheduled_time", targetExecutionTime, "current_time", now)
 						return
 					}
 				}
@@ -663,19 +707,19 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					gologger.Verbose().Msgf("skipping scan \"%s\" as it's already completed recently\n", name)
+					slog.Debug("skipping scan as it's already completed recently", "name", name)
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					gologger.Verbose().Msgf("skipping scan \"%s\" as it's already in progress\n", name)
+					slog.Debug("skipping scan as it's already in progress", "name", name)
 					return
 				}
 
 				// Fetch minimal config first to compute hash
 				scanConfig, err := r.fetchScanConfig(scanID)
 				if err != nil {
-					gologger.Error().Msgf("Error fetching scan config for ID %s: %v", scanID, err)
+					slog.Error("Error fetching scan config", "scan_id", scanID, "error", err)
 					return
 				}
 
@@ -692,7 +736,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				for id := range scanConfigIds {
 					scanConfig, err := r.fetchSingleConfig(id)
 					if err != nil {
-						gologger.Error().Msgf("Error fetching scan config for ID %s: %v", id, err)
+						slog.Error("Error fetching scan config", "config_id", id, "error", err)
 					}
 					scanConfigIds[id] = scanConfig
 				}
@@ -708,7 +752,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 							// Decode base64
 							decoded, err := base64.StdEncoding.DecodeString(configValue)
 							if err != nil {
-								gologger.Error().Msgf("Error decoding base64 config: %v", err)
+								slog.Error("Error decoding base64 config", "error", err)
 								continue
 							}
 							mergedConfig.Write(decoded)
@@ -733,7 +777,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				for _, enumerationID := range enumerationIDs {
 					asset, err := r.fetchAssets(enumerationID)
 					if err != nil {
-						gologger.Error().Msgf("Error fetching assets for enumeration ID %s: %v", enumerationID, err)
+						slog.Error("Error fetching assets for enumeration", "enumeration_id", enumerationID, "error", err)
 					}
 					assets = append(assets, strings.Split(string(asset), "\n")...)
 				}
@@ -751,11 +795,93 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 				// Skip if this exact configuration was already executed
 				if r.localCache.HasScanBeenExecuted(scanID, configHash) && !schedule.Exists() {
-					gologger.Verbose().Msgf("skipping scan \"%s\" as it was already executed with same configuration\n", name)
+					slog.Debug("skipping scan as it was already executed with same configuration", "name", name)
 					return
 				}
 
-				gologger.Info().Msgf("scan \"%s\" enqueued...\n", name)
+				slog.Info("scan enqueued", "scan_name", name, "scan_id", scanID)
+
+				// DEBUG: Print scan configuration and naabu results, then exit
+				fmt.Println("=== DEBUG: Scan Configuration ===")
+				fmt.Printf("Scan ID: %s\n", scanID)
+				fmt.Printf("Scan Name: %s\n", name)
+				fmt.Printf("\nTargets (%d):\n", len(assets))
+				for i, target := range assets {
+					fmt.Printf("  [%d] %s\n", i+1, target)
+				}
+
+				// If no templates specified, get all default nuclei templates
+				templatesToUse := tmpls
+				if len(tmpls) == 0 {
+					fmt.Printf("\nTemplates: NONE SPECIFIED - Using all default nuclei templates\n")
+					// Get all templates from nuclei template directory
+					defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+					if defaultTemplateDir != "" {
+						allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+						if err == nil {
+							templatesToUse = allTemplates
+							fmt.Printf("Found %d default templates in %s\n", len(allTemplates), defaultTemplateDir)
+						} else {
+							fmt.Printf("Error getting default templates: %v\n", err)
+						}
+					} else {
+						fmt.Printf("Warning: Could not determine nuclei template directory\n")
+					}
+				} else {
+					fmt.Printf("\nTemplates (%d):\n", len(tmpls))
+					for i, tmpl := range tmpls {
+						fmt.Printf("  [%d] %s\n", i+1, tmpl)
+					}
+				}
+
+				// Perform naabu scan for debugging
+				if len(assets) > 0 && len(templatesToUse) > 0 {
+					tmpInputFile, err := fileutil.GetTempFileName()
+					if err == nil {
+						defer func() {
+							_ = os.RemoveAll(tmpInputFile)
+						}()
+						targetsContent := strings.Join(assets, "\n")
+						_ = os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm)
+
+						tmpTemplatesFile, err := fileutil.GetTempFileName()
+						if err == nil {
+							defer func() {
+								_ = os.RemoveAll(tmpTemplatesFile)
+							}()
+							templatesContent := strings.Join(templatesToUse, "\n")
+							_ = os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm)
+
+							filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "debug")
+							fmt.Println("\n=== DEBUG: Naabu Results ===")
+							if err != nil {
+								fmt.Printf("Error: %v\n", err)
+							} else {
+								fmt.Printf("Extracted Ports: %v\n", extractedPorts)
+								fmt.Printf("\nTargets with Open Ports (%d):\n", len(filteredTargets))
+								for i, target := range filteredTargets {
+									fmt.Printf("  [%d] %s\n", i+1, target)
+								}
+								fmt.Printf("\nTargets without Open Ports (%d):\n", len(assets)-len(filteredTargets))
+								targetsWithPorts := make(map[string]struct{})
+								for _, t := range filteredTargets {
+									targetsWithPorts[t] = struct{}{}
+								}
+								count := 0
+								for _, target := range assets {
+									if _, has := targetsWithPorts[target]; !has {
+										count++
+										fmt.Printf("  [%d] %s\n", count, target)
+									}
+								}
+							}
+						}
+					}
+				} else {
+					fmt.Println("\n=== DEBUG: Skipping naabu scan (no targets or templates) ===")
+				}
+				fmt.Println("\n=== DEBUG: Scan analysis complete, continuing with normal processing ===")
+				// END DEBUG CODE
 
 				_ = pendingTasks.Set(metaId, struct{}{})
 
@@ -779,7 +905,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 	}
 
 	// Wait for all scans to complete
-	gologger.Verbose().Msg("Waiting for all scans to complete...")
+	slog.Debug("Waiting for all scans to complete...")
 	awg.Wait()
 
 	return nil
@@ -787,12 +913,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 // getEnumerations fetches and processes enumerations from the API
 func (r *Runner) getEnumerations(ctx context.Context) error {
-	gologger.Verbose().Msg("Retrieving enumerations...")
+	slog.Debug("Retrieving enumerations...")
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.EnumerationParallelism))
 	if err != nil {
-		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		slog.Error("Error creating syncutil", "error", err)
 		return err
 	}
 
@@ -817,15 +943,21 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			gologger.Verbose().Msgf("Total pages: %d", totalPages)
+			slog.Debug("Total pages", "total_pages", totalPages)
 		}
 
-		gologger.Verbose().Msgf("Processing page %d of %d\n", currentPage, totalPages)
+		slog.Debug("Processing page", "current_page", currentPage, "total_pages", totalPages)
 
 		// Process enumerations in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
 			id := value.Get("id").String()
 			if id == "" {
+				return true
+			}
+
+			// Skip enumerations in finished state
+			status := value.Get("status").String()
+			if strings.EqualFold(status, "finished") {
 				return true
 			}
 
@@ -853,7 +985,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				if startTimeStr != "" {
 					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
 					if err != nil {
-						gologger.Error().Msgf("Error parsing start time: %v", err)
+						slog.Error("Error parsing start time", "error", err)
 						return
 					}
 					targetExecutionTime = parsedStartTime
@@ -864,7 +996,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					if nextRun != "" {
 						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
 						if err != nil {
-							gologger.Error().Msgf("Error parsing next run time: %v", err)
+							slog.Error("Error parsing next run time", "error", err)
 							return
 						}
 						if !targetExecutionTime.IsZero() {
@@ -881,7 +1013,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now)
+						slog.Debug("skipping enumeration as it's scheduled", "name", name, "scheduled_time", targetExecutionTime, "current_time", now)
 						return
 					}
 				}
@@ -890,23 +1022,23 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already completed recently\n", name)
+					slog.Debug("skipping enumeration as it's already completed recently", "name", name)
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it's already in progress\n", name)
+					slog.Debug("skipping enumeration as it's already in progress", "name", name)
 					return
 				}
 
 				// Fetch minimal config first
 				enumerationConfig, err := r.fetchEnumerationConfig(enumID)
 				if err != nil {
-					gologger.Error().Msgf("Error fetching enumeration config for ID %s: %v", enumID, err)
+					slog.Error("Error fetching enumeration config", "enum_id", enumID, "error", err)
 					return
 				}
 
-				gologger.Verbose().Msgf("Before sanitization: %s", enumerationConfig)
+				slog.Debug("Before sanitization", "config", enumerationConfig)
 
 				// Sanitize enumeration config (remove unsupported steps)
 				enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, name)
@@ -932,11 +1064,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// Check cache before proceeding
 				if r.localCache.HasEnumerationBeenExecuted(enumID, configHash) && !schedule.Exists() {
-					gologger.Verbose().Msgf("skipping enumeration \"%s\" as it was already executed with same configuration\n", name)
+					slog.Debug("skipping enumeration as it was already executed with same configuration", "name", name)
 					return
 				}
 
-				gologger.Info().Msgf("enumeration \"%s\" enqueued...\n", name)
+				slog.Info("enumeration enqueued", "name", name)
 
 				isDistributed := behavior == "distribute"
 
@@ -945,7 +1077,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				// if hasPassiveDiscovery && r.options.PassiveDiscovery {
 				// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
 				// 	if len(discoveredIPs) > 0 {
-				// 		gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
+				// 		slog.Info("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
 				// 		assets = append(assets, discoveredIPs...)
 				// 	}
 				// }
@@ -972,7 +1104,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	}
 
 	// Wait for all enumerations to complete
-	gologger.Verbose().Msg("Waiting for all enumerations to complete...")
+	slog.Debug("Waiting for all enumerations to complete...")
 	awg.Wait()
 
 	return nil
@@ -981,18 +1113,82 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 // executeNucleiScan is the shared implementation for executing nuclei scans
 // using the same logic as pd-agent
 func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+	// If templates are empty, use all default nuclei templates
+	templatesToUse := templates
+	if len(templates) == 0 {
+		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+		if defaultTemplateDir != "" {
+			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+			if err == nil && len(allTemplates) > 0 {
+				templatesToUse = allTemplates
+				slog.Info("No templates specified, using all default nuclei templates",
+					"scan_id", scanID,
+					"chunk_id", metaID,
+					"template_count", len(allTemplates))
+			}
+		}
+	}
 	// Set output directory if agent output is specified
 	var outputDir string
 	if r.options.AgentOutput != "" {
 		outputDir = filepath.Join(r.options.AgentOutput, metaID)
 	}
 
-	// Create task similar to pd-agent
+	// Create temporary files for filtering
+	tmpInputFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		slog.Error("Failed to create temp file for targets", slog.Any("error", err))
+		return
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpInputFile)
+	}()
+
+	// Write targets to temp file
+	targetsContent := strings.Join(assets, "\n")
+	if err := os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm); err != nil {
+		slog.Error("Failed to write targets to temp file", "error", err)
+		return
+	}
+
+	tmpTemplatesFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		slog.Error("Failed to create temp file for templates", "error", err)
+		return
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpTemplatesFile)
+	}()
+
+	// Write templates to temp file
+	templatesContent := strings.Join(templatesToUse, "\n")
+	if err := os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm); err != nil {
+		slog.Error("Failed to write templates to temp file", "error", err)
+		return
+	}
+
+	// Filter targets by template ports using naabu
+	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, metaID)
+	if err != nil {
+		slog.Warn("Error filtering targets by template ports, proceeding with all targets", "error", err)
+		filteredTargets = assets
+	}
+
+	// If naabu found no hosts with open ports, skip nuclei execution
+	if len(filteredTargets) == 0 {
+		slog.Info("Skipping nuclei execution - no hosts with open ports found after naabu scan",
+			"scan_id", scanID,
+			"chunk_id", metaID,
+			"extracted_ports", extractedPorts)
+		return
+	}
+
+	// Update task with filtered targets
 	task := &types.Task{
 		Tool: types.Nuclei,
 		Options: types.Options{
-			Hosts:     assets,
-			Templates: templates,
+			Hosts:     filteredTargets,
+			Templates: templatesToUse,
 			Silent:    true,
 			ScanID:    scanID,
 			Config:    config,
@@ -1003,35 +1199,35 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	// Execute using the same pkg.Run logic as pd-agent
-	gologger.Info().Msgf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID)
+	slog.Info("Starting nuclei scan", "scan_id", scanID, "meta_id", metaID, "filtered_targets", len(filteredTargets))
 	taskResult, err := pkg.Run(ctx, task)
 	if err != nil {
-		gologger.Error().Msgf("Nuclei scan execution failed: %v", err)
+		slog.Error("Nuclei scan execution failed", "error", err)
 		return
 	}
 
 	if taskResult != nil {
-		gologger.Info().Msgf("Completed nuclei scan for scanID=%s, metaID=%s\nStdout: %s\nStderr: %s", scanID, metaID, taskResult.Stdout, taskResult.Stderr)
+		slog.Info("Completed nuclei scan", "scan_id", scanID, "meta_id", metaID, "stdout", taskResult.Stdout, "stderr", taskResult.Stderr)
 	} else {
-		gologger.Info().Msgf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID)
+		slog.Info("Completed nuclei scan", "scan_id", scanID, "meta_id", metaID)
 	}
 }
 
 // processChunks is a generic chunk processing method that handles the common logic
 // for pulling chunks, updating status, and executing them
 func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, executeChunk func(ctx context.Context, chunk *TaskChunk) error) {
-	gologger.Info().Msgf("Starting distributed %s processing for %s ID: %s", taskType, taskType, taskID)
+	slog.Info("Starting distributed processing", "task_type", taskType, "task_id", taskID)
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.ChunkParallelism))
 	if err != nil {
-		gologger.Error().Msgf("Error creating syncutil: %v", err)
+		slog.Error("Error creating syncutil", "task_type", taskType, "task_id", taskID, "error", err)
 		return
 	}
 
 	chunkCount := 0
 	for {
 		chunkCount++
-		gologger.Info().Msgf("Fetching chunk #%d for %s ID: %s", chunkCount, taskType, taskID)
+		slog.Info("Fetching chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkCount)
 
 		var chunk *TaskChunk
 		var err error
@@ -1048,7 +1244,7 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			currentErr := err.Error()
 			if currentErr == lastErr {
 				// If we get the same error multiple times, likely the task is complete
-				gologger.Info().Msgf("%s ID %s completed successfully", taskType, taskID)
+				slog.Info("Task completed successfully", "task_type", taskType, "task_id", taskID)
 				goto Complete
 			}
 			lastErr = currentErr
@@ -1059,12 +1255,12 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 		}
 
 		if err != nil {
-			gologger.Error().Msgf("Failed to get chunk after %d retries: %v", maxRetries, err)
+			slog.Error("Failed to get chunk after retries", "task_type", taskType, "task_id", taskID, "retries", maxRetries, "error", err)
 			break
 		}
 
 		if chunk == nil {
-			gologger.Info().Msgf("No more chunks available for %s ID: %s", taskType, taskID)
+			slog.Info("No more chunks available", "task_type", taskType, "task_id", taskID)
 			break
 		}
 
@@ -1076,16 +1272,13 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 		go func(chunkNum int, chunk *TaskChunk) {
 			defer awg.Done()
 
-			gologger.Info().Msgf("Processing chunk #%d (ID: %s) with %d targets",
-				chunkNum,
-				chunk.ChunkID,
-				len(chunk.Targets))
+			slog.Info("Processing chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkNum, "chunk_id", chunk.ChunkID, "target_count", len(chunk.Targets))
 
 			// Set initial status to in_progress
 			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-				gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+				slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "error", err)
 			} else {
-				gologger.Info().Msgf("Updated chunk %s status to in_progress", chunk.ChunkID)
+				slog.Info("Updated chunk status to in_progress", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID)
 			}
 
 			// Start a goroutine to periodically update status (heartbeat)
@@ -1100,9 +1293,9 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 						return
 					case <-ticker.C:
 						if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
-							gologger.Error().Msgf("Error updating %s chunk status: %v", taskType, err)
+							slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunkID, "error", err)
 						} else {
-							gologger.Debug().Msgf("Updated chunk %s status to in_progress (heartbeat)", chunkID)
+							slog.Debug("Updated chunk status to in_progress (heartbeat)", "task_type", taskType, "task_id", taskID, "chunk_id", chunkID)
 						}
 					}
 				}
@@ -1111,15 +1304,12 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			// Execute the chunk using the provided callback
 			executionErr := executeChunk(ctx, chunk)
 			if executionErr != nil {
-				gologger.Error().Msgf("Error executing %s chunk: %v", taskType, err)
+				slog.Error("Error executing chunk", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "error", executionErr)
 			}
 
 			// Stop the heartbeat timer
 			timerCtxCancel()
-			gologger.Debug().Msgf("Stopped status update timer for chunk %s", chunk.ChunkID)
-
-			// Wait 1 second before marking as complete
-			time.Sleep(time.Second)
+			slog.Debug("Stopped status update timer for chunk", "chunk_id", chunk.ChunkID)
 
 			status := TaskChunkStatusAck
 			if executionErr != nil {
@@ -1128,42 +1318,150 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 
 			// Mark the chunk as completed with ACK
 			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, status); err != nil {
-				gologger.Error().Msgf("Error updating %s chunk status to %s: %v", taskType, status, err)
+				slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "status", status, "error", err)
 			} else {
-				gologger.Info().Msgf("Successfully completed chunk #%d (ID: %s)", chunkNum, chunk.ChunkID)
+				slog.Info("Successfully completed chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkNum, "chunk_id", chunk.ChunkID)
 			}
 		}(currentChunkCount, currentChunk)
 	}
 
 Complete:
 	// Wait for all chunks to complete
-	gologger.Info().Msgf("Waiting for all chunks to complete for %s ID: %s", taskType, taskID)
+	slog.Info("Waiting for all chunks to complete", "task_type", taskType, "task_id", taskID)
 	awg.Wait()
-	gologger.Info().Msgf("Completed processing all chunks for %s ID: %s (total chunks: %d)", taskType, taskID, chunkCount)
+	slog.Info("Completed processing all chunks", "task_type", taskType, "task_id", taskID, "total_chunks", chunkCount)
 
 	// Mark the task as done
 	_, _ = r.getTaskChunk(ctx, taskID, true)
 }
 
-// elaborateScanChunks processes distributed scan chunks using the same logic as pd-agent
+// elaborateScanChunks processes distributed scan chunks with optimized port scanning
+// Uses the scan configuration (templates and assets) to perform a single port scan upfront,
+// then processes chunks normally, filtering targets based on port scan results
 func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+	slog.Info("Starting distributed scan processing",
+		"scan_id", scanID,
+		"meta_id", metaID)
+
+	// Step 1: Perform single port scan on all targets from scan configuration
+	targetsWithOpenPorts := make(map[string]struct{})
+	// If templates are empty, try to get all default nuclei templates
+	templatesToUse := templates
+	if len(templates) == 0 {
+		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+		if defaultTemplateDir != "" {
+			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+			if err == nil && len(allTemplates) > 0 {
+				templatesToUse = allTemplates
+				slog.Info("No templates specified, using all default nuclei templates for port scan",
+					slog.String("scan_id", scanID),
+					slog.Int("template_count", len(allTemplates)))
+			}
+		}
+	}
+	if len(assets) > 0 && len(templatesToUse) > 0 {
+		// Create temporary files for port filtering
+		tmpInputFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			slog.Error("Failed to create temp file for targets",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+		defer func() {
+			_ = os.RemoveAll(tmpInputFile)
+		}()
+
+		targetsContent := strings.Join(assets, "\n")
+		if err := os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm); err != nil {
+			slog.Error("Failed to write targets to temp file",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+
+		tmpTemplatesFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			slog.Error("Failed to create temp file for templates",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+		defer func() {
+			_ = os.RemoveAll(tmpTemplatesFile)
+		}()
+
+		templatesContent := strings.Join(templatesToUse, "\n")
+		if err := os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm); err != nil {
+			slog.Error("Failed to write templates to temp file",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+
+		// Perform port scan on all targets
+		filteredTargets, _, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "pre-scan")
+		if err != nil {
+			slog.Warn("Error filtering targets by template ports, proceeding with all targets", "scan_id", scanID, "error", err)
+			// If port scan fails, proceed with all targets
+			for _, target := range assets {
+				targetsWithOpenPorts[target] = struct{}{}
+			}
+		} else {
+			// Create map of targets with open ports
+			for _, target := range filteredTargets {
+				targetsWithOpenPorts[target] = struct{}{}
+			}
+		}
+	} else {
+		// No targets or templates, all targets will be skipped
+		if len(assets) == 0 {
+			slog.Info("No targets found", "scan_id", scanID)
+		} else if len(templatesToUse) == 0 {
+			slog.Info("No templates found (including default templates)", "scan_id", scanID)
+		}
+	}
+
+	slog.Info("Port scan completed", "scan_id", scanID, "targets_with_open_ports", len(targetsWithOpenPorts), "total_targets", len(assets))
+
+	// Step 2: Use processChunks with a custom executeChunk callback that filters targets
+	// Note: We need to capture targetsWithOpenPorts and config in the closure
 	r.processChunks(ctx, scanID, "scan", func(ctx context.Context, chunk *TaskChunk) error {
-		// Execute the chunk using the shared scan execution logic
-		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, chunk.Targets)
+		// Filter chunk targets to only include those with open ports
+		filteredChunkTargets := []string{}
+		for _, target := range chunk.Targets {
+			if _, hasOpenPorts := targetsWithOpenPorts[target]; hasOpenPorts {
+				filteredChunkTargets = append(filteredChunkTargets, target)
+			}
+		}
+
+		// If no targets have open ports, skip nuclei execution
+		// Note: processChunks will have already set status to in_progress, so we'll ACK it
+		if len(filteredChunkTargets) == 0 {
+			slog.Info("Skipping chunk - all targets are unresponsive (no open ports)", "scan_id", scanID, "chunk_id", chunk.ChunkID, "original_target_count", len(chunk.Targets))
+			// Return nil to indicate success (chunk is skipped, not failed)
+			// processChunks will mark it as ACK
+			return nil
+		}
+
+		slog.Info("Processing chunk with filtered targets", "scan_id", scanID, "chunk_id", chunk.ChunkID, "filtered_target_count", len(filteredChunkTargets), "original_target_count", len(chunk.Targets))
+
+		// Execute nuclei scan with filtered targets
+		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, filteredChunkTargets)
 		return nil
 	})
 }
 
 // elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	gologger.Info().Msgf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets))
+	slog.Info("elaborateScan", "scan_id", scanID, "meta_id", metaID, "templates", len(templates), "assets", len(assets))
 	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets)
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
 // using the same logic as pd-agent
 func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	gologger.Info().Msgf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets))
+	slog.Info("Starting enumeration", "enum_id", enumID, "meta_id", metaID, "steps", len(steps), "assets", len(assets))
 
 	// Set output directory if agent output is specified
 	var outputDir string
@@ -1190,14 +1488,14 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
 	taskResult, err := pkg.Run(ctx, task)
 	if err != nil {
-		gologger.Error().Msgf("Enumeration execution failed: %v", err)
+		slog.Error("Enumeration execution failed", "error", err)
 		return
 	}
 
 	if taskResult != nil {
-		gologger.Info().Msgf("Completed enumeration for enumID=%s, metaID=%s\nStdout: %s\nStderr: %s", enumID, metaID, taskResult.Stdout, taskResult.Stderr)
+		slog.Info("Completed enumeration", "enum_id", enumID, "meta_id", metaID, "stdout", taskResult.Stdout, "stderr", taskResult.Stderr)
 	} else {
-		gologger.Info().Msgf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID)
+		slog.Info("Completed enumeration", "enum_id", enumID, "meta_id", metaID)
 	}
 }
 
@@ -1212,7 +1510,7 @@ func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID 
 
 // elaborateEnumeration processes a non-distributed enumeration
 func (r *Runner) elaborateEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	gologger.Info().Msgf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets))
+	slog.Info("elaborateEnumeration", "enum_id", enumID, "meta_id", metaID, "steps", len(steps), "assets", len(assets))
 	r.executeEnumeration(ctx, enumID, metaID, steps, assets)
 }
 
@@ -1376,9 +1674,9 @@ func (r *Runner) In(ctx context.Context) error {
 	defer func() {
 		ticker.Stop()
 		if err := r.Out(context.TODO()); err != nil {
-			gologger.Warning().Msgf("error deregistering agent: %v", err)
+			slog.Warn("error deregistering agent", "error", err)
 		} else {
-			gologger.Info().Msgf("deregistered agent")
+			slog.Info("deregistered agent")
 		}
 	}()
 
@@ -1410,7 +1708,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	headers := map[string]string{"x-api-key": PDCPApiKey}
 	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
 	if resp.Error != nil {
-		gologger.Error().Msgf("failed to fetch agent info: %v", resp.Error)
+		slog.Error("failed to fetch agent info", "error", resp.Error)
 		// don't return, fallback to local tags
 	}
 
@@ -1433,21 +1731,21 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			lastUpdate = agentInfo.LastUpdate
 
 			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
-				gologger.Info().Msgf("Using tags from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Tags, tagsToUse)
+				slog.Info("Using tags from server", "server", PdcpApiServer, "tags", agentInfo.Tags, "previous_tags", tagsToUse)
 				tagsToUse = agentInfo.Tags
 				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
 			}
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
-				gologger.Info().Msgf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse)
+				slog.Info("Using networks from server", "server", PdcpApiServer, "networks", agentInfo.Networks, "previous_networks", networksToUse)
 				networksToUse = agentInfo.Networks
 				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
-				gologger.Info().Msgf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName)
+				slog.Info("Using agent name from server", "server", PdcpApiServer, "name", agentInfo.Name, "previous_name", r.options.AgentName)
 				r.options.AgentName = agentInfo.Name
 			}
-			gologger.Info().Msgf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339))
+			slog.Info("Agent last updated at", "time", lastUpdate.Format(time.RFC3339))
 		}
 	}
 
@@ -1455,7 +1753,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inURL, nil)
 	if err != nil {
-		gologger.Error().Msgf("failed to create /in request: %v", err)
+		slog.Error("failed to create /in request", "error", err)
 		return err
 	}
 
@@ -1487,31 +1785,31 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	// we simply send an empty string
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
-		gologger.Info().Msgf("Discovered network subnets: %v", networkSubnets)
+		slog.Info("Discovered network subnets", "subnets", networkSubnets)
 		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
-		gologger.Info().Msg("No network subnets discovered")
+		slog.Info("No network subnets discovered")
 	}
 
 	req.URL.RawQuery = q.Encode()
 
 	inResp := r.makeRequest(ctx, http.MethodPost, req.URL.String(), nil, headers)
 	if inResp.Error != nil {
-		gologger.Error().Msgf("failed to call /in endpoint: %v", inResp.Error)
+		slog.Error("failed to call /in endpoint", "error", inResp.Error)
 		return inResp.Error
 	}
 
 	if inResp.StatusCode != http.StatusOK {
-		gologger.Error().Msgf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(inResp.Body))
+		slog.Error("unexpected status code from /in endpoint", "status_code", inResp.StatusCode, "body", string(inResp.Body))
 		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(inResp.Body))
 	}
 
 	if !isRegistered {
-		gologger.Info().Msgf("agent registered successfully")
+		slog.Info("agent registered successfully")
 		isRegistered = true
 	}
 
-	gologger.Info().Msgf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339))
+	slog.Info("/in requests sent", "count", r.inRequestCount, "agent_up_since", r.agentStartTime.Format(time.RFC3339))
 	return nil
 }
 
@@ -1520,7 +1818,7 @@ func (r *Runner) Out(ctx context.Context) error {
 	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", PdcpApiServer, r.options.AgentId)
 	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
-		gologger.Error().Msgf("failed to call /out endpoint: %v", resp.Error)
+		slog.Error("failed to call /out endpoint", "error", resp.Error)
 		return resp.Error
 	}
 
@@ -1529,7 +1827,7 @@ func (r *Runner) Out(ctx context.Context) error {
 	}
 
 	if isRegistered {
-		gologger.Info().Msgf("agent deregistered successfully")
+		slog.Info("agent deregistered successfully")
 		isRegistered = false
 	}
 
@@ -1577,7 +1875,7 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 	// Get network interfaces
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		gologger.Error().Msgf("Error getting network interfaces: %v", err)
+		slog.Error("Error getting network interfaces", "error", err)
 	} else {
 		for _, iface := range interfaces {
 			addrs, err := iface.Addrs()
@@ -1607,7 +1905,7 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 
 	content, err := os.ReadFile(hostsFile)
 	if err != nil {
-		gologger.Error().Msgf("Error reading hosts file: %v", err)
+		slog.Error("Error reading hosts file", "error", err)
 	} else {
 		lines := strings.Split(string(content), "\n")
 		for _, line := range lines {
@@ -1667,7 +1965,7 @@ func getCachedK8sSubnets() []string {
 	k8sSubnetsCacheOnce.Do(func() {
 		k8sSubnetsCache = getK8sSubnets()
 		if len(k8sSubnetsCache) > 0 {
-			gologger.Info().Msgf("Cached %d Kubernetes subnets for reuse", len(k8sSubnetsCache))
+			slog.Info("Cached Kubernetes subnets for reuse", "count", len(k8sSubnetsCache))
 		}
 	})
 	return k8sSubnetsCache
@@ -1681,20 +1979,20 @@ func getK8sSubnets() []string {
 	if os.Getenv("LOCAL_K8S") == "true" {
 		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
 		if err != nil {
-			gologger.Error().Msgf("Error building kubeconfig: %v", err)
+			slog.Error("Error building kubeconfig", "error", err)
 			return []string{}
 		}
 	} else {
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			gologger.Error().Msgf("Error getting in-cluster config: %v", err)
+			slog.Error("Error getting in-cluster config", "error", err)
 			return []string{}
 		}
 	}
 
 	kubeapiClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		gologger.Error().Msgf("Error getting kubeapi client: %v", err)
+		slog.Error("Error getting kubeapi client", "error", err)
 		return []string{}
 	}
 
@@ -1714,19 +2012,19 @@ func getK8sSubnets() []string {
 				serviceCidrs = append(serviceCidrs, item.Spec.CIDRs...)
 			}
 		} else {
-			gologger.Debug().Msgf("ServiceCIDR list failed (v1: %v, v1beta1: %v)", err, errBeta)
+			slog.Debug("ServiceCIDR list failed", "v1_error", err, "v1beta1_error", errBeta)
 		}
 	}
 
 	if len(serviceCidrs) > 0 {
-		gologger.Info().Msgf("Found %d service CIDRs: %v", len(serviceCidrs), serviceCidrs)
+		slog.Info("Found service CIDRs", "count", len(serviceCidrs), "cidrs", serviceCidrs)
 		assets = append(assets, serviceCidrs...)
 	}
 
 	// Get Cluster CIDRs (Node IPs and Pod CIDRs)
 	nodes, err := kubeapiClient.CoreV1().Nodes().List(context.Background(), v1.ListOptions{})
 	if err != nil {
-		gologger.Error().Msgf("Error listing nodes to derive cluster CIDRs: %v", err)
+		slog.Error("Error listing nodes to derive cluster CIDRs", "error", err)
 		return assets
 	}
 
@@ -1779,13 +2077,13 @@ func getK8sSubnets() []string {
 	// Calculate supernets for node IPs and pod CIDRs
 	if len(nodeIPs) > 0 {
 		nodeSupernets := supernetMultiple(nodeIPs)
-		gologger.Info().Msgf("Aggregated %d node IPs into %d supernets: %v", len(nodeIPs), len(nodeSupernets), nodeSupernets)
+		slog.Info("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets), "supernets", nodeSupernets)
 		assets = append(assets, nodeSupernets...)
 	}
 
 	if len(podCidrs) > 0 {
 		podSupernets := supernetMultiple(podCidrs)
-		gologger.Info().Msgf("Aggregated %d pod CIDRs into %d supernets: %v", len(podCidrs), len(podSupernets), podSupernets)
+		slog.Info("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets), "supernets", podSupernets)
 		assets = append(assets, podSupernets...)
 	}
 
@@ -1906,14 +2204,14 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 // 	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
 // 	ifs, err := pcap.FindAllDevs()
 // 	if err != nil {
-// 		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
+// 		slog.Error("Could not list interfaces for passive discovery: %v", err)
 // 		return
 // 	}
 // 	for _, iface := range ifs {
 // 		go func(iface pcap.Interface) {
 // 			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
 // 			if err != nil {
-// 				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
+// 				slog.Error("Could not open interface %s: %v", iface.Name, err)
 // 				return
 // 			}
 // 			defer handle.Close()
@@ -1931,7 +2229,7 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 // 			}
 // 		}(iface)
 // 	}
-// 	gologger.Info().Msg("Started passive discovery on all interfaces")
+// 	slog.Info("Started passive discovery on all interfaces")
 // }
 
 // PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
@@ -1989,13 +2287,13 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	}
 
 	// Log info about removed steps
-	gologger.Info().Msgf("Removing unsupported steps from enumeration \"%s\": %s", enumerationName, strings.Join(unsupportedSteps, ", "))
+	slog.Info("Removing unsupported steps from enumeration", "enumeration_name", enumerationName, "unsupported_steps", strings.Join(unsupportedSteps, ", "))
 
 	// Parse the entire config as JSON to properly reconstruct it
 	var configMap map[string]interface{}
 	if err := json.Unmarshal([]byte(enumerationConfig), &configMap); err != nil {
 		// If parsing fails, return original config
-		gologger.Warning().Msgf("Failed to parse enumeration config for sanitization: %v", err)
+		slog.Warn("Failed to parse enumeration config for sanitization", "error", err)
 		return enumerationConfig
 	}
 
@@ -2006,7 +2304,7 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	sanitizedConfig, err := json.Marshal(configMap)
 	if err != nil {
 		// If marshaling fails, return original config
-		gologger.Warning().Msgf("Failed to marshal sanitized enumeration config: %v", err)
+		slog.Warn("Failed to marshal sanitized enumeration config", "error", err)
 		return enumerationConfig
 	}
 
@@ -2070,7 +2368,7 @@ func parseOptions() *Options {
 	)
 
 	if err := flagSet.Parse(); err != nil {
-		gologger.Fatal().Msgf("%s\n", err)
+		slog.Error("error", "error", err)
 	}
 
 	// Parse environment variables (env vars take precedence as defaults)
@@ -2125,17 +2423,17 @@ func configureLogging(options *Options) {
 // func deleteCacheFileForTesting() {
 // 	homeDir, err := os.UserHomeDir()
 // 	if err != nil {
-// 		gologger.Warning().Msgf("Could not get home directory to delete cache file: %v", err)
+// 		slog.Warn("Could not get home directory to delete cache file: %v", err)
 // 		return
 // 	}
 
 // 	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
 // 	if err := os.Remove(cacheFile); err != nil {
 // 		if !os.IsNotExist(err) {
-// 			gologger.Warning().Msgf("Could not delete cache file (this is ok if it doesn't exist): %v", err)
+// 			slog.Warn("Could not delete cache file (this is ok if it doesn't exist): %v", err)
 // 		}
 // 	} else {
-// 		gologger.Info().Msg("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
+// 		slog.Info("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
 // 	}
 // }
 
@@ -2156,12 +2454,12 @@ func main() {
 	}
 
 	if len(missingTools) > 0 {
-		gologger.Fatal().Msgf("Missing required prerequisites: %s", strings.Join(missingTools, ", "))
+		slog.Error("Missing required prerequisites", "tools", strings.Join(missingTools, ", "))
 	}
 
 	pdcpRunner, err := NewRunner(options)
 	if err != nil {
-		gologger.Fatal().Msgf("Could not create runner: %s\n", err)
+		slog.Error("Could not create runner", "error", err)
 	}
 
 	c := make(chan os.Signal, 1)
@@ -2179,6 +2477,6 @@ func main() {
 
 	err = pdcpRunner.Run(ctx)
 	if err != nil {
-		gologger.Fatal().Msgf("Could not run pd-agent: %s\n", err)
+		slog.Error("Could not run pd-agent", "error", err)
 	}
 }

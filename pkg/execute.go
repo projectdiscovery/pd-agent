@@ -300,7 +300,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	return assetId, nil
 }
 
-func parseScanArgs(_ context.Context, task *types.Task) (envs, args []string, removeFunc func(), err error) {
+func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, removeFunc func(), err error) {
 	args = append(args, task.Tool.String())
 
 	tmpInputFile, tmpConfigFile, inputRemoveFunc, err := prepareInput(task)
