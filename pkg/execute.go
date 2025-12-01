@@ -79,27 +79,31 @@ func CheckAllPrerequisites() map[string]PrerequisiteCheckResult {
 	return CheckPrerequisites(prerequisites)
 }
 
-func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
+func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, error) {
 	// Verify tool exists in PATH
 	if err := verifyToolInPath(task.Tool.String()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if task.Options.ScanID != "" {
-		envs, args, removeFunc, err := parseScanArgs(ctx, task)
+		envs, args, outputFile, removeFunc, err := parseScanArgs(ctx, task)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer removeFunc()
 
 		taskResult, err := runCommand(ctx, envs, args)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		ExtractUnresponsiveHosts(taskResult)
 
-		return taskResult, nil
+		var outputFiles []string
+		if outputFile != "" {
+			outputFiles = []string{outputFile}
+		}
+		return taskResult, outputFiles, nil
 	} else if task.Options.EnumerationID != "" {
 		// run: dnsx | naabu | httpx - for now execute all the tools in parallel
 		// for the time being we ignore the steps from cloud
@@ -110,11 +114,12 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 			naabuOutput     []string
 			naabuOutputFile string
 			manualAssetId   = task.Options.EnumerationID
+			outputFiles     []string // Collect all output files from enumeration tools
 		)
 		for _, tool := range tools {
 			// Verify tool exists in PATH
 			if err := verifyToolInPath(tool.Name); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 
 			// Use naabu output as input for subsequent tools (httpx, tlsx)
@@ -129,13 +134,12 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 
 			// todo: remove this patch for testing
 			// currentTask.Options.Hosts = []string{"192.168.179.2:8000"}
-			envs, args, removeFunc, err := parseGenericArgs(&currentTask)
+			envs, args, outputFile, removeFunc, err := parseGenericArgs(&currentTask)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			defer removeFunc()
 			args[0] = tool.Name
-			var outputFile string
 			// handle per tool specific args
 			if task.Options.Output != "" {
 				_ = fileutil.CreateFolder(task.Options.Output)
@@ -152,13 +156,19 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 			}
 			args = append(args, tool.Args...)
 			if _, err := runCommand(ctx, envs, args); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
+
+			// Collect output file for cleanup
+			if outputFile != "" {
+				outputFiles = append(outputFiles, outputFile)
+			}
+
 			// if tool is naabu get the output for next steps
 			if args[0] == "naabu" && outputFile != "" {
 				c, err := fileutil.ReadFile(outputFile)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				for line := range c {
 					naabuOutput = append(naabuOutput, line)
@@ -173,14 +183,15 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, error) {
 				} else {
 					manualAssetId, err = uploadToCloud(ctx, task, naabuOutputFile)
 					if err != nil {
-						return nil, err
+						return nil, nil, err
 					}
 				}
 			}
 		}
+		return nil, outputFiles, nil
 	}
 
-	return nil, nil
+	return nil, nil, nil
 }
 
 func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
@@ -300,12 +311,12 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	return assetId, nil
 }
 
-func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, removeFunc func(), err error) {
+func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, outputFile string, removeFunc func(), err error) {
 	args = append(args, task.Tool.String())
 
 	tmpInputFile, tmpConfigFile, inputRemoveFunc, err := prepareInput(task)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
+		return nil, nil, "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
 	var tmpTemplatesFile string
@@ -314,7 +325,7 @@ func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, 
 		tmpTemplatesFile, err = fileutil.GetTempFileName()
 		if err != nil {
 			inputRemoveFunc()
-			return nil, nil, nil, fmt.Errorf("failed to create temp file for templates: %w", err)
+			return nil, nil, "", nil, fmt.Errorf("failed to create temp file for templates: %w", err)
 		}
 
 		// Write templates to file, one per line (standard format for nuclei template files)
@@ -322,7 +333,7 @@ func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, 
 		if err := os.WriteFile(tmpTemplatesFile, conversion.Bytes(templatesContent), os.ModePerm); err != nil {
 			inputRemoveFunc()
 			_ = os.RemoveAll(tmpTemplatesFile)
-			return nil, nil, nil, fmt.Errorf("failed to write templates to temp file: %w", err)
+			return nil, nil, "", nil, fmt.Errorf("failed to write templates to temp file: %w", err)
 		}
 
 		args = append(args, "-templates", tmpTemplatesFile)
@@ -349,6 +360,9 @@ func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, 
 	if task.Tool == types.Nuclei {
 		// Always add -lfa flag
 		args = append(args, "-lfa")
+		// Always add log upload flags
+		args = append(args, "-ms")    // matcher-status
+		args = append(args, "-jsonl") // JSON lines format
 		// Enable -code only if there are more than 2GB of RAM
 		if hasMoreThan2GBRAM() {
 			args = append(args, "-code")
@@ -361,11 +375,12 @@ func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, 
 
 	if task.Options.Output != "" {
 		_ = fileutil.CreateFolder(task.Options.Output)
-		outputFile := filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
+		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
 		args = append(args, "-o", outputFile)
 	}
 
 	// Create combined remove function that cleans up all temporary files
+	// Note: outputFile is NOT deleted here - it will be processed and deleted separately
 	removeFunc = func() {
 		inputRemoveFunc()
 		if tmpTemplatesFile != "" {
@@ -373,7 +388,7 @@ func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, 
 		}
 	}
 
-	return envs, args, removeFunc, nil
+	return envs, args, outputFile, removeFunc, nil
 }
 
 // getTotalRAM returns the total physical/installed RAM in bytes (not virtual memory)
@@ -544,14 +559,14 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 	return taskResult, nil
 }
 
-func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(), err error) {
+func parseGenericArgs(task *types.Task) (envs, args []string, outputFile string, removeFunc func(), err error) {
 	envs = getEnvs()
 
 	args = append(args, task.Tool.String())
 
 	tmpFile, _, removeFunc, err := prepareInput(task)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to create temp file: %w", err)
+		return nil, nil, "", nil, fmt.Errorf("failed to create temp file: %w", err)
 	}
 
 	args = append(args,
@@ -560,5 +575,5 @@ func parseGenericArgs(task *types.Task) (envs, args []string, removeFunc func(),
 		// "-verbose",
 	)
 
-	return envs, args, removeFunc, nil
+	return envs, args, outputFile, removeFunc, nil
 }

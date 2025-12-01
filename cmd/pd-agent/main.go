@@ -28,7 +28,9 @@ import (
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
+	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	mapsutil "github.com/projectdiscovery/utils/maps"
@@ -87,6 +89,7 @@ type Options struct {
 	ChunkParallelism       int  // Number of chunks to process in parallel
 	ScanParallelism        int  // Number of scans to process in parallel
 	EnumerationParallelism int  // Number of enumerations to process in parallel
+	KeepOutputFiles        bool // If true, don't delete output files after processing
 }
 
 // ScanCache represents cached scan execution information
@@ -1112,7 +1115,21 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 // executeNucleiScan is the shared implementation for executing nuclei scans
 // using the same logic as pd-agent
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+// If scanBatcher is nil, a new batcher will be created for this scan
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+	// Create batcher for this scan if not provided (if log upload is enabled)
+	if scanBatcher == nil && scanlog.IsLogUploadEnabled() {
+		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
+		// Defer batcher stop when scan completes
+		defer func() {
+			if scanBatcher != nil {
+				scanBatcher.Stop()
+				scanBatcher.WaitDone() // Wait for any pending uploads
+				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
+			}
+		}()
+	}
+
 	// If templates are empty, use all default nuclei templates
 	templatesToUse := templates
 	if len(templates) == 0 {
@@ -1200,10 +1217,50 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 
 	// Execute using the same pkg.Run logic as pd-agent
 	slog.Info("Starting nuclei scan", "scan_id", scanID, "meta_id", metaID, "filtered_targets", len(filteredTargets))
-	taskResult, err := pkg.Run(ctx, task)
+	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
 		slog.Error("Nuclei scan execution failed", "error", err)
 		return
+	}
+
+	// For scans, there should be only one output file
+	var outputFile string
+	if len(outputFiles) > 0 {
+		outputFile = outputFiles[0]
+	}
+
+	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
+	if scanBatcher != nil && taskResult != nil && outputFile != "" {
+		// Pass output file path to ExtractLogEntries
+		logEntries, err := scanlog.ExtractLogEntries(taskResult, scanID, outputFile)
+		if err != nil {
+			slog.Warn("Failed to parse log entries", "scan_id", scanID, "error", err)
+		} else {
+			for _, entry := range logEntries {
+				scanBatcher.Append(entry)
+			}
+			slog.Debug("Added log entries to batcher",
+				"scan_id", scanID,
+				"entry_count", len(logEntries),
+				"source", "output_file",
+				"chunk_id", metaID)
+		}
+	}
+
+	// Cleanup output file immediately after processing (unless keep-output-files flag is set)
+	// This prevents file accumulation during long scans with many chunks
+	if outputFile != "" {
+		if !r.options.KeepOutputFiles {
+			// Default behavior: delete file after processing
+			if err := os.Remove(outputFile); err != nil {
+				slog.Warn("Failed to delete scan output file", "file", outputFile, "error", err)
+			} else {
+				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", metaID)
+			}
+		} else {
+			// Flag is set: keep file intact for debugging/analysis
+			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", metaID)
+		}
 	}
 
 	if taskResult != nil {
@@ -1343,6 +1400,20 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 		"scan_id", scanID,
 		"meta_id", metaID)
 
+	// Create batcher for this scan (if log upload is enabled)
+	var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
+	if scanlog.IsLogUploadEnabled() {
+		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
+		// Defer batcher stop when scan completes
+		defer func() {
+			if scanBatcher != nil {
+				scanBatcher.Stop()
+				scanBatcher.WaitDone() // Wait for any pending uploads
+				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
+			}
+		}()
+	}
+
 	// Step 1: Perform single port scan on all targets from scan configuration
 	targetsWithOpenPorts := make(map[string]struct{})
 	// If templates are empty, try to get all default nuclei templates
@@ -1446,8 +1517,8 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 
 		slog.Info("Processing chunk with filtered targets", "scan_id", scanID, "chunk_id", chunk.ChunkID, "filtered_target_count", len(filteredChunkTargets), "original_target_count", len(chunk.Targets))
 
-		// Execute nuclei scan with filtered targets
-		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, filteredChunkTargets)
+		// Execute nuclei scan with filtered targets and shared batcher
+		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, filteredChunkTargets, scanBatcher)
 		return nil
 	})
 }
@@ -1455,7 +1526,7 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 // elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
 	slog.Info("elaborateScan", "scan_id", scanID, "meta_id", metaID, "templates", len(templates), "assets", len(assets))
-	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets)
+	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil) // nil batcher = create new one
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
@@ -1486,10 +1557,33 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 
 	// Execute using the same pkg.Run logic as pd-agent
 	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
-	taskResult, err := pkg.Run(ctx, task)
+	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
 		slog.Error("Enumeration execution failed", "error", err)
 		return
+	}
+
+	// Cleanup all enumeration output files immediately after processing (unless keep-output-files flag is set)
+	// This prevents file accumulation during long enumerations with many chunks
+	if len(outputFiles) > 0 {
+		if !r.options.KeepOutputFiles {
+			// Default behavior: delete files after processing
+			for _, outputFile := range outputFiles {
+				if outputFile != "" {
+					if err := os.Remove(outputFile); err != nil {
+						slog.Warn("Failed to delete enumeration output file", "file", outputFile, "error", err)
+					} else {
+						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", metaID)
+					}
+				}
+			}
+		} else {
+			// Flag is set: keep files intact for debugging/analysis
+			slog.Debug("Keeping enumeration output files (keep-output-files flag is set)",
+				"files", outputFiles,
+				"count", len(outputFiles),
+				"chunk_id", metaID)
+		}
 	}
 
 	if taskResult != nil {
@@ -2357,6 +2451,7 @@ func parseOptions() *Options {
 
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
+		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
@@ -2386,6 +2481,11 @@ func parseOptions() *Options {
 	}
 	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
 		options.Verbose = true
+	}
+
+	// Parse keep-output-files from environment variable
+	if keepOutputFiles := os.Getenv("PDCP_KEEP_OUTPUT_FILES"); keepOutputFiles == "true" || keepOutputFiles == "1" {
+		options.KeepOutputFiles = true
 	}
 
 	// Note: AgentName initialization moved to NewRunner() after AgentId generation
