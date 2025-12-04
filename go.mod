@@ -6,6 +6,7 @@ require (
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.59
+	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/utils v0.6.0
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.23.7
