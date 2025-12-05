@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/projectdiscovery/mapcidr"
+	"github.com/projectdiscovery/pd-agent/pkg/peerdiscovery/common"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	syncutil "github.com/projectdiscovery/utils/sync"
 )
@@ -35,7 +36,7 @@ func DiscoverPeers(ctx context.Context) ([]Peer, error) {
 	}
 
 	// Get /64 network ranges from local interfaces
-	networks, err := getLocalNetworks64()
+	networks, err := common.GetLocalNetworks64()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local networks: %w", err)
 	}
@@ -73,90 +74,6 @@ done:
 	})
 
 	return result, nil
-}
-
-// getLocalNetworks64 returns all local network interfaces as /64 IPNet ranges
-func getLocalNetworks64() ([]*net.IPNet, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-
-	var networks []*net.IPNet
-	seen := make(map[string]struct{})
-
-	for _, iface := range interfaces {
-		// Skip loopback and down interfaces
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			ip := ipNet.IP
-
-			// Only process IPv6 addresses
-			if ip.To4() != nil {
-				continue
-			}
-
-			// Must be 16 bytes for IPv6
-			if len(ip) != net.IPv6len {
-				continue
-			}
-
-			// Skip loopback
-			if ip.IsLoopback() {
-				continue
-			}
-
-			// Skip multicast
-			if ip.IsMulticast() {
-				continue
-			}
-
-			// Only process link-local and ULA (private) addresses
-			// Link-local: fe80::/10
-			// ULA: fc00::/7 (actually fd00::/8 is used for ULA)
-			isLinkLocal := ip.IsLinkLocalUnicast()
-			// ULA addresses start with fd (fd00::/8)
-			isULA := len(ip) == net.IPv6len && ip[0] == 0xfd
-
-			if !isLinkLocal && !isULA {
-				continue
-			}
-
-			// Convert to /64 network (IPv6 standard)
-			mask64 := net.CIDRMask(64, 128)
-			network64 := &net.IPNet{
-				IP:   ip.Mask(mask64),
-				Mask: mask64,
-			}
-
-			// Avoid duplicates
-			key := network64.String()
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-
-			networks = append(networks, network64)
-		}
-	}
-
-	return networks, nil
 }
 
 // scanNetwork64 scans a /64 network range to discover NDP peers

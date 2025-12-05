@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/projectdiscovery/mapcidr"
+	"github.com/projectdiscovery/pd-agent/pkg/peerdiscovery/common"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	syncutil "github.com/projectdiscovery/utils/sync"
 )
@@ -35,7 +36,7 @@ func DiscoverPeers(ctx context.Context) ([]Peer, error) {
 	}
 
 	// Get /24 network ranges from local interfaces
-	networks, err := getLocalNetworks24()
+	networks, err := common.GetLocalNetworks24()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get local networks: %w", err)
 	}
@@ -73,68 +74,6 @@ done:
 	})
 
 	return result, nil
-}
-
-// getLocalNetworks24 returns all local network interfaces as /24 IPNet ranges
-func getLocalNetworks24() ([]*net.IPNet, error) {
-	interfaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
-	}
-
-	var networks []*net.IPNet
-	seen := make(map[string]struct{})
-
-	for _, iface := range interfaces {
-		// Skip loopback and down interfaces
-		if iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if iface.Flags&net.FlagUp == 0 {
-			continue
-		}
-
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-
-		for _, addr := range addrs {
-			ipNet, ok := addr.(*net.IPNet)
-			if !ok {
-				continue
-			}
-
-			// Only process IPv4 addresses
-			ip := ipNet.IP.To4()
-			if ip == nil {
-				continue
-			}
-
-			// Only process private networks
-			if !ip.IsPrivate() {
-				continue
-			}
-
-			// Convert to /24 network
-			mask24 := net.CIDRMask(24, 32)
-			network24 := &net.IPNet{
-				IP:   ip.Mask(mask24),
-				Mask: mask24,
-			}
-
-			// Avoid duplicates
-			key := network24.String()
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-
-			networks = append(networks, network24)
-		}
-	}
-
-	return networks, nil
 }
 
 // scanNetwork24 scans a /24 network range to discover ARP peers
