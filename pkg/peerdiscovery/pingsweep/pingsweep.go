@@ -157,7 +157,7 @@ func scanNetwork(ctx context.Context, network *net.IPNet) ([]Peer, error) {
 		}
 
 		// Skip network and broadcast/multicast addresses
-		if isNetworkOrBroadcast(ip, network) {
+		if common.IsNetworkOrBroadcast(ip, network) {
 			continue
 		}
 
@@ -315,34 +315,4 @@ func createSharedICMPConnection(isIPv6 bool) (net.PacketConn, error) {
 		return icmp.ListenPacket("ip6:ipv6-icmp", "::")
 	}
 	return icmp.ListenPacket("ip4:icmp", "0.0.0.0")
-}
-
-// isNetworkOrBroadcast checks if an IP is the network or broadcast/multicast address
-func isNetworkOrBroadcast(ip net.IP, network *net.IPNet) bool {
-	// Network address
-	if ip.Equal(network.IP) {
-		return true
-	}
-
-	// For IPv4, check broadcast address
-	if ip4 := ip.To4(); ip4 != nil {
-		broadcast := make(net.IP, len(network.IP))
-		copy(broadcast, network.IP)
-		for i := range broadcast {
-			broadcast[i] |= ^network.Mask[i]
-		}
-		return ip.Equal(broadcast)
-	}
-
-	// For IPv6, check multicast addresses
-	if ip.IsMulticast() {
-		return true
-	}
-
-	// Skip all-nodes multicast (ff02::1)
-	if ip.Equal(net.ParseIP("ff02::1")) {
-		return true
-	}
-
-	return false
 }

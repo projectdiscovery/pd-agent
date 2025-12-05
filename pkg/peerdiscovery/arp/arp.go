@@ -129,7 +129,7 @@ func scanNetwork24(ctx context.Context, network *net.IPNet) ([]Peer, error) {
 		}
 
 		// Skip network and broadcast addresses
-		if isNetworkOrBroadcast(ip, network) {
+		if common.IsNetworkOrBroadcast(ip, network) {
 			continue
 		}
 
@@ -180,20 +180,4 @@ done:
 	}
 
 	return discovered, nil
-}
-
-// isNetworkOrBroadcast checks if an IP is the network or broadcast address
-func isNetworkOrBroadcast(ip net.IP, network *net.IPNet) bool {
-	// Network address
-	if ip.Equal(network.IP) {
-		return true
-	}
-
-	// Broadcast address
-	broadcast := make(net.IP, len(network.IP))
-	copy(broadcast, network.IP)
-	for i := range broadcast {
-		broadcast[i] |= ^network.Mask[i]
-	}
-	return ip.Equal(broadcast)
 }
