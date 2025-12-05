@@ -3,6 +3,7 @@ module github.com/projectdiscovery/pd-agent
 go 1.24.1
 
 require (
+	github.com/google/gopacket v1.1.19
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.59
