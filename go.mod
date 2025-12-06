@@ -3,13 +3,16 @@ module github.com/projectdiscovery/pd-agent
 go 1.24.1
 
 require (
+	github.com/google/gopacket v1.1.19
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.61
+	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/utils v0.7.3
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.23.7
 	github.com/tidwall/gjson v1.18.0
+	golang.org/x/net v0.47.0
 	golang.org/x/sys v0.38.0
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.2
@@ -77,7 +80,6 @@ require (
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	golang.org/x/exp v0.0.0-20250813145105-42675adae3e6 // indirect
 	golang.org/x/mod v0.29.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
