@@ -18,6 +18,10 @@ builds:
   ignore:
     - goos: darwin
       goarch: '386'
+    - goos: darwin
+      goarch: amd64
+    - goos: darwin
+      goarch: arm64
     - goos: linux
       goarch: '386'
     - goos: linux

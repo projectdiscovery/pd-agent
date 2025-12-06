@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -27,9 +28,11 @@ import (
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
+	fileutil "github.com/projectdiscovery/utils/file"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	syncutil "github.com/projectdiscovery/utils/sync"
@@ -40,6 +43,28 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// getAllNucleiTemplates recursively finds all .yaml and .yml files in the nuclei template directory
+func getAllNucleiTemplates(templateDir string) ([]string, error) {
+	var templates []string
+	err := filepath.Walk(templateDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			ext := filepath.Ext(path)
+			if ext == ".yaml" || ext == ".yml" {
+				// Get relative path from template directory
+				relPath, err := filepath.Rel(templateDir, path)
+				if err == nil {
+					templates = append(templates, relPath)
+				}
+			}
+		}
+		return nil
+	})
+	return templates, err
+}
 
 var (
 	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
@@ -64,6 +89,7 @@ type Options struct {
 	ChunkParallelism       int  // Number of chunks to process in parallel
 	ScanParallelism        int  // Number of scans to process in parallel
 	EnumerationParallelism int  // Number of enumerations to process in parallel
+	KeepOutputFiles        bool // If true, don't delete output files after processing
 }
 
 // ScanCache represents cached scan execution information
@@ -167,8 +193,7 @@ func (c *LocalCache) MarkScanExecuted(id string, configHash string) {
 	// Async save
 	go func() {
 		if err := c.Save(); err != nil {
-			// Note: LocalCache doesn't have access to Runner, using fmt for now
-			fmt.Printf("[WARNING] error saving cache: %v\n", err)
+			slog.Warn("error saving cache", "error", err)
 		}
 	}()
 }
@@ -185,8 +210,7 @@ func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
 	// Async save
 	go func() {
 		if err := c.Save(); err != nil {
-			// Note: LocalCache doesn't have access to Runner, using fmt for now
-			fmt.Printf("[WARNING] error saving cache: %v\n", err)
+			slog.Warn("error saving cache", "error", err)
 		}
 	}()
 }
@@ -729,6 +753,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 				return true
 			}
 
+			// Skip scans in finished state
+			status := value.Get("status").String()
+			if strings.EqualFold(status, "finished") {
+				return true
+			}
+
 			// Capture all data from gjson.Result before passing to goroutine
 			scanName := value.Get("name").String()
 			agentId := value.Get("agent_id").String()
@@ -742,6 +772,20 @@ func (r *Runner) getScans(ctx context.Context) error {
 				templates = append(templates, value.String())
 				return true
 			})
+
+			// If no templates specified, use all default nuclei templates
+			if len(templates) == 0 {
+				defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+				if defaultTemplateDir != "" {
+					allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+					if err == nil && len(allTemplates) > 0 {
+						templates = allTemplates
+						slog.Info("No templates specified, using all default nuclei templates", "scan_id", id, "template_count", len(allTemplates), "template_dir", defaultTemplateDir)
+					} else if err != nil {
+						slog.Warn("Failed to get default nuclei templates", "scan_id", id, "template_dir", defaultTemplateDir, "error", err)
+					}
+				}
+			}
 
 			agentBehavior := value.Get("agent_behavior").String()
 
@@ -885,11 +929,93 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 				// Skip if this exact configuration was already executed
 				if r.localCache.HasScanBeenExecuted(scanID, configHash) && !schedule.Exists() {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it was already executed with same configuration\n", name))
+					slog.Debug("skipping scan as it was already executed with same configuration", "name", name)
 					return
 				}
 
-				r.logHelper("INFO", fmt.Sprintf("scan \"%s\" enqueued...\n", name))
+				slog.Info("scan enqueued", "scan_name", name, "scan_id", scanID)
+
+				// DEBUG: Print scan configuration and naabu results, then exit
+				fmt.Println("=== DEBUG: Scan Configuration ===")
+				fmt.Printf("Scan ID: %s\n", scanID)
+				fmt.Printf("Scan Name: %s\n", name)
+				fmt.Printf("\nTargets (%d):\n", len(assets))
+				for i, target := range assets {
+					fmt.Printf("  [%d] %s\n", i+1, target)
+				}
+
+				// If no templates specified, get all default nuclei templates
+				templatesToUse := tmpls
+				if len(tmpls) == 0 {
+					fmt.Printf("\nTemplates: NONE SPECIFIED - Using all default nuclei templates\n")
+					// Get all templates from nuclei template directory
+					defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+					if defaultTemplateDir != "" {
+						allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+						if err == nil {
+							templatesToUse = allTemplates
+							fmt.Printf("Found %d default templates in %s\n", len(allTemplates), defaultTemplateDir)
+						} else {
+							fmt.Printf("Error getting default templates: %v\n", err)
+						}
+					} else {
+						fmt.Printf("Warning: Could not determine nuclei template directory\n")
+					}
+				} else {
+					fmt.Printf("\nTemplates (%d):\n", len(tmpls))
+					for i, tmpl := range tmpls {
+						fmt.Printf("  [%d] %s\n", i+1, tmpl)
+					}
+				}
+
+				// Perform naabu scan for debugging
+				if len(assets) > 0 && len(templatesToUse) > 0 {
+					tmpInputFile, err := fileutil.GetTempFileName()
+					if err == nil {
+						defer func() {
+							_ = os.RemoveAll(tmpInputFile)
+						}()
+						targetsContent := strings.Join(assets, "\n")
+						_ = os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm)
+
+						tmpTemplatesFile, err := fileutil.GetTempFileName()
+						if err == nil {
+							defer func() {
+								_ = os.RemoveAll(tmpTemplatesFile)
+							}()
+							templatesContent := strings.Join(templatesToUse, "\n")
+							_ = os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm)
+
+							filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "debug")
+							fmt.Println("\n=== DEBUG: Naabu Results ===")
+							if err != nil {
+								fmt.Printf("Error: %v\n", err)
+							} else {
+								fmt.Printf("Extracted Ports: %v\n", extractedPorts)
+								fmt.Printf("\nTargets with Open Ports (%d):\n", len(filteredTargets))
+								for i, target := range filteredTargets {
+									fmt.Printf("  [%d] %s\n", i+1, target)
+								}
+								fmt.Printf("\nTargets without Open Ports (%d):\n", len(assets)-len(filteredTargets))
+								targetsWithPorts := make(map[string]struct{})
+								for _, t := range filteredTargets {
+									targetsWithPorts[t] = struct{}{}
+								}
+								count := 0
+								for _, target := range assets {
+									if _, has := targetsWithPorts[target]; !has {
+										count++
+										fmt.Printf("  [%d] %s\n", count, target)
+									}
+								}
+							}
+						}
+					}
+				} else {
+					fmt.Println("\n=== DEBUG: Skipping naabu scan (no targets or templates) ===")
+				}
+				fmt.Println("\n=== DEBUG: Scan analysis complete, continuing with normal processing ===")
+				// END DEBUG CODE
 
 				_ = pendingTasks.Set(metaId, struct{}{})
 
@@ -960,6 +1086,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
 			id := value.Get("id").String()
 			if id == "" {
+				return true
+			}
+
+			// Skip enumerations in finished state
+			status := value.Get("status").String()
+			if strings.EqualFold(status, "finished") {
 				return true
 			}
 
@@ -1079,7 +1211,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				// if hasPassiveDiscovery && r.options.PassiveDiscovery {
 				// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
 				// 	if len(discoveredIPs) > 0 {
-				// 		gologger.Info().Msgf("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
+				// 		slog.Info("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
 				// 		assets = append(assets, discoveredIPs...)
 				// 	}
 				// }
@@ -1114,19 +1246,97 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 // executeNucleiScan is the shared implementation for executing nuclei scans
 // using the same logic as pd-agent
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+// If scanBatcher is nil, a new batcher will be created for this scan
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+	// Create batcher for this scan if not provided (if log upload is enabled)
+	if scanBatcher == nil && scanlog.IsLogUploadEnabled() {
+		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
+		// Defer batcher stop when scan completes
+		defer func() {
+			if scanBatcher != nil {
+				scanBatcher.Stop()
+				scanBatcher.WaitDone() // Wait for any pending uploads
+				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
+			}
+		}()
+	}
+
+	// If templates are empty, use all default nuclei templates
+	templatesToUse := templates
+	if len(templates) == 0 {
+		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+		if defaultTemplateDir != "" {
+			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+			if err == nil && len(allTemplates) > 0 {
+				templatesToUse = allTemplates
+				slog.Info("No templates specified, using all default nuclei templates",
+					"scan_id", scanID,
+					"chunk_id", metaID,
+					"template_count", len(allTemplates))
+			}
+		}
+	}
 	// Set output directory if agent output is specified
 	var outputDir string
 	if r.options.AgentOutput != "" {
 		outputDir = filepath.Join(r.options.AgentOutput, metaID)
 	}
 
-	// Create task similar to pd-agent
+	// Create temporary files for filtering
+	tmpInputFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		slog.Error("Failed to create temp file for targets", slog.Any("error", err))
+		return
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpInputFile)
+	}()
+
+	// Write targets to temp file
+	targetsContent := strings.Join(assets, "\n")
+	if err := os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm); err != nil {
+		slog.Error("Failed to write targets to temp file", "error", err)
+		return
+	}
+
+	tmpTemplatesFile, err := fileutil.GetTempFileName()
+	if err != nil {
+		slog.Error("Failed to create temp file for templates", "error", err)
+		return
+	}
+	defer func() {
+		_ = os.RemoveAll(tmpTemplatesFile)
+	}()
+
+	// Write templates to temp file
+	templatesContent := strings.Join(templatesToUse, "\n")
+	if err := os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm); err != nil {
+		slog.Error("Failed to write templates to temp file", "error", err)
+		return
+	}
+
+	// Filter targets by template ports using naabu
+	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, metaID)
+	if err != nil {
+		slog.Warn("Error filtering targets by template ports, proceeding with all targets", "error", err)
+		filteredTargets = assets
+	}
+
+	// If naabu found no hosts with open ports, skip nuclei execution
+	if len(filteredTargets) == 0 {
+		slog.Info("Skipping nuclei execution - no hosts with open ports found after naabu scan",
+			"scan_id", scanID,
+			"chunk_id", metaID,
+			"extracted_ports", extractedPorts)
+		return
+	}
+
+	// Update task with filtered targets
 	task := &types.Task{
 		Tool: types.Nuclei,
 		Options: types.Options{
-			Hosts:     assets,
-			Templates: templates,
+			Hosts:     filteredTargets,
+			Templates: templatesToUse,
 			Silent:    true,
 			ScanID:    scanID,
 			Config:    config,
@@ -1138,10 +1348,50 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 
 	// Execute using the same pkg.Run logic as pd-agent
 	r.logHelper("INFO", fmt.Sprintf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
-	taskResult, err := pkg.Run(ctx, task)
+	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("Nuclei scan execution failed: %v", err))
 		return
+	}
+
+	// For scans, there should be only one output file
+	var outputFile string
+	if len(outputFiles) > 0 {
+		outputFile = outputFiles[0]
+	}
+
+	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
+	if scanBatcher != nil && taskResult != nil && outputFile != "" {
+		// Pass output file path to ExtractLogEntries
+		logEntries, err := scanlog.ExtractLogEntries(taskResult, scanID, outputFile)
+		if err != nil {
+			slog.Warn("Failed to parse log entries", "scan_id", scanID, "error", err)
+		} else {
+			for _, entry := range logEntries {
+				scanBatcher.Append(entry)
+			}
+			slog.Debug("Added log entries to batcher",
+				"scan_id", scanID,
+				"entry_count", len(logEntries),
+				"source", "output_file",
+				"chunk_id", metaID)
+		}
+	}
+
+	// Cleanup output file immediately after processing (unless keep-output-files flag is set)
+	// This prevents file accumulation during long scans with many chunks
+	if outputFile != "" {
+		if !r.options.KeepOutputFiles {
+			// Default behavior: delete file after processing
+			if err := os.Remove(outputFile); err != nil {
+				slog.Warn("Failed to delete scan output file", "file", outputFile, "error", err)
+			} else {
+				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", metaID)
+			}
+		} else {
+			// Flag is set: keep file intact for debugging/analysis
+			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", metaID)
+		}
 	}
 
 	if taskResult != nil {
@@ -1279,11 +1529,133 @@ Complete:
 	_, _ = r.getTaskChunk(ctx, taskID, true)
 }
 
-// elaborateScanChunks processes distributed scan chunks using the same logic as pd-agent
+// elaborateScanChunks processes distributed scan chunks with optimized port scanning
+// Uses the scan configuration (templates and assets) to perform a single port scan upfront,
+// then processes chunks normally, filtering targets based on port scan results
 func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
+	slog.Info("Starting distributed scan processing",
+		"scan_id", scanID,
+		"meta_id", metaID)
+
+	// Create batcher for this scan (if log upload is enabled)
+	var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
+	if scanlog.IsLogUploadEnabled() {
+		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
+		// Defer batcher stop when scan completes
+		defer func() {
+			if scanBatcher != nil {
+				scanBatcher.Stop()
+				scanBatcher.WaitDone() // Wait for any pending uploads
+				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
+			}
+		}()
+	}
+
+	// Step 1: Perform single port scan on all targets from scan configuration
+	targetsWithOpenPorts := make(map[string]struct{})
+	// If templates are empty, try to get all default nuclei templates
+	templatesToUse := templates
+	if len(templates) == 0 {
+		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+		if defaultTemplateDir != "" {
+			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+			if err == nil && len(allTemplates) > 0 {
+				templatesToUse = allTemplates
+				slog.Info("No templates specified, using all default nuclei templates for port scan",
+					slog.String("scan_id", scanID),
+					slog.Int("template_count", len(allTemplates)))
+			}
+		}
+	}
+	if len(assets) > 0 && len(templatesToUse) > 0 {
+		// Create temporary files for port filtering
+		tmpInputFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			slog.Error("Failed to create temp file for targets",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+		defer func() {
+			_ = os.RemoveAll(tmpInputFile)
+		}()
+
+		targetsContent := strings.Join(assets, "\n")
+		if err := os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm); err != nil {
+			slog.Error("Failed to write targets to temp file",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+
+		tmpTemplatesFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			slog.Error("Failed to create temp file for templates",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+		defer func() {
+			_ = os.RemoveAll(tmpTemplatesFile)
+		}()
+
+		templatesContent := strings.Join(templatesToUse, "\n")
+		if err := os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm); err != nil {
+			slog.Error("Failed to write templates to temp file",
+				slog.String("scan_id", scanID),
+				slog.Any("error", err))
+			return
+		}
+
+		// Perform port scan on all targets
+		filteredTargets, _, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "pre-scan")
+		if err != nil {
+			slog.Warn("Error filtering targets by template ports, proceeding with all targets", "scan_id", scanID, "error", err)
+			// If port scan fails, proceed with all targets
+			for _, target := range assets {
+				targetsWithOpenPorts[target] = struct{}{}
+			}
+		} else {
+			// Create map of targets with open ports
+			for _, target := range filteredTargets {
+				targetsWithOpenPorts[target] = struct{}{}
+			}
+		}
+	} else {
+		// No targets or templates, all targets will be skipped
+		if len(assets) == 0 {
+			slog.Info("No targets found", "scan_id", scanID)
+		} else if len(templatesToUse) == 0 {
+			slog.Info("No templates found (including default templates)", "scan_id", scanID)
+		}
+	}
+
+	slog.Info("Port scan completed", "scan_id", scanID, "targets_with_open_ports", len(targetsWithOpenPorts), "total_targets", len(assets))
+
+	// Step 2: Use processChunks with a custom executeChunk callback that filters targets
+	// Note: We need to capture targetsWithOpenPorts and config in the closure
 	r.processChunks(ctx, scanID, "scan", func(ctx context.Context, chunk *TaskChunk) error {
-		// Execute the chunk using the shared scan execution logic
-		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, chunk.Targets)
+		// Filter chunk targets to only include those with open ports
+		filteredChunkTargets := []string{}
+		for _, target := range chunk.Targets {
+			if _, hasOpenPorts := targetsWithOpenPorts[target]; hasOpenPorts {
+				filteredChunkTargets = append(filteredChunkTargets, target)
+			}
+		}
+
+		// If no targets have open ports, skip nuclei execution
+		// Note: processChunks will have already set status to in_progress, so we'll ACK it
+		if len(filteredChunkTargets) == 0 {
+			slog.Info("Skipping chunk - all targets are unresponsive (no open ports)", "scan_id", scanID, "chunk_id", chunk.ChunkID, "original_target_count", len(chunk.Targets))
+			// Return nil to indicate success (chunk is skipped, not failed)
+			// processChunks will mark it as ACK
+			return nil
+		}
+
+		slog.Info("Processing chunk with filtered targets", "scan_id", scanID, "chunk_id", chunk.ChunkID, "filtered_target_count", len(filteredChunkTargets), "original_target_count", len(chunk.Targets))
+
+		// Execute nuclei scan with filtered targets and shared batcher
+		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, filteredChunkTargets, scanBatcher)
 		return nil
 	})
 }
@@ -1291,7 +1663,7 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 // elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
 	r.logHelper("INFO", fmt.Sprintf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets)))
-	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets)
+	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil)
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
@@ -1322,10 +1694,33 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 
 	// Execute using the same pkg.Run logic as pd-agent
 	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
-	taskResult, err := pkg.Run(ctx, task)
+	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("Enumeration execution failed: %v", err))
 		return
+	}
+
+	// Cleanup all enumeration output files immediately after processing (unless keep-output-files flag is set)
+	// This prevents file accumulation during long enumerations with many chunks
+	if len(outputFiles) > 0 {
+		if !r.options.KeepOutputFiles {
+			// Default behavior: delete files after processing
+			for _, outputFile := range outputFiles {
+				if outputFile != "" {
+					if err := os.Remove(outputFile); err != nil {
+						slog.Warn("Failed to delete enumeration output file", "file", outputFile, "error", err)
+					} else {
+						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", metaID)
+					}
+				}
+			}
+		} else {
+			// Flag is set: keep files intact for debugging/analysis
+			slog.Debug("Keeping enumeration output files (keep-output-files flag is set)",
+				"files", outputFiles,
+				"count", len(outputFiles),
+				"chunk_id", metaID)
+		}
 	}
 
 	if taskResult != nil {
@@ -1815,20 +2210,20 @@ func getK8sSubnets() []string {
 	if os.Getenv("LOCAL_K8S") == "true" {
 		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
 		if err != nil {
-			fmt.Printf("[ERROR] Error building kubeconfig: %v\n", err)
+			slog.Error("Error building kubeconfig", "error", err)
 			return []string{}
 		}
 	} else {
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			fmt.Printf("[ERROR] Error getting in-cluster config: %v\n", err)
+			slog.Error("Error getting in-cluster config", "error", err)
 			return []string{}
 		}
 	}
 
 	kubeapiClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		fmt.Printf("[ERROR] Error getting kubeapi client: %v\n", err)
+		slog.Error("Error getting kubeapi client", "error", err)
 		return []string{}
 	}
 
@@ -1848,19 +2243,19 @@ func getK8sSubnets() []string {
 				serviceCidrs = append(serviceCidrs, item.Spec.CIDRs...)
 			}
 		} else {
-			fmt.Printf("[DEBUG] ServiceCIDR list failed (v1: %v, v1beta1: %v)\n", err, errBeta)
+			slog.Debug("ServiceCIDR list failed", "v1_error", err, "v1beta1_error", errBeta)
 		}
 	}
 
 	if len(serviceCidrs) > 0 {
-		fmt.Printf("[INFO] Found %d service CIDRs: %v\n", len(serviceCidrs), serviceCidrs)
+		slog.Info("Found service CIDRs", "count", len(serviceCidrs), "cidrs", serviceCidrs)
 		assets = append(assets, serviceCidrs...)
 	}
 
 	// Get Cluster CIDRs (Node IPs and Pod CIDRs)
 	nodes, err := kubeapiClient.CoreV1().Nodes().List(context.Background(), v1.ListOptions{})
 	if err != nil {
-		fmt.Printf("[ERROR] Error listing nodes to derive cluster CIDRs: %v\n", err)
+		slog.Error("Error listing nodes to derive cluster CIDRs", "error", err)
 		return assets
 	}
 
@@ -1913,13 +2308,13 @@ func getK8sSubnets() []string {
 	// Calculate supernets for node IPs and pod CIDRs
 	if len(nodeIPs) > 0 {
 		nodeSupernets := supernetMultiple(nodeIPs)
-		fmt.Printf("[INFO] Aggregated %d node IPs into %d supernets: %v\n", len(nodeIPs), len(nodeSupernets), nodeSupernets)
+		slog.Info("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets), "supernets", nodeSupernets)
 		assets = append(assets, nodeSupernets...)
 	}
 
 	if len(podCidrs) > 0 {
 		podSupernets := supernetMultiple(podCidrs)
-		fmt.Printf("[INFO] Aggregated %d pod CIDRs into %d supernets: %v\n", len(podCidrs), len(podSupernets), podSupernets)
+		slog.Info("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets), "supernets", podSupernets)
 		assets = append(assets, podSupernets...)
 	}
 
@@ -2040,14 +2435,14 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 // 	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
 // 	ifs, err := pcap.FindAllDevs()
 // 	if err != nil {
-// 		gologger.Error().Msgf("Could not list interfaces for passive discovery: %v", err)
+// 		slog.Error("Could not list interfaces for passive discovery: %v", err)
 // 		return
 // 	}
 // 	for _, iface := range ifs {
 // 		go func(iface pcap.Interface) {
 // 			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
 // 			if err != nil {
-// 				gologger.Error().Msgf("Could not open interface %s: %v", iface.Name, err)
+// 				slog.Error("Could not open interface %s: %v", iface.Name, err)
 // 				return
 // 			}
 // 			defer handle.Close()
@@ -2065,7 +2460,7 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 // 			}
 // 		}(iface)
 // 	}
-// 	gologger.Info().Msg("Started passive discovery on all interfaces")
+// 	slog.Info("Started passive discovery on all interfaces")
 // }
 
 // PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
@@ -2193,6 +2588,7 @@ func parseOptions() *Options {
 
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
+		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
@@ -2204,7 +2600,7 @@ func parseOptions() *Options {
 	)
 
 	if err := flagSet.Parse(); err != nil {
-		gologger.Fatal().Msgf("%s\n", err)
+		slog.Error("error", "error", err)
 	}
 
 	// Parse environment variables (env vars take precedence as defaults)
@@ -2222,6 +2618,11 @@ func parseOptions() *Options {
 	}
 	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
 		options.Verbose = true
+	}
+
+	// Parse keep-output-files from environment variable
+	if keepOutputFiles := os.Getenv("PDCP_KEEP_OUTPUT_FILES"); keepOutputFiles == "true" || keepOutputFiles == "1" {
+		options.KeepOutputFiles = true
 	}
 
 	// Note: AgentName initialization moved to NewRunner() after AgentId generation
@@ -2259,17 +2660,17 @@ func configureLogging(options *Options) {
 // func deleteCacheFileForTesting() {
 // 	homeDir, err := os.UserHomeDir()
 // 	if err != nil {
-// 		gologger.Warning().Msgf("Could not get home directory to delete cache file: %v", err)
+// 		slog.Warn("Could not get home directory to delete cache file: %v", err)
 // 		return
 // 	}
 
 // 	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
 // 	if err := os.Remove(cacheFile); err != nil {
 // 		if !os.IsNotExist(err) {
-// 			gologger.Warning().Msgf("Could not delete cache file (this is ok if it doesn't exist): %v", err)
+// 			slog.Warn("Could not delete cache file (this is ok if it doesn't exist): %v", err)
 // 		}
 // 	} else {
-// 		gologger.Info().Msg("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
+// 		slog.Info("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
 // 	}
 // }
 
@@ -2290,12 +2691,12 @@ func main() {
 	}
 
 	if len(missingTools) > 0 {
-		gologger.Fatal().Msgf("Missing required prerequisites: %s", strings.Join(missingTools, ", "))
+		slog.Error("Missing required prerequisites", "tools", strings.Join(missingTools, ", "))
 	}
 
 	pdcpRunner, err := NewRunner(options)
 	if err != nil {
-		gologger.Fatal().Msgf("Could not create runner: %s\n", err)
+		slog.Error("Could not create runner", "error", err)
 	}
 
 	c := make(chan os.Signal, 1)
