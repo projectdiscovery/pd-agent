@@ -3,12 +3,13 @@ module github.com/projectdiscovery/pd-agent
 go 1.24.2
 
 require (
+	github.com/dustin/go-humanize v1.0.1
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
-	github.com/projectdiscovery/gologger v1.1.60
+	github.com/projectdiscovery/gologger v1.1.61
 	github.com/projectdiscovery/naabu/v2 v2.3.7
 	github.com/projectdiscovery/nuclei/v3 v3.5.1
-	github.com/projectdiscovery/utils v0.7.0
+	github.com/projectdiscovery/utils v0.7.3
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
@@ -52,7 +53,6 @@ require (
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
-	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/fatih/color v1.18.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
@@ -75,7 +75,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/josharian/intern v1.0.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/compress v1.18.1 // indirect
+	github.com/klauspost/compress v1.18.2 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/klauspost/pgzip v1.2.6 // indirect
 	github.com/logrusorgru/aurora v2.0.3+incompatible // indirect
@@ -105,16 +105,16 @@ require (
 	github.com/projectdiscovery/cdncheck v1.2.10 // indirect
 	github.com/projectdiscovery/clistats v0.1.1 // indirect
 	github.com/projectdiscovery/dnsx v1.2.2 // indirect
-	github.com/projectdiscovery/fastdialer v0.4.16 // indirect
+	github.com/projectdiscovery/fastdialer v0.4.17 // indirect
 	github.com/projectdiscovery/freeport v0.0.7 // indirect
-	github.com/projectdiscovery/hmap v0.0.95 // indirect
+	github.com/projectdiscovery/hmap v0.0.96 // indirect
 	github.com/projectdiscovery/ipranger v0.0.53 // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20240226150047-2e2c51e35983 // indirect
 	github.com/projectdiscovery/mapcidr v1.1.97 // indirect
-	github.com/projectdiscovery/networkpolicy v0.1.28 // indirect
+	github.com/projectdiscovery/networkpolicy v0.1.29 // indirect
 	github.com/projectdiscovery/ratelimit v0.0.82 // indirect
-	github.com/projectdiscovery/retryabledns v1.0.108 // indirect
-	github.com/projectdiscovery/retryablehttp-go v1.0.131 // indirect
+	github.com/projectdiscovery/retryabledns v1.0.109 // indirect
+	github.com/projectdiscovery/retryablehttp-go v1.0.132 // indirect
 	github.com/projectdiscovery/uncover v1.1.0 // indirect
 	github.com/refraction-networking/utls v1.7.1 // indirect
 	github.com/remeh/sizedwaitgroup v1.0.0 // indirect

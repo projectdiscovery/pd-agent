@@ -270,7 +270,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
 		if err != nil {
 			if attempt < maxRetries {
-				slog.Warn("error creating authenticated client, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
+				r.logHelper("WARNING", fmt.Sprintf("error creating authenticated client (attempt %d/%d): %v, retrying...", attempt, maxRetries, err))
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -289,7 +289,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 		if err != nil {
 			if attempt < maxRetries {
-				slog.Warn("error creating request, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
+				r.logHelper("WARNING", fmt.Sprintf("error creating request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err))
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -308,7 +308,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		resp, err := client.Do(req)
 		if err != nil {
 			if attempt < maxRetries {
-				slog.Warn("error sending request, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
+				r.logHelper("WARNING", fmt.Sprintf("error sending request (attempt %d/%d): %v, retrying...", attempt, maxRetries, err))
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -323,7 +323,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 		_ = resp.Body.Close()
 		if err != nil {
 			if attempt < maxRetries {
-				slog.Warn("error reading response, retrying", "attempt", attempt, "max_retries", maxRetries, "error", err)
+				r.logHelper("WARNING", fmt.Sprintf("error reading response (attempt %d/%d): %v, retrying...", attempt, maxRetries, err))
 				time.Sleep(200 * time.Millisecond)
 				continue
 			}
@@ -356,6 +356,7 @@ type Runner struct {
 	localCache     *LocalCache
 	inRequestCount int       // Number of /in requests sent
 	agentStartTime time.Time // When the agent started
+	logBatcher     *batcher.Batcher[string]
 }
 
 var (
@@ -375,7 +376,7 @@ var (
 // agent assignment, tags, and networks. Logs each check in verbose mode.
 // Returns true if the task should be skipped (no matching conditions), false if it should continue.
 func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTags, agentNetworks gjson.Result) bool {
-	slog.Debug("checking task", "task_type", taskType, "id", id, "name", name)
+	r.logHelper("VERBOSE", fmt.Sprintf("checking %s (%s - %s)", taskType, id, name))
 
 	// Check if agent ID matches (case-insensitive)
 	isAssignedToAgent := strings.EqualFold(taskAgentId, r.options.AgentId)
@@ -384,9 +385,9 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if taskAgentId == "" {
-		slog.Debug("checking id", "result", result, "task_agent_id", "<empty>", "agent_id", r.options.AgentId)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking id: %s (task: <empty>, agent: %s)", result, r.options.AgentId))
 	} else {
-		slog.Debug("checking id", "result", result, "task_agent_id", taskAgentId, "agent_id", r.options.AgentId)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId))
 	}
 
 	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
@@ -411,9 +412,9 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if len(taskAgentTags) > 0 {
-		slog.Debug("checking tags", "result", result, "task_agent_tags", taskAgentTags, "agent_tags", r.options.AgentTags)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags))
 	} else {
-		slog.Debug("checking tags", "result", result, "task_agent_tags", "<none>", "agent_tags", r.options.AgentTags)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags))
 	}
 
 	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
@@ -438,21 +439,133 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if len(taskAgentNetworks) > 0 {
-		slog.Debug("checking networks", "result", result, "task_agent_networks", taskAgentNetworks, "agent_networks", r.options.AgentNetworks)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks))
 	} else {
-		slog.Debug("checking networks", "result", result, "task_agent_networks", "<none>", "agent_networks", r.options.AgentNetworks)
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks))
 	}
 
 	// If any condition matches, don't skip
 	shouldContinue := isAssignedToAgent || hasAgentTag || hasAgentNetwork
 
 	if shouldContinue {
-		slog.Debug("task is being enqueued (matching conditions found)", "task_type", taskType, "id", id, "name", name)
+		r.logHelper("VERBOSE", fmt.Sprintf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name))
 		return false // Don't skip
 	}
 
-	slog.Debug("task is being skipped (no matching conditions)", "task_type", taskType, "id", id, "name", name)
+	r.logHelper("VERBOSE", fmt.Sprintf("  %s (%s - %s) is being skipped (no matching conditions)", taskType, id, name))
 	return true // Skip
+}
+
+// LogEntry represents a log entry structure
+type LogEntry struct {
+	Timestamp time.Time `json:"timestamp"`
+	Level     string    `json:"level"`
+	Message   string    `json:"message"`
+}
+
+// AgentLogUploadRequest represents the request payload for log upload
+type AgentLogUploadRequest struct {
+	OS             string   `json:"os,omitempty"`
+	Arch           string   `json:"arch,omitempty"`
+	ID             string   `json:"id,omitempty"`
+	Name           string   `json:"name,omitempty"`
+	Tags           []string `json:"tags,omitempty"`
+	Networks       []string `json:"networks,omitempty"`
+	NetworkSubnets []string `json:"network_subnets,omitempty"`
+	Type           string   `json:"type,omitempty"`
+	Logs           []string `json:"logs"`
+}
+
+// AgentLogUploadResponse represents the response from log upload endpoint
+type AgentLogUploadResponse struct {
+	Status  string `json:"status"`
+	Message string `json:"message"`
+}
+
+// logHelper prints the log to console and appends JSON marshalled string to the batcher
+func (r *Runner) logHelper(level, message string) {
+	entry := LogEntry{
+		Timestamp: time.Now().UTC(),
+		Level:     level,
+		Message:   message,
+	}
+
+	// Print to console
+	fmt.Printf("[%s] %s: %s\n", entry.Timestamp.Format(time.RFC3339), entry.Level, entry.Message)
+
+	// Marshal to JSON
+	jsonData, err := json.Marshal(entry)
+	if err != nil {
+		r.logHelper("WARNING", fmt.Sprintf("error marshaling log entry: %v", err))
+		return
+	}
+
+	// Append to batcher
+	if r.logBatcher != nil {
+		r.logBatcher.Append(string(jsonData))
+	}
+}
+
+// uploadLogs sends batched logs to the /v1/agents/{id}/log endpoint
+func (r *Runner) uploadLogs(logs []string) {
+	if len(logs) == 0 {
+		return
+	}
+
+	// Get metadata same as /in endpoint
+	tagsToUse := r.options.AgentTags
+	networksToUse := r.options.AgentNetworks
+	networkSubnets := r.getAutoDiscoveredTargets()
+
+	// Build request payload
+	payload := AgentLogUploadRequest{
+		OS:             runtime.GOOS,
+		Arch:           runtime.GOARCH,
+		ID:             r.options.AgentId,
+		Name:           r.options.AgentName,
+		Tags:           tagsToUse,
+		Networks:       networksToUse,
+		NetworkSubnets: networkSubnets,
+		Type:           "agent",
+		Logs:           logs,
+	}
+
+	// Marshal payload to JSON
+	jsonPayload, err := json.Marshal(payload)
+	if err != nil {
+		r.logHelper("WARNING", fmt.Sprintf("error marshaling log upload payload: %v", err))
+		return
+	}
+
+	// Create request
+	apiURL := fmt.Sprintf("%s/v1/agents/%s/log", PdcpApiServer, r.options.AgentId)
+	headers := map[string]string{
+		"x-api-key":    PDCPApiKey,
+		"Content-Type": "application/json",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp := r.makeRequest(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonPayload), headers)
+	if resp.Error != nil {
+		r.logHelper("WARNING", fmt.Sprintf("error uploading logs: %v", resp.Error))
+		return
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from log upload endpoint: %d, body: %s", resp.StatusCode, string(resp.Body)))
+		return
+	}
+
+	// Parse response
+	var uploadResp AgentLogUploadResponse
+	if err := json.Unmarshal(resp.Body, &uploadResp); err != nil {
+		r.logHelper("WARNING", fmt.Sprintf("error unmarshaling log upload response: %v", err))
+		return
+	}
+
+	r.logHelper("VERBOSE", fmt.Sprintf("uploaded %d log entries: %s", len(logs), uploadResp.Message))
 }
 
 // NewRunner creates a new runner instance
@@ -464,7 +577,7 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	if err := r.localCache.Load(); err != nil {
-		slog.Warn("error loading cache", "error", err)
+		r.logHelper("WARNING", fmt.Sprintf("error loading cache: %v", err))
 	}
 
 	// Generate a unique agent ID using xid (similar to tunnelx)
@@ -484,6 +597,16 @@ func NewRunner(options *Options) (*Runner, error) {
 		}
 	}
 
+	// Initialize log batcher
+	r.logBatcher = batcher.New[string](
+		batcher.WithMaxCapacity[string](100),              // Max 100 logs per batch
+		batcher.WithFlushInterval[string](30*time.Second), // Flush every 30 seconds
+		batcher.WithFlushCallback[string](r.uploadLogs),   // Upload callback
+	)
+
+	// Start the batcher
+	go r.logBatcher.Run()
+
 	// Start passive discovery if enabled
 	// if r.options.PassiveDiscovery {
 	// 	go r.startPassiveDiscovery()
@@ -495,10 +618,10 @@ func NewRunner(options *Options) (*Runner, error) {
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
 	// Recommend the time to use on platform dashboard to schedule the scans
-	slog.Info("platform dashboard uses UTC timezone")
+	r.logHelper("INFO", "platform dashboard uses UTC timezone")
 	now := time.Now().UTC()
 	recommendedTime := now.Add(5 * time.Minute)
-	slog.Info("recommended time to schedule scans", "time", recommendedTime.Format("2006-01-02 03:04:05 PM MST"), "timezone", "UTC")
+	r.logHelper("INFO", fmt.Sprintf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST")))
 
 	var infoMessage strings.Builder
 	infoMessage.WriteString("running in agent mode")
@@ -516,7 +639,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		infoMessage.WriteString(" (networks: [])")
 	}
 
-	slog.Info(infoMessage.String())
+	r.logHelper("INFO", infoMessage.String())
 
 	return r.agentMode(ctx)
 }
@@ -524,7 +647,14 @@ func (r *Runner) Run(ctx context.Context) error {
 // agentMode runs the agent in monitoring mode
 func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	defer func() {
+		cancel()
+		// Ensure batcher is stopped on shutdown
+		if r.logBatcher != nil {
+			r.logBatcher.Stop()
+			r.logBatcher.WaitDone()
+		}
+	}()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -532,7 +662,8 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		defer wg.Done()
 
 		if err := r.In(ctx); err != nil {
-			slog.Error("error registering agent", "error", err)
+			r.logHelper("FATAL", fmt.Sprintf("error registering agent: %v", err))
+			os.Exit(1)
 		}
 	}()
 
@@ -556,7 +687,7 @@ func (r *Runner) monitorScans(ctx context.Context) {
 			return
 		default:
 			if err := r.getScans(ctx); err != nil {
-				slog.Error("Error getting scans", "error", err)
+				r.logHelper("ERROR", fmt.Sprintf("Error getting scans: %v", err))
 			}
 			time.Sleep(time.Minute)
 		}
@@ -571,7 +702,7 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 			return
 		default:
 			if err := r.getEnumerations(ctx); err != nil {
-				slog.Error("Error getting enumerations", "error", err)
+				r.logHelper("ERROR", fmt.Sprintf("Error getting enumerations: %v", err))
 			}
 			time.Sleep(time.Minute)
 		}
@@ -580,12 +711,12 @@ func (r *Runner) monitorEnumerations(ctx context.Context) {
 
 // getScans fetches and processes scans from the API
 func (r *Runner) getScans(ctx context.Context) error {
-	slog.Debug("Retrieving scans")
+	r.logHelper("VERBOSE", "Retrieving scans...")
 	apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.ScanParallelism))
 	if err != nil {
-		slog.Error("Error creating syncutil", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
 		return err
 	}
 
@@ -610,10 +741,10 @@ func (r *Runner) getScans(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			slog.Debug("Total pages", "total_pages", totalPages)
+			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
 		}
 
-		slog.Debug("Processing page", "current_page", currentPage, "total_pages", totalPages)
+		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
 
 		// Process scans in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -673,7 +804,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				if startTimeStr != "" {
 					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
 					if err != nil {
-						slog.Error("Error parsing start time", "error", err)
+						r.logHelper("ERROR", fmt.Sprintf("Error parsing start time: %v", err))
 						return
 					}
 					targetExecutionTime = parsedStartTime
@@ -684,7 +815,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					if nextRun != "" {
 						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
 						if err != nil {
-							slog.Error("Error parsing next run time", "error", err)
+							r.logHelper("ERROR", fmt.Sprintf("Error parsing next run time: %v", err))
 							return
 						}
 						if !targetExecutionTime.IsZero() {
@@ -701,7 +832,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						slog.Debug("skipping scan as it's scheduled", "name", name, "scheduled_time", targetExecutionTime, "current_time", now)
+						r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
 						return
 					}
 				}
@@ -710,19 +841,19 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					slog.Debug("skipping scan as it's already completed recently", "name", name)
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already completed recently\n", name))
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					slog.Debug("skipping scan as it's already in progress", "name", name)
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already in progress\n", name))
 					return
 				}
 
 				// Fetch minimal config first to compute hash
 				scanConfig, err := r.fetchScanConfig(scanID)
 				if err != nil {
-					slog.Error("Error fetching scan config", "scan_id", scanID, "error", err)
+					r.logHelper("ERROR", fmt.Sprintf("Error fetching scan config for ID %s: %v", scanID, err))
 					return
 				}
 
@@ -739,7 +870,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				for id := range scanConfigIds {
 					scanConfig, err := r.fetchSingleConfig(id)
 					if err != nil {
-						slog.Error("Error fetching scan config", "config_id", id, "error", err)
+						r.logHelper("ERROR", fmt.Sprintf("Error fetching scan config for ID %s: %v", id, err))
 					}
 					scanConfigIds[id] = scanConfig
 				}
@@ -755,7 +886,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 							// Decode base64
 							decoded, err := base64.StdEncoding.DecodeString(configValue)
 							if err != nil {
-								slog.Error("Error decoding base64 config", "error", err)
+								r.logHelper("ERROR", fmt.Sprintf("Error decoding base64 config: %v", err))
 								continue
 							}
 							mergedConfig.Write(decoded)
@@ -780,7 +911,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 				for _, enumerationID := range enumerationIDs {
 					asset, err := r.fetchAssets(enumerationID)
 					if err != nil {
-						slog.Error("Error fetching assets for enumeration", "enumeration_id", enumerationID, "error", err)
+						r.logHelper("ERROR", fmt.Sprintf("Error fetching assets for enumeration ID %s: %v", enumerationID, err))
 					}
 					assets = append(assets, strings.Split(string(asset), "\n")...)
 				}
@@ -908,7 +1039,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 	}
 
 	// Wait for all scans to complete
-	slog.Debug("Waiting for all scans to complete...")
+	r.logHelper("VERBOSE", "Waiting for all scans to complete...")
 	awg.Wait()
 
 	return nil
@@ -916,12 +1047,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 // getEnumerations fetches and processes enumerations from the API
 func (r *Runner) getEnumerations(ctx context.Context) error {
-	slog.Debug("Retrieving enumerations...")
+	r.logHelper("VERBOSE", "Retrieving enumerations...")
 	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.EnumerationParallelism))
 	if err != nil {
-		slog.Error("Error creating syncutil", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
 		return err
 	}
 
@@ -946,10 +1077,10 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 		// Update totalPages on the first iteration
 		if currentPage == 1 {
 			totalPages = int(result.Get("total_pages").Int())
-			slog.Debug("Total pages", "total_pages", totalPages)
+			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
 		}
 
-		slog.Debug("Processing page", "current_page", currentPage, "total_pages", totalPages)
+		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
 
 		// Process enumerations in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -988,7 +1119,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 				if startTimeStr != "" {
 					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
 					if err != nil {
-						slog.Error("Error parsing start time", "error", err)
+						r.logHelper("ERROR", fmt.Sprintf("Error parsing start time: %v", err))
 						return
 					}
 					targetExecutionTime = parsedStartTime
@@ -999,7 +1130,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					if nextRun != "" {
 						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
 						if err != nil {
-							slog.Error("Error parsing next run time", "error", err)
+							r.logHelper("ERROR", fmt.Sprintf("Error parsing next run time: %v", err))
 							return
 						}
 						if !targetExecutionTime.IsZero() {
@@ -1016,7 +1147,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						slog.Debug("skipping enumeration as it's scheduled", "name", name, "scheduled_time", targetExecutionTime, "current_time", now)
+						r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
 						return
 					}
 				}
@@ -1025,26 +1156,26 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					slog.Debug("skipping enumeration as it's already completed recently", "name", name)
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already completed recently\n", name))
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					slog.Debug("skipping enumeration as it's already in progress", "name", name)
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already in progress\n", name))
 					return
 				}
 
 				// Fetch minimal config first
 				enumerationConfig, err := r.fetchEnumerationConfig(enumID)
 				if err != nil {
-					slog.Error("Error fetching enumeration config", "enum_id", enumID, "error", err)
+					r.logHelper("ERROR", fmt.Sprintf("Error fetching enumeration config for ID %s: %v", enumID, err))
 					return
 				}
 
-				slog.Debug("Before sanitization", "config", enumerationConfig)
+				r.logHelper("VERBOSE", fmt.Sprintf("Before sanitization: %s", enumerationConfig))
 
 				// Sanitize enumeration config (remove unsupported steps)
-				enumerationConfig = sanitizeEnumerationConfig(enumerationConfig, name)
+				enumerationConfig = r.sanitizeEnumerationConfig(enumerationConfig, name)
 
 				// Get basic info needed for hash
 				var assets []string
@@ -1067,11 +1198,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// Check cache before proceeding
 				if r.localCache.HasEnumerationBeenExecuted(enumID, configHash) && !schedule.Exists() {
-					slog.Debug("skipping enumeration as it was already executed with same configuration", "name", name)
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it was already executed with same configuration\n", name))
 					return
 				}
 
-				slog.Info("enumeration enqueued", "name", name)
+				r.logHelper("INFO", fmt.Sprintf("enumeration \"%s\" enqueued...\n", name))
 
 				isDistributed := behavior == "distribute"
 
@@ -1107,7 +1238,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 	}
 
 	// Wait for all enumerations to complete
-	slog.Debug("Waiting for all enumerations to complete...")
+	r.logHelper("VERBOSE", "Waiting for all enumerations to complete...")
 	awg.Wait()
 
 	return nil
@@ -1216,10 +1347,10 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	// Execute using the same pkg.Run logic as pd-agent
-	slog.Info("Starting nuclei scan", "scan_id", scanID, "meta_id", metaID, "filtered_targets", len(filteredTargets))
+	r.logHelper("INFO", fmt.Sprintf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
-		slog.Error("Nuclei scan execution failed", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Nuclei scan execution failed: %v", err))
 		return
 	}
 
@@ -1264,27 +1395,27 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	if taskResult != nil {
-		slog.Info("Completed nuclei scan", "scan_id", scanID, "meta_id", metaID, "stdout", taskResult.Stdout, "stderr", taskResult.Stderr)
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s\nStdout: %s\nStderr: %s", scanID, metaID, taskResult.Stdout, taskResult.Stderr))
 	} else {
-		slog.Info("Completed nuclei scan", "scan_id", scanID, "meta_id", metaID)
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	}
 }
 
 // processChunks is a generic chunk processing method that handles the common logic
 // for pulling chunks, updating status, and executing them
 func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, executeChunk func(ctx context.Context, chunk *TaskChunk) error) {
-	slog.Info("Starting distributed processing", "task_type", taskType, "task_id", taskID)
+	r.logHelper("INFO", fmt.Sprintf("Starting distributed %s processing for %s ID: %s", taskType, taskType, taskID))
 
 	awg, err := syncutil.New(syncutil.WithSize(r.options.ChunkParallelism))
 	if err != nil {
-		slog.Error("Error creating syncutil", "task_type", taskType, "task_id", taskID, "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
 		return
 	}
 
 	chunkCount := 0
 	for {
 		chunkCount++
-		slog.Info("Fetching chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkCount)
+		r.logHelper("INFO", fmt.Sprintf("Fetching chunk #%d for %s ID: %s", chunkCount, taskType, taskID))
 
 		var chunk *TaskChunk
 		var err error
@@ -1301,7 +1432,7 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			currentErr := err.Error()
 			if currentErr == lastErr {
 				// If we get the same error multiple times, likely the task is complete
-				slog.Info("Task completed successfully", "task_type", taskType, "task_id", taskID)
+				r.logHelper("INFO", fmt.Sprintf("%s ID %s completed successfully", taskType, taskID))
 				goto Complete
 			}
 			lastErr = currentErr
@@ -1312,12 +1443,12 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 		}
 
 		if err != nil {
-			slog.Error("Failed to get chunk after retries", "task_type", taskType, "task_id", taskID, "retries", maxRetries, "error", err)
+			r.logHelper("ERROR", fmt.Sprintf("Failed to get chunk after %d retries: %v", maxRetries, err))
 			break
 		}
 
 		if chunk == nil {
-			slog.Info("No more chunks available", "task_type", taskType, "task_id", taskID)
+			r.logHelper("INFO", fmt.Sprintf("No more chunks available for %s ID: %s", taskType, taskID))
 			break
 		}
 
@@ -1329,13 +1460,16 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 		go func(chunkNum int, chunk *TaskChunk) {
 			defer awg.Done()
 
-			slog.Info("Processing chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkNum, "chunk_id", chunk.ChunkID, "target_count", len(chunk.Targets))
+			r.logHelper("INFO", fmt.Sprintf("Processing chunk #%d (ID: %s) with %d targets",
+				chunkNum,
+				chunk.ChunkID,
+				len(chunk.Targets)))
 
 			// Set initial status to in_progress
 			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-				slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "error", err)
+				r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status: %v", taskType, err))
 			} else {
-				slog.Info("Updated chunk status to in_progress", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID)
+				r.logHelper("INFO", fmt.Sprintf("Updated chunk %s status to in_progress", chunk.ChunkID))
 			}
 
 			// Start a goroutine to periodically update status (heartbeat)
@@ -1350,9 +1484,9 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 						return
 					case <-ticker.C:
 						if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
-							slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunkID, "error", err)
+							r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status: %v", taskType, err))
 						} else {
-							slog.Debug("Updated chunk status to in_progress (heartbeat)", "task_type", taskType, "task_id", taskID, "chunk_id", chunkID)
+							r.logHelper("DEBUG", fmt.Sprintf("Updated chunk %s status to in_progress (heartbeat)", chunkID))
 						}
 					}
 				}
@@ -1361,12 +1495,15 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			// Execute the chunk using the provided callback
 			executionErr := executeChunk(ctx, chunk)
 			if executionErr != nil {
-				slog.Error("Error executing chunk", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "error", executionErr)
+				r.logHelper("ERROR", fmt.Sprintf("Error executing %s chunk: %v", taskType, err))
 			}
 
 			// Stop the heartbeat timer
 			timerCtxCancel()
-			slog.Debug("Stopped status update timer for chunk", "chunk_id", chunk.ChunkID)
+			r.logHelper("DEBUG", fmt.Sprintf("Stopped status update timer for chunk %s", chunk.ChunkID))
+
+			// Wait 1 second before marking as complete
+			time.Sleep(time.Second)
 
 			status := TaskChunkStatusAck
 			if executionErr != nil {
@@ -1375,18 +1512,18 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 
 			// Mark the chunk as completed with ACK
 			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, status); err != nil {
-				slog.Error("Error updating chunk status", "task_type", taskType, "task_id", taskID, "chunk_id", chunk.ChunkID, "status", status, "error", err)
+				r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status to %s: %v", taskType, status, err))
 			} else {
-				slog.Info("Successfully completed chunk", "task_type", taskType, "task_id", taskID, "chunk_number", chunkNum, "chunk_id", chunk.ChunkID)
+				r.logHelper("INFO", fmt.Sprintf("Successfully completed chunk #%d (ID: %s)", chunkNum, chunk.ChunkID))
 			}
 		}(currentChunkCount, currentChunk)
 	}
 
 Complete:
 	// Wait for all chunks to complete
-	slog.Info("Waiting for all chunks to complete", "task_type", taskType, "task_id", taskID)
+	r.logHelper("INFO", fmt.Sprintf("Waiting for all chunks to complete for %s ID: %s", taskType, taskID))
 	awg.Wait()
-	slog.Info("Completed processing all chunks", "task_type", taskType, "task_id", taskID, "total_chunks", chunkCount)
+	r.logHelper("INFO", fmt.Sprintf("Completed processing all chunks for %s ID: %s (total chunks: %d)", taskType, taskID, chunkCount))
 
 	// Mark the task as done
 	_, _ = r.getTaskChunk(ctx, taskID, true)
@@ -1525,14 +1662,14 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 
 // elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	slog.Info("elaborateScan", "scan_id", scanID, "meta_id", metaID, "templates", len(templates), "assets", len(assets))
-	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil) // nil batcher = create new one
+	r.logHelper("INFO", fmt.Sprintf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets)))
+	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil)
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
 // using the same logic as pd-agent
 func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	slog.Info("Starting enumeration", "enum_id", enumID, "meta_id", metaID, "steps", len(steps), "assets", len(assets))
+	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
 
 	// Set output directory if agent output is specified
 	var outputDir string
@@ -1559,7 +1696,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	// When EnumerationID is set, pkg.Run will execute enumeration tools (dnsx, naabu, httpx, etc.)
 	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
-		slog.Error("Enumeration execution failed", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Enumeration execution failed: %v", err))
 		return
 	}
 
@@ -1587,9 +1724,9 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	}
 
 	if taskResult != nil {
-		slog.Info("Completed enumeration", "enum_id", enumID, "meta_id", metaID, "stdout", taskResult.Stdout, "stderr", taskResult.Stderr)
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s\nStdout: %s\nStderr: %s", enumID, metaID, taskResult.Stdout, taskResult.Stderr))
 	} else {
-		slog.Info("Completed enumeration", "enum_id", enumID, "meta_id", metaID)
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
 	}
 }
 
@@ -1604,7 +1741,7 @@ func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID 
 
 // elaborateEnumeration processes a non-distributed enumeration
 func (r *Runner) elaborateEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	slog.Info("elaborateEnumeration", "enum_id", enumID, "meta_id", metaID, "steps", len(steps), "assets", len(assets))
+	r.logHelper("INFO", fmt.Sprintf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
 	r.executeEnumeration(ctx, enumID, metaID, steps, assets)
 }
 
@@ -1768,9 +1905,9 @@ func (r *Runner) In(ctx context.Context) error {
 	defer func() {
 		ticker.Stop()
 		if err := r.Out(context.TODO()); err != nil {
-			slog.Warn("error deregistering agent", "error", err)
+			r.logHelper("WARNING", fmt.Sprintf("error deregistering agent: %v", err))
 		} else {
-			slog.Info("deregistered agent")
+			r.logHelper("INFO", "deregistered agent")
 		}
 	}()
 
@@ -1802,7 +1939,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	headers := map[string]string{"x-api-key": PDCPApiKey}
 	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
 	if resp.Error != nil {
-		slog.Error("failed to fetch agent info", "error", resp.Error)
+		r.logHelper("ERROR", fmt.Sprintf("failed to fetch agent info: %v", resp.Error))
 		// don't return, fallback to local tags
 	}
 
@@ -1825,21 +1962,21 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			lastUpdate = agentInfo.LastUpdate
 
 			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
-				slog.Info("Using tags from server", "server", PdcpApiServer, "tags", agentInfo.Tags, "previous_tags", tagsToUse)
+				r.logHelper("INFO", fmt.Sprintf("Using tags from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Tags, tagsToUse))
 				tagsToUse = agentInfo.Tags
 				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
 			}
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
-				slog.Info("Using networks from server", "server", PdcpApiServer, "networks", agentInfo.Networks, "previous_networks", networksToUse)
+				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse))
 				networksToUse = agentInfo.Networks
 				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
-				slog.Info("Using agent name from server", "server", PdcpApiServer, "name", agentInfo.Name, "previous_name", r.options.AgentName)
+				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName))
 				r.options.AgentName = agentInfo.Name
 			}
-			slog.Info("Agent last updated at", "time", lastUpdate.Format(time.RFC3339))
+			r.logHelper("INFO", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
 		}
 	}
 
@@ -1847,7 +1984,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inURL, nil)
 	if err != nil {
-		slog.Error("failed to create /in request", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("failed to create /in request: %v", err))
 		return err
 	}
 
@@ -1879,31 +2016,31 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	// we simply send an empty string
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
-		slog.Info("Discovered network subnets", "subnets", networkSubnets)
+		r.logHelper("INFO", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
 		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
-		slog.Info("No network subnets discovered")
+		r.logHelper("INFO", "No network subnets discovered")
 	}
 
 	req.URL.RawQuery = q.Encode()
 
 	inResp := r.makeRequest(ctx, http.MethodPost, req.URL.String(), nil, headers)
 	if inResp.Error != nil {
-		slog.Error("failed to call /in endpoint", "error", inResp.Error)
+		r.logHelper("ERROR", fmt.Sprintf("failed to call /in endpoint: %v", inResp.Error))
 		return inResp.Error
 	}
 
 	if inResp.StatusCode != http.StatusOK {
-		slog.Error("unexpected status code from /in endpoint", "status_code", inResp.StatusCode, "body", string(inResp.Body))
+		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(inResp.Body)))
 		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(inResp.Body))
 	}
 
 	if !isRegistered {
-		slog.Info("agent registered successfully")
+		r.logHelper("INFO", "agent registered successfully")
 		isRegistered = true
 	}
 
-	slog.Info("/in requests sent", "count", r.inRequestCount, "agent_up_since", r.agentStartTime.Format(time.RFC3339))
+	r.logHelper("INFO", fmt.Sprintf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339)))
 	return nil
 }
 
@@ -1912,7 +2049,7 @@ func (r *Runner) Out(ctx context.Context) error {
 	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", PdcpApiServer, r.options.AgentId)
 	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
-		slog.Error("failed to call /out endpoint", "error", resp.Error)
+		r.logHelper("ERROR", fmt.Sprintf("failed to call /out endpoint: %v", resp.Error))
 		return resp.Error
 	}
 
@@ -1921,7 +2058,7 @@ func (r *Runner) Out(ctx context.Context) error {
 	}
 
 	if isRegistered {
-		slog.Info("agent deregistered successfully")
+		r.logHelper("INFO", "agent deregistered successfully")
 		isRegistered = false
 	}
 
@@ -1969,7 +2106,7 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 	// Get network interfaces
 	interfaces, err := net.Interfaces()
 	if err != nil {
-		slog.Error("Error getting network interfaces", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Error getting network interfaces: %v", err))
 	} else {
 		for _, iface := range interfaces {
 			addrs, err := iface.Addrs()
@@ -1999,7 +2136,7 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 
 	content, err := os.ReadFile(hostsFile)
 	if err != nil {
-		slog.Error("Error reading hosts file", "error", err)
+		r.logHelper("ERROR", fmt.Sprintf("Error reading hosts file: %v", err))
 	} else {
 		lines := strings.Split(string(content), "\n")
 		for _, line := range lines {
@@ -2059,7 +2196,7 @@ func getCachedK8sSubnets() []string {
 	k8sSubnetsCacheOnce.Do(func() {
 		k8sSubnetsCache = getK8sSubnets()
 		if len(k8sSubnetsCache) > 0 {
-			slog.Info("Cached Kubernetes subnets for reuse", "count", len(k8sSubnetsCache))
+			fmt.Printf("[INFO] Cached %d Kubernetes subnets for reuse\n", len(k8sSubnetsCache))
 		}
 	})
 	return k8sSubnetsCache
@@ -2360,7 +2497,7 @@ func computeScanConfigHash(scanConfig string, templates []string, assets []strin
 // sanitizeEnumerationConfig removes unsupported steps from the enumeration config.
 // Steps "uncover_assets", "dns_passive", "dns_bruteforce", and "dns_permute" are not supported for internal scans and will be removed.
 // Returns the sanitized configuration as a JSON string.
-func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string) string {
+func (r *Runner) sanitizeEnumerationConfig(enumerationConfig string, enumerationName string) string {
 	var unsupportedSteps []string
 	var supportedSteps []string
 
@@ -2381,13 +2518,13 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	}
 
 	// Log info about removed steps
-	slog.Info("Removing unsupported steps from enumeration", "enumeration_name", enumerationName, "unsupported_steps", strings.Join(unsupportedSteps, ", "))
+	r.logHelper("INFO", fmt.Sprintf("Removing unsupported steps from enumeration \"%s\": %s", enumerationName, strings.Join(unsupportedSteps, ", ")))
 
 	// Parse the entire config as JSON to properly reconstruct it
 	var configMap map[string]interface{}
 	if err := json.Unmarshal([]byte(enumerationConfig), &configMap); err != nil {
 		// If parsing fails, return original config
-		slog.Warn("Failed to parse enumeration config for sanitization", "error", err)
+		r.logHelper("WARNING", fmt.Sprintf("Failed to parse enumeration config for sanitization: %v", err))
 		return enumerationConfig
 	}
 
@@ -2398,7 +2535,7 @@ func sanitizeEnumerationConfig(enumerationConfig string, enumerationName string)
 	sanitizedConfig, err := json.Marshal(configMap)
 	if err != nil {
 		// If marshaling fails, return original config
-		slog.Warn("Failed to marshal sanitized enumeration config", "error", err)
+		r.logHelper("WARNING", fmt.Sprintf("Failed to marshal sanitized enumeration config: %v", err))
 		return enumerationConfig
 	}
 
@@ -2577,6 +2714,7 @@ func main() {
 
 	err = pdcpRunner.Run(ctx)
 	if err != nil {
-		slog.Error("Could not run pd-agent", "error", err)
+		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s\n", err))
+		os.Exit(1)
 	}
 }
