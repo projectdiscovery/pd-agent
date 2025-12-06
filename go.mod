@@ -4,15 +4,18 @@ go 1.24.2
 
 require (
 	github.com/dustin/go-humanize v1.0.1
+	github.com/google/gopacket v1.1.19
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.61
+	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.3.7
 	github.com/projectdiscovery/nuclei/v3 v3.5.1
 	github.com/projectdiscovery/utils v0.7.3
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
+	golang.org/x/net v0.47.0
 	golang.org/x/sys v0.38.0
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.2
@@ -110,7 +113,6 @@ require (
 	github.com/projectdiscovery/hmap v0.0.96 // indirect
 	github.com/projectdiscovery/ipranger v0.0.53 // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20240226150047-2e2c51e35983 // indirect
-	github.com/projectdiscovery/mapcidr v1.1.97 // indirect
 	github.com/projectdiscovery/networkpolicy v0.1.29 // indirect
 	github.com/projectdiscovery/ratelimit v0.0.82 // indirect
 	github.com/projectdiscovery/retryabledns v1.0.109 // indirect
@@ -156,7 +158,6 @@ require (
 	golang.org/x/crypto v0.45.0 // indirect
 	golang.org/x/exp v0.0.0-20250911091902-df9299821621 // indirect
 	golang.org/x/mod v0.29.0 // indirect
-	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.18.0 // indirect
 	golang.org/x/term v0.37.0 // indirect
