@@ -39,6 +39,10 @@ RUN apt update && apt install -y \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
     && apt update \
     && apt install -y google-chrome-stable \
+    && POWERSHELL_VERSION=$(wget -qO- https://api.github.com/repos/PowerShell/PowerShell/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/v//') \
+    && wget -q -O /tmp/powershell.deb "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell_${POWERSHELL_VERSION}-1.deb_amd64.deb" \
+    && apt install -y /tmp/powershell.deb \
+    && rm /tmp/powershell.deb \
     && apt clean \
     && rm -rf /var/lib/apt/lists/*
 
