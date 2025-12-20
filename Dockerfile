@@ -33,6 +33,8 @@ RUN apt update && apt install -y \
     ca-certificates \
     nmap \
     libpcap-dev \
+    python3 \
+    python3-pip \
     wget \
     gnupg \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \

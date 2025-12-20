@@ -44,6 +44,16 @@ The binary will be installed in your Go bin directory:
 
 Ensure this directory is in your PATH to run `pd-agent` (or `pd-agent.exe` on Windows) from anywhere.
 
+#### Download Binary from Releases
+
+Pre-built binaries are available for download from the [GitHub releases page](https://github.com/projectdiscovery/pd-agent/releases). Download the appropriate binary for your platform:
+
+- **Linux:** Download the `pd-agent-linux-amd64.tar.gz` archive, extract it, and place the `pd-agent` binary in a directory that is in your PATH (e.g., `/usr/local/bin`).
+- **macOS:** Download the `pd-agent-macos-amd64.tar.gz` archive, extract it, and place the `pd-agent` binary in a directory that is in your PATH (e.g., `/usr/local/bin`).
+- **Windows:** Download the `pd-agent-windows-amd64.exe` binary and place it in a directory that is in your PATH (e.g., `C:\Program Files\pd-agent`).
+
+Ensure the binary directory is in your system PATH to run `pd-agent` from anywhere.
+
 #### Docker
 
 **Note:** Docker must be installed on your system. Download Docker from [docker.com](https://www.docker.com/products/docker-desktop/) if needed.
@@ -309,6 +319,15 @@ pd-agent.exe -agent-tags staging,us-west -agent-networks staging-network
 
 **Windows (WSL2):**
 Follow Linux instructions - commands are identical to Linux/macOS.
+
+### Docker Execution Note
+
+The Docker container comes with all prerequisites pre-installed and updated, requiring no further setup:
+
+- **ProjectDiscovery Tools:** dnsx, naabu, httpx, tlsx, nuclei
+- **System Tools:** nmap, Chrome (headless), PowerShell
+
+Nuclei executes headless templates and code templates automatically when the system has sufficient resources. Code templates can execute with the following interpreters on any platform: **bash**, **python**, and **PowerShell**.
 
 --------
 
