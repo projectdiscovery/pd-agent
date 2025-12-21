@@ -34,6 +34,8 @@
 
 **Note:** Go must be pre-installed on your system. Download Go from [golang.org](https://golang.org/dl/) if needed.
 
+**Windows users:** You can use the automated setup script `setup.go.ps1` to install/update Go automatically.
+
 ```bash
 go install github.com/projectdiscovery/pd-agent/cmd/pd-agent@latest
 ```
@@ -58,6 +60,10 @@ Ensure the binary directory is in your system PATH to run `pd-agent` from anywhe
 
 **Note:** Docker must be installed on your system. Download Docker from [docker.com](https://www.docker.com/products/docker-desktop/) if needed.
 
+**Windows users:** You can use the automated setup scripts:
+- `setup.windows.desktop.ps1` for Windows 10/11 (Docker Desktop)
+- `setup.windows.server.ps1` for Windows Server (Docker Engine from binaries)
+
 **Linux/macOS:**
 ```bash
 docker run -d --name pd-agent \
@@ -78,6 +84,50 @@ docker run -d --name pd-agent \
 ```
 
 **Note:** On Windows, `--network host` and `--cap-add` flags are not supported by Docker Desktop. Only passive discovery features are affected; all other agent functionality works normally.
+
+#### Automated Windows Setup Scripts
+
+We provide PowerShell scripts to automate the installation of prerequisites and the pd-agent on Windows:
+
+**Windows Desktop (Windows 10/11):**
+```powershell
+# Install Docker Desktop
+.\setup.windows.desktop.ps1
+
+# Install Go (optional)
+.\setup.go.ps1
+
+# Deploy pd-agent (installs Docker if needed, pulls image, and starts container)
+.\setup.agent.ps1
+```
+
+**Windows Server:**
+```powershell
+# Install Docker Engine from binaries (includes Windows Containers feature)
+.\setup.windows.server.ps1
+
+# Install Go (optional)
+.\setup.go.ps1
+
+# Deploy pd-agent (installs Docker if needed, pulls image, and starts container)
+.\setup.agent.ps1
+```
+
+**All-in-one deployment:**
+```powershell
+# Deploy pd-agent with automatic Docker and Go installation
+.\setup.agent.ps1 -InstallGo
+```
+
+**Features:**
+- Automatic Docker installation/update (Desktop or Server)
+- Optional Go installation/update
+- Automatic pd-agent image pull and container deployment
+- Preserves existing container configuration (env vars, volumes, commands)
+- Only updates if newer versions are available
+- Fully automated and silent installation
+
+**Note:** All scripts require Administrator privileges. Run PowerShell as Administrator before executing.
 
 #### Kubernetes
 ```bash
