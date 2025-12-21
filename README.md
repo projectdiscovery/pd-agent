@@ -31,11 +31,40 @@
 ### Installation
 
 #### Go Install
+
+**Note:** Go must be pre-installed on your system. Download Go from [golang.org](https://golang.org/dl/) if needed.
+
+**Windows users:** You can use the automated setup script `setup.go.ps1` to install/update Go automatically.
+
 ```bash
 go install github.com/projectdiscovery/pd-agent/cmd/pd-agent@latest
 ```
 
+The binary will be installed in your Go bin directory:
+- **Linux/macOS:** `$HOME/go/bin/pd-agent` (or `$GOPATH/bin/pd-agent` if `GOPATH` is set)
+- **Windows:** `%USERPROFILE%\go\bin\pd-agent.exe` (or `%GOPATH%\bin\pd-agent.exe` if `GOPATH` is set)
+
+Ensure this directory is in your PATH to run `pd-agent` (or `pd-agent.exe` on Windows) from anywhere.
+
+#### Download Binary from Releases
+
+Pre-built binaries are available for download from the [GitHub releases page](https://github.com/projectdiscovery/pd-agent/releases). Download the appropriate binary for your platform:
+
+- **Linux:** Download the `pd-agent-linux-amd64.tar.gz` archive, extract it, and place the `pd-agent` binary in a directory that is in your PATH (e.g., `/usr/local/bin`).
+- **macOS:** Download the `pd-agent-macos-amd64.tar.gz` archive, extract it, and place the `pd-agent` binary in a directory that is in your PATH (e.g., `/usr/local/bin`).
+- **Windows:** Download the `pd-agent-windows-amd64.exe` binary and place it in a directory that is in your PATH (e.g., `C:\Program Files\pd-agent`).
+
+Ensure the binary directory is in your system PATH to run `pd-agent` from anywhere.
+
 #### Docker
+
+**Note:** Docker must be installed on your system. Download Docker from [docker.com](https://www.docker.com/products/docker-desktop/) if needed.
+
+**Windows users:** You can use the automated setup scripts:
+- `setup.windows.desktop.ps1` for Windows 10/11 (Docker Desktop)
+- `setup.windows.server.ps1` for Windows Server (Docker Engine from binaries)
+
+**Linux/macOS:**
 ```bash
 docker run -d --name pd-agent \
   --network host --cap-add NET_RAW --cap-add NET_ADMIN \
@@ -44,6 +73,61 @@ docker run -d --name pd-agent \
   projectdiscovery/pd-agent:latest \
   -agent-tags production
 ```
+
+**Windows (Docker Desktop):**
+```powershell
+docker run -d --name pd-agent \
+  -e PDCP_API_KEY=your-api-key \
+  -e PDCP_TEAM_ID=your-team-id \
+  projectdiscovery/pd-agent:latest \
+  -agent-tags production
+```
+
+**Note:** On Windows, `--network host` and `--cap-add` flags are not supported by Docker Desktop. Only passive discovery features are affected; all other agent functionality works normally.
+
+#### Automated Windows Setup Scripts
+
+We provide PowerShell scripts to automate the installation of prerequisites and the pd-agent on Windows:
+
+**Windows Desktop (Windows 10/11):**
+```powershell
+# Install Docker Desktop
+.\setup.windows.desktop.ps1
+
+# Install Go (optional)
+.\setup.go.ps1
+
+# Deploy pd-agent (installs Docker if needed, pulls image, and starts container)
+.\setup.agent.ps1
+```
+
+**Windows Server:**
+```powershell
+# Install Docker Engine from binaries (includes Windows Containers feature)
+.\setup.windows.server.ps1
+
+# Install Go (optional)
+.\setup.go.ps1
+
+# Deploy pd-agent (installs Docker if needed, pulls image, and starts container)
+.\setup.agent.ps1
+```
+
+**All-in-one deployment:**
+```powershell
+# Deploy pd-agent with automatic Docker and Go installation
+.\setup.agent.ps1 -InstallGo
+```
+
+**Features:**
+- Automatic Docker installation/update (Desktop or Server)
+- Optional Go installation/update
+- Automatic pd-agent image pull and container deployment
+- Preserves existing container configuration (env vars, volumes, commands)
+- Only updates if newer versions are available
+- Fully automated and silent installation
+
+**Note:** All scripts require Administrator privileges. Run PowerShell as Administrator before executing.
 
 #### Kubernetes
 ```bash
@@ -70,7 +154,7 @@ The agent automatically discovers Kubernetes cluster subnets (nodes, pods, servi
 The agent automatically discovers local network subnets and reports them to the platform:
 - **Local networks:** Discovers private IP ranges from network interfaces and routing tables
 - **Kubernetes:** Automatically discovers and aggregates cluster subnets (node IPs, pod CIDRs, service CIDRs)
-- **Docker:** Use `--network host` and network capabilities (`NET_RAW`, `NET_ADMIN`) to enable discovery
+- **Docker (Linux/macOS only):** Use `--network host` and network capabilities (`NET_RAW`, `NET_ADMIN`) to enable passive discovery. On Windows Docker Desktop, these flags are not supported and passive discovery will be unavailable.
 
 For Kubernetes deployments, the agent requires `ClusterRole` permissions to discover cluster resources (included in the deployment manifest).
 
@@ -84,12 +168,70 @@ For Kubernetes deployments, the agent requires `ClusterRole` permissions to disc
 | `PDCP_AGENT_TAGS` | No | - | Comma-separated agent tags |
 | `PDCP_AGENT_NAME` | No | Hostname | Agent display name |
 
+#### Setting Environment Variables
+
+**Linux/macOS (bash/zsh):**
+```bash
+export PDCP_API_KEY=your-api-key
+export PDCP_TEAM_ID=your-team-id
+export PDCP_AGENT_TAGS=production,staging
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:PDCP_API_KEY="your-api-key"
+$env:PDCP_TEAM_ID="your-team-id"
+$env:PDCP_AGENT_TAGS="production,staging"
+```
+
+**Windows (Command Prompt):**
+```cmd
+set PDCP_API_KEY=your-api-key
+set PDCP_TEAM_ID=your-team-id
+set PDCP_AGENT_TAGS=production,staging
+```
+
+**Windows (Permanent - System Environment Variables):**
+1. Open System Properties → Advanced → Environment Variables
+2. Add variables under User or System variables
+3. Restart the terminal/service for changes to take effect
+
+**Windows (WSL2):**
+Follow Linux instructions - WSL2 uses Linux environment variable syntax.
+
 ### Usage
 
+**Linux/macOS:**
 ```bash
 # Basic usage
 pd-agent -agent-networks internal
+
+# With tags
+pd-agent -agent-tags production,staging -agent-networks internal
 ```
+
+**Windows (PowerShell):**
+```powershell
+# Basic usage
+pd-agent.exe -agent-networks internal
+
+# With tags
+pd-agent.exe -agent-tags production,staging -agent-networks internal
+```
+
+**Windows (Command Prompt):**
+```cmd
+# Basic usage
+pd-agent.exe -agent-networks internal
+
+# With tags
+pd-agent.exe -agent-tags production,staging -agent-networks internal
+```
+
+**Windows (WSL2):**
+Follow Linux instructions - commands are identical to Linux/macOS.
+
+**Note:** On Windows, if `pd-agent.exe` is in your PATH, you can use `pd-agent` instead of `pd-agent.exe`. The `.exe` extension is optional in PowerShell and required in Command Prompt.
 
 ### Configuration
 
@@ -125,12 +267,47 @@ The agent uses environment variables or command-line flags for configuration. Se
 
 #### Enable Verbose Logging
 
-Add `-verbose` flag or set environment variable:
+**Linux/macOS:**
 ```bash
+# Using flag
+pd-agent -verbose
+
+# Using environment variable
 export PDCP_VERBOSE=true
-# or
+pd-agent ...
+
+# Or inline
 PDCP_VERBOSE=1 pd-agent ...
 ```
+
+**Windows (PowerShell):**
+```powershell
+# Using flag
+pd-agent.exe -verbose
+
+# Using environment variable
+$env:PDCP_VERBOSE="true"
+pd-agent.exe ...
+
+# Or inline
+$env:PDCP_VERBOSE="1"; pd-agent.exe ...
+```
+
+**Windows (Command Prompt):**
+```cmd
+# Using flag
+pd-agent.exe -verbose
+
+# Using environment variable
+set PDCP_VERBOSE=true
+pd-agent.exe ...
+
+# Or inline (requires separate commands)
+set PDCP_VERBOSE=1 && pd-agent.exe ...
+```
+
+**Windows (WSL2):**
+Follow Linux instructions - use Linux syntax.
 
 ### Best Practices
 
@@ -147,17 +324,32 @@ PDCP_VERBOSE=1 pd-agent ...
 
 #### Custom Proxy Configuration
 
-Configure a custom proxy for agent communication:
-
+**Linux/macOS:**
 ```bash
 export PROXY_URL=http://proxy.example.com:8080
 pd-agent -verbose
 ```
 
+**Windows (PowerShell):**
+```powershell
+$env:PROXY_URL="http://proxy.example.com:8080"
+pd-agent.exe -verbose
+```
+
+**Windows (Command Prompt):**
+```cmd
+set PROXY_URL=http://proxy.example.com:8080
+pd-agent.exe -verbose
+```
+
+**Windows (WSL2):**
+Follow Linux instructions - use Linux syntax.
+
 #### Agent Grouping
 
 Use tags and networks to group agents:
 
+**Linux/macOS:**
 ```bash
 # Production agents
 pd-agent -agent-tags production,us-east -agent-networks prod-network
@@ -165,6 +357,27 @@ pd-agent -agent-tags production,us-east -agent-networks prod-network
 # Staging agents
 pd-agent -agent-tags staging,us-west -agent-networks staging-network
 ```
+
+**Windows (PowerShell/Command Prompt):**
+```powershell
+# Production agents
+pd-agent.exe -agent-tags production,us-east -agent-networks prod-network
+
+# Staging agents
+pd-agent.exe -agent-tags staging,us-west -agent-networks staging-network
+```
+
+**Windows (WSL2):**
+Follow Linux instructions - commands are identical to Linux/macOS.
+
+### Docker Execution Note
+
+The Docker container comes with all prerequisites pre-installed and updated, requiring no further setup:
+
+- **ProjectDiscovery Tools:** dnsx, naabu, httpx, tlsx, nuclei
+- **System Tools:** nmap, Chrome (headless), PowerShell
+
+Nuclei executes headless templates and code templates automatically when the system has sufficient resources. Code templates can execute with the following interpreters on any platform: **bash**, **python**, and **PowerShell**.
 
 --------
 
