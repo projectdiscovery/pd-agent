@@ -14,6 +14,7 @@
   <a href="#pd-agent">PD Agent</a> •
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
+  <a href="#supervisor-mode">Supervisor Mode</a> •
   <a href="#system-installation">System Installation</a> •
   <a href="https://discord.gg/projectdiscovery">Join Discord</a>
 
@@ -64,6 +65,38 @@ kubectl get pods -n pd-agent -l app=pd-agent
 ```
 
 The agent automatically discovers Kubernetes cluster subnets (nodes, pods, services) for scanning. See [examples/README.md](examples/README.md) for detailed instructions and customization options.
+
+### Supervisor Mode
+
+Supervisor mode allows pd-agent to manage its own deployment in Docker or Kubernetes, automatically handling updates, restarts, and lifecycle management.
+
+#### Prerequisites
+
+- **macOS/Windows**: Docker Desktop must be installed and running
+  - On Windows, Docker Desktop has automatic integration with WSL2
+- **Linux**: Docker must be installed and running
+
+#### Usage
+
+Run pd-agent in supervisor mode with Docker (default):
+
+```bash
+pd-agent -supervisor-mode docker
+```
+
+Or use Kubernetes:
+
+```bash
+pd-agent -supervisor-mode kubernetes
+```
+
+The supervisor will:
+- Automatically pull and deploy the latest pd-agent Docker image
+- Monitor the deployment and restart if it crashes
+- Handle image updates automatically
+- Manage the container/pod lifecycle
+
+**Note**: Supervisor mode requires Docker or Kubernetes to be available and properly configured. The supervisor runs the agent in a container/pod, so all agent configuration (environment variables, flags) should be passed as normal.
 
 ### Network Discovery
 
