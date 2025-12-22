@@ -2,17 +2,17 @@ FROM --platform=linux/amd64 golang:1.25 AS builder
 
 RUN apt-get update && apt-get install -y git libpcap-dev
 
-# Tools dependencies
+# Tools dependencies with optimization flags
 # dnsx
-RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+RUN go install -ldflags="-s -w" github.com/projectdiscovery/dnsx/cmd/dnsx@latest
 # naabu
-RUN go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
+RUN go install -ldflags="-s -w" github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
 # httpx
-RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+RUN go install -ldflags="-s -w" github.com/projectdiscovery/httpx/cmd/httpx@latest
 # tlsx
-RUN go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
+RUN go install -ldflags="-s -w" github.com/projectdiscovery/tlsx/cmd/tlsx@latest
 # nuclei
-RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+RUN go install -ldflags="-s -w" github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
 
 
 # Copy source code
@@ -25,22 +25,28 @@ COPY . .
 # CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
 
-FROM --platform=linux/amd64 ubuntu:latest
+# Clean Go module cache to reduce image size
+RUN go clean -modcache && \
+    rm -rf /root/.cache/go-build
+
+FROM --platform=linux/amd64 ubuntu:22.04
 # install dependencies
 # required: libpcap-dev, chrome
-RUN apt update && apt install -y \
-    bind9-dnsutils \
-    ca-certificates \
-    nmap \
-    libpcap-dev \
-    wget \
-    gnupg \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libpcap-dev \
+        wget \
+        gnupg \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
     && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
-    && apt update \
-    && apt install -y google-chrome-stable \
-    && apt clean \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get update \
+    && apt-get install -y --no-install-recommends google-chrome-stable \
+    && apt-get purge -y wget gnupg \
+    && apt-get autoremove -y \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && rm -rf /usr/share/doc /usr/share/man /usr/share/locale /usr/share/info
 
 # Set environment variables for Chrome
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
@@ -57,8 +63,9 @@ COPY --from=builder /go/bin/nuclei /usr/local/bin/
 # Copy agent binary
 COPY --from=builder /go/bin/pd-agent /usr/local/bin/pd-agent
 
-# Create writable output directory for existing ubuntu user (UID 1000)
-RUN mkdir -p /home/ubuntu/output && \
+# Create ubuntu user and writable output directory
+RUN useradd -m -u 1000 ubuntu && \
+    mkdir -p /home/ubuntu/output && \
     chown -R ubuntu:ubuntu /home/ubuntu
 
 # Set default environment variables (can be overridden at runtime)

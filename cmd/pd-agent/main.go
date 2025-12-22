@@ -29,6 +29,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
+	"github.com/projectdiscovery/pd-agent/pkg/supervisor"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
@@ -69,7 +70,7 @@ func getAllNucleiTemplates(templateDir string) ([]string, error) {
 var (
 	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
 	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
+	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "")
 	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
 	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
 	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
@@ -90,6 +91,7 @@ type Options struct {
 	ScanParallelism        int  // Number of scans to process in parallel
 	EnumerationParallelism int  // Number of enumerations to process in parallel
 	KeepOutputFiles        bool // If true, don't delete output files after processing
+	SupervisorMode         string // Supervisor mode: "docker" or "kubernetes" (default: empty, disabled)
 }
 
 // ScanCache represents cached scan execution information
@@ -1429,6 +1431,11 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			if err == nil {
 				break
 			}
+			// If we get "no more chunks", terminate immediately without retrying
+			if err != nil && err.Error() == "no more chunks" {
+				r.logHelper("INFO", fmt.Sprintf("No more chunks available for %s ID: %s", taskType, taskID))
+				goto Complete
+			}
 			currentErr := err.Error()
 			if currentErr == lastErr {
 				// If we get the same error multiple times, likely the task is complete
@@ -1894,6 +1901,11 @@ func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*T
 	var taskChunk TaskChunk
 	if err := json.Unmarshal(body, &taskChunk); err != nil {
 		return nil, fmt.Errorf("error unmarshaling response: %v", err)
+	}
+
+	// Check if the unmarshaled struct is empty (no more chunks)
+	if taskChunk.ChunkID == "" {
+		return nil, fmt.Errorf("no more chunks")
 	}
 
 	return &taskChunk, nil
@@ -2597,10 +2609,19 @@ func parseOptions() *Options {
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
 		flagSet.IntVarP(&options.EnumerationParallelism, "enumeration-parallelism", "e", defaultEnumerationParallelism, "number of enumerations to process in parallel"),
+		flagSet.StringVar(&options.SupervisorMode, "supervisor-mode", "", "run as supervisor: \"docker\" or \"kubernetes\" (default: empty, disabled)"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
 		slog.Error("error", "error", err)
+	}
+
+	// Validate supervisor mode
+	if options.SupervisorMode != "" {
+		if options.SupervisorMode != "docker" && options.SupervisorMode != "kubernetes" {
+			slog.Error("Invalid supervisor mode", "mode", options.SupervisorMode, "valid", "docker or kubernetes")
+			options.SupervisorMode = "" // disable supervisor mode if invalid
+		}
 	}
 
 	// Parse environment variables (env vars take precedence as defaults)
@@ -2681,6 +2702,12 @@ func main() {
 
 	options := parseOptions()
 
+	// If supervisor mode is enabled, run supervisor instead of direct agent
+	if options.SupervisorMode != "" {
+		runSupervisorMode(options)
+		return
+	}
+
 	// Check prerequisites before starting the agent
 	prerequisites := pkg.CheckAllPrerequisites()
 	var missingTools []string
@@ -2717,4 +2744,45 @@ func main() {
 		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s\n", err))
 		os.Exit(1)
 	}
+}
+
+// runSupervisorMode runs the agent in supervisor mode
+func runSupervisorMode(options *Options) {
+	// Convert Options to supervisor.AgentOptions
+	agentOptions := &supervisor.AgentOptions{
+		TeamID:                 options.TeamID,
+		AgentID:                options.AgentId,
+		AgentTags:              []string(options.AgentTags),
+		AgentNetworks:          []string(options.AgentNetworks),
+		AgentOutput:            options.AgentOutput,
+		AgentName:              options.AgentName,
+		Verbose:                options.Verbose,
+		PassiveDiscovery:       options.PassiveDiscovery,
+		ChunkParallelism:       options.ChunkParallelism,
+		ScanParallelism:        options.ScanParallelism,
+		EnumerationParallelism: options.EnumerationParallelism,
+		KeepOutputFiles:        options.KeepOutputFiles,
+	}
+
+	// Generate agent ID if not set
+	if agentOptions.AgentID == "" {
+		agentOptions.AgentID = xid.New().String()
+	}
+
+	// Create supervisor with specified provider
+	sup, err := supervisor.NewSupervisorWithProvider(agentOptions, options.SupervisorMode)
+	if err != nil {
+		gologger.Fatal().Msgf("Could not create supervisor: %v", err)
+		os.Exit(1)
+	}
+
+	// Setup signal handlers
+	ctx := sup.SetupSignalHandlers(context.Background())
+
+	// Run supervisor
+	if err := sup.Run(ctx); err != nil {
+		gologger.Fatal().Msgf("Supervisor error: %v", err)
+		os.Exit(1)
+	}
+	gologger.Info().Msg("Supervisor terminated")
 }
