@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
@@ -298,11 +297,8 @@ func (s *Supervisor) GetContainerID() string {
 // SetupSignalHandlers sets up signal handlers for graceful shutdown and manual updates
 func (s *Supervisor) SetupSignalHandlers(ctx context.Context) context.Context {
 	sigChan := make(chan os.Signal, 1)
-	// Note: SIGUSR1 is Unix-only signal
 	signals := []os.Signal{os.Interrupt, syscall.SIGTERM}
-	if runtime.GOOS != "windows" {
-		signals = append(signals, syscall.SIGUSR1)
-	}
+	signals = appendUnixSignals(signals)
 	signal.Notify(sigChan, signals...)
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -310,15 +306,8 @@ func (s *Supervisor) SetupSignalHandlers(ctx context.Context) context.Context {
 	go func() {
 		for sig := range sigChan {
 			// Handle Unix-specific signals
-			if runtime.GOOS != "windows" {
-				if sig == syscall.SIGUSR1 {
-					// Manual image update trigger (Unix only)
-					gologger.Info().Msgf("Manual %s image update triggered", s.provider.Name())
-					if err := s.Update(ctx); err != nil {
-						gologger.Error().Msgf("Manual update failed: %v", err)
-					}
-					continue
-				}
+			if handleUnixSignal(s, ctx, sig) {
+				continue
 			}
 
 			// Handle shutdown signals
