@@ -18,10 +18,12 @@ type HTTPXRequest struct {
 
 // NucleiRetestRequest is the payload for the "nuclei-retest" RPC method.
 type NucleiRetestRequest struct {
-	Targets     []string `json:"targets"`
-	TemplateIDs []string `json:"template_ids"`
-	ScanID      string   `json:"scan_id"`
+	Targets         []string `json:"targets"`
+	TemplateID      string   `json:"template_id"`
+	TemplateEncoded string   `json:"template_encoded,omitempty"`
+	VulnID          string   `json:"vuln_id,omitempty"`
 }
+
 
 // HealthCheckData is returned by the "health-check" broadcast handler.
 type HealthCheckData struct {

@@ -27,6 +27,8 @@ import (
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/levels"
+	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
+	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
@@ -810,16 +812,91 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 	if err := json.Unmarshal(data, &req); err != nil {
 		return nil, fmt.Errorf("invalid nuclei-retest request: %w", err)
 	}
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received nuclei-retest request scan_id=%s targets=%v templates=%v",
-		req.ScanID, req.Targets, req.TemplateIDs))
-	// TODO: execute real nuclei retest
-	return map[string]any{
-		"agent_id":     r.options.AgentId,
-		"targets":      req.Targets,
-		"template_ids": req.TemplateIDs,
-		"scan_id":      req.ScanID,
-		"status":       "received",
-	}, nil
+	if len(req.Targets) == 0 {
+		return nil, fmt.Errorf("nuclei-retest: no targets provided")
+	}
+	if req.TemplateID == "" && req.TemplateEncoded == "" {
+		return nil, fmt.Errorf("nuclei-retest: template_id or template_encoded required")
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d template_id=%s",
+		len(req.Targets), req.TemplateID))
+
+	// Build SDK options — minimal config for fast execution
+	sdkOpts := []nuclei.NucleiSDKOptions{
+		nuclei.DisableUpdateCheck(),
+		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
+	}
+
+	// Handle template source
+	if req.TemplateEncoded != "" {
+		// base64 decode → temp file (SDK only accepts file paths)
+		decoded, err := base64.StdEncoding.DecodeString(req.TemplateEncoded)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: decode template: %w", err)
+		}
+		f, err := os.CreateTemp("", "nuclei-retest-*.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(decoded); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
+		}
+		f.Close()
+		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
+			Templates: []string{f.Name()},
+		}))
+	} else {
+		// Load by template ID from installed nuclei-templates
+		sdkOpts = append(sdkOpts, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
+			IDs: []string{req.TemplateID},
+		}))
+	}
+
+	// Create engine with 5-minute timeout
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	ne, err := nuclei.NewNucleiEngineCtx(execCtx, sdkOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("nuclei-retest: engine init: %w", err)
+	}
+	defer ne.Close()
+
+	// Load targets (no HTTP probing needed for retest)
+	ne.LoadTargets(req.Targets, false)
+
+	// Execute and collect results
+	var mu sync.Mutex
+	var results []*output.ResultEvent
+	err = ne.ExecuteCallbackWithCtx(execCtx, func(event *output.ResultEvent) {
+		mu.Lock()
+		results = append(results, event)
+		mu.Unlock()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("nuclei-retest: execution failed: %w", err)
+	}
+
+	// Return single ResultEvent matching aurora/retest format
+	var result *output.ResultEvent
+	if len(results) > 0 {
+		result = results[0]
+	} else {
+		// No match — return empty result with matcher_status=false
+		result = &output.ResultEvent{
+			MatcherStatus: false,
+		}
+	}
+
+	// Set template source fields like aurora handler does
+	if req.TemplateEncoded != "" {
+		result.TemplateEncoded = req.TemplateEncoded
+	}
+
+	return result, nil
 }
 
 func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
