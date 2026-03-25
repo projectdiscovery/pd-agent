@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nats.go"
 	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/goflags"
@@ -657,6 +658,22 @@ func (r *Runner) GetNATSCredentials() *NATSCredentials {
 	return r.natsCreds
 }
 
+// extractJWT parses the JWT from a NATS .creds formatted string.
+func extractJWT(credsContent string) (string, error) {
+	return nkeys.ParseDecoratedJWT([]byte(credsContent))
+}
+
+// signNonce parses the NKey seed from a NATS .creds formatted string
+// and signs the given nonce. The seed is wiped after signing.
+func signNonce(credsContent string, nonce []byte) ([]byte, error) {
+	kp, err := nkeys.ParseDecoratedNKey([]byte(credsContent))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse nkey seed: %w", err)
+	}
+	defer kp.Wipe()
+	return kp.Sign(nonce)
+}
+
 // startNATSRPC connects to NATS using the current credentials, sets up the
 // request/broadcast routers, and subscribes. It replaces any existing connection.
 func (r *Runner) startNATSRPC() error {
@@ -665,22 +682,25 @@ func (r *Runner) startNATSRPC() error {
 		return fmt.Errorf("no NATS credentials available")
 	}
 
-	// Write credentials to a temp file (nats.UserCredentials needs a file path)
-	tmpFile, err := os.CreateTemp("", "pd-agent-nats-*.creds")
-	if err != nil {
-		return fmt.Errorf("failed to create temp creds file: %w", err)
-	}
-	credsPath := tmpFile.Name()
-
-	if _, err := tmpFile.WriteString(creds.Credentials); err != nil {
-		tmpFile.Close()
-		os.Remove(credsPath)
-		return fmt.Errorf("failed to write creds to temp file: %w", err)
-	}
-	tmpFile.Close()
-
+	// Use JWT callbacks so credentials are read from memory on every
+	// connect/reconnect — no temp files, hot-swap on credential refresh.
 	opts := []nats.Option{
-		nats.UserCredentials(credsPath),
+		nats.UserJWT(
+			func() (string, error) {
+				c := r.GetNATSCredentials()
+				if c == nil {
+					return "", fmt.Errorf("no NATS credentials available")
+				}
+				return extractJWT(c.Credentials)
+			},
+			func(nonce []byte) ([]byte, error) {
+				c := r.GetNATSCredentials()
+				if c == nil {
+					return nil, fmt.Errorf("no NATS credentials available")
+				}
+				return signNonce(c.Credentials, nonce)
+			},
+		),
 		nats.Name(fmt.Sprintf("pd-agent-%s", r.options.AgentId)),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(2 * time.Second),
@@ -694,8 +714,6 @@ func (r *Runner) startNATSRPC() error {
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
 			r.logHelper("INFO", "NATS connection closed")
-			// Clean up the temp creds file when connection is fully closed
-			os.Remove(credsPath)
 		}),
 	}
 
@@ -705,7 +723,6 @@ func (r *Runner) startNATSRPC() error {
 
 	nc, err := nats.Connect(creds.NatsURL, opts...)
 	if err != nil {
-		os.Remove(credsPath)
 		return fmt.Errorf("failed to connect to NATS at %s: %w", creds.NatsURL, err)
 	}
 
@@ -777,18 +794,16 @@ func (r *Runner) onNATSCredentialsReceived(isNew bool) {
 		return
 	}
 
-	// Credentials refreshed — reconnect with new creds
+	// Credentials refreshed — force reconnect to pick up new JWT via callbacks
 	r.natsConnMu.Lock()
-	started := r.natsStarted
+	nc := r.natsConn
 	r.natsConnMu.Unlock()
 
-	if started {
-		go func() {
-			r.logHelper("INFO", "NATS credentials refreshed, reconnecting...")
-			if err := r.startNATSRPC(); err != nil {
-				r.logHelper("ERROR", fmt.Sprintf("failed to reconnect NATS RPC: %v", err))
-			}
-		}()
+	if nc != nil {
+		r.logHelper("INFO", "NATS credentials refreshed, forcing reconnect...")
+		if err := nc.ForceReconnect(); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("failed to force NATS reconnect: %v", err))
+		}
 	}
 }
 
