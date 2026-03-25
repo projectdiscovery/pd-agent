@@ -22,12 +22,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/levels"
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
@@ -74,6 +76,7 @@ var (
 	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
 	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
 	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
+	AgentGroupEnv             = envutil.GetEnvOrDefault("AGENT_GROUP", "default")
 )
 
 // Options contains the configuration options for the agent
@@ -84,6 +87,7 @@ type Options struct {
 	AgentNetworks          goflags.StringSlice
 	AgentOutput            string
 	AgentName              string
+	AgentGroup             string
 	Verbose                bool
 	PassiveDiscovery       bool // Enable passive discovery
 	ChunkParallelism       int  // Number of chunks to process in parallel
@@ -350,6 +354,26 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 	}
 }
 
+// NATSCredentials contains connection metadata returned by the /in endpoint
+type NATSCredentials struct {
+	Credentials string `json:"credentials"`
+	NatsURL     string `json:"nats_url"`
+	Stream      string `json:"stream"`
+	GroupPrefix string `json:"group_prefix"`
+	Subjects    struct {
+		Broadcast string `json:"broadcast"`
+		Requests  string `json:"requests"`
+	} `json:"subjects"`
+	InboxPrefix string    `json:"inbox_prefix"`
+	ExpiresAt   time.Time `json:"expires_at"`
+}
+
+// AgentInResponse represents the response from POST /v1/agents/in
+type AgentInResponse struct {
+	Message string           `json:"message"`
+	Nats    *NATSCredentials `json:"nats,omitempty"`
+}
+
 // Runner contains the internal logic of the agent
 type Runner struct {
 	options        *Options
@@ -357,6 +381,13 @@ type Runner struct {
 	inRequestCount int       // Number of /in requests sent
 	agentStartTime time.Time // When the agent started
 	logBatcher     *batcher.Batcher[string]
+	natsCreds      *NATSCredentials
+	natsCredsMu    sync.RWMutex
+
+	// NATS RPC connection and subscriptions
+	natsConn    *nats.Conn
+	natsConnMu  sync.Mutex
+	natsStarted bool // true after first successful NATS connect
 }
 
 var (
@@ -615,6 +646,192 @@ func NewRunner(options *Options) (*Runner, error) {
 	return r, nil
 }
 
+// GetNATSCredentials returns the current NATS credentials (thread-safe).
+// Returns nil if no credentials have been received yet.
+func (r *Runner) GetNATSCredentials() *NATSCredentials {
+	r.natsCredsMu.RLock()
+	defer r.natsCredsMu.RUnlock()
+	return r.natsCreds
+}
+
+// startNATSRPC connects to NATS using the current credentials, sets up the
+// request/broadcast routers, and subscribes. It replaces any existing connection.
+func (r *Runner) startNATSRPC() error {
+	creds := r.GetNATSCredentials()
+	if creds == nil {
+		return fmt.Errorf("no NATS credentials available")
+	}
+
+	// Write credentials to a temp file (nats.UserCredentials needs a file path)
+	tmpFile, err := os.CreateTemp("", "pd-agent-nats-*.creds")
+	if err != nil {
+		return fmt.Errorf("failed to create temp creds file: %w", err)
+	}
+	credsPath := tmpFile.Name()
+
+	if _, err := tmpFile.WriteString(creds.Credentials); err != nil {
+		tmpFile.Close()
+		os.Remove(credsPath)
+		return fmt.Errorf("failed to write creds to temp file: %w", err)
+	}
+	tmpFile.Close()
+
+	opts := []nats.Option{
+		nats.UserCredentials(credsPath),
+		nats.Name(fmt.Sprintf("pd-agent-%s", r.options.AgentId)),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			if err != nil {
+				r.logHelper("WARNING", fmt.Sprintf("NATS disconnected: %v", err))
+			}
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			r.logHelper("INFO", fmt.Sprintf("NATS reconnected to %s", nc.ConnectedUrl()))
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			r.logHelper("INFO", "NATS connection closed")
+			// Clean up the temp creds file when connection is fully closed
+			os.Remove(credsPath)
+		}),
+	}
+
+	if creds.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(creds.InboxPrefix))
+	}
+
+	nc, err := nats.Connect(creds.NatsURL, opts...)
+	if err != nil {
+		os.Remove(credsPath)
+		return fmt.Errorf("failed to connect to NATS at %s: %w", creds.NatsURL, err)
+	}
+
+	// Build and subscribe routers
+	requestRouter := natsrpc.NewRouter()
+	requestRouter.Handle("httpx", r.handleHTTPX)
+	requestRouter.Handle("nuclei-retest", r.handleNucleiRetest)
+
+	broadcastRouter := natsrpc.NewRouter()
+	broadcastRouter.Handle("health-check", r.handleHealthCheck)
+
+	queueGroup := r.options.AgentGroup
+	if queueGroup == "" {
+		queueGroup = "default"
+	}
+
+	if _, err := requestRouter.SubscribeRequests(nc, creds.Subjects.Requests, queueGroup); err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to requests on %s: %w", creds.Subjects.Requests, err)
+	}
+
+	if _, err := broadcastRouter.SubscribeBroadcast(nc, creds.Subjects.Broadcast); err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to broadcast on %s: %w", creds.Subjects.Broadcast, err)
+	}
+
+	// Swap in the new connection, drain old one
+	r.natsConnMu.Lock()
+	old := r.natsConn
+	r.natsConn = nc
+	r.natsStarted = true
+	r.natsConnMu.Unlock()
+
+	if old != nil {
+		old.Drain()
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC connected to %s (requests=%s, broadcast=%s, queue=%s)",
+		creds.NatsURL, creds.Subjects.Requests, creds.Subjects.Broadcast, queueGroup))
+	return nil
+}
+
+// stopNATSRPC gracefully drains and closes the NATS connection.
+func (r *Runner) stopNATSRPC() {
+	r.natsConnMu.Lock()
+	nc := r.natsConn
+	r.natsConn = nil
+	r.natsConnMu.Unlock()
+
+	if nc != nil {
+		r.logHelper("INFO", "draining NATS connection...")
+		if err := nc.Drain(); err != nil {
+			r.logHelper("WARNING", fmt.Sprintf("NATS drain error: %v", err))
+		}
+	}
+}
+
+// onNATSCredentialsReceived is called from inFunctionTickCallback when NATS
+// credentials arrive or change. It starts or reconnects the NATS RPC layer.
+func (r *Runner) onNATSCredentialsReceived(isNew bool) {
+	if isNew {
+		// First time — start NATS in background
+		go func() {
+			if err := r.startNATSRPC(); err != nil {
+				r.logHelper("ERROR", fmt.Sprintf("failed to start NATS RPC: %v", err))
+			}
+		}()
+		return
+	}
+
+	// Credentials refreshed — reconnect with new creds
+	r.natsConnMu.Lock()
+	started := r.natsStarted
+	r.natsConnMu.Unlock()
+
+	if started {
+		go func() {
+			r.logHelper("INFO", "NATS credentials refreshed, reconnecting...")
+			if err := r.startNATSRPC(); err != nil {
+				r.logHelper("ERROR", fmt.Sprintf("failed to reconnect NATS RPC: %v", err))
+			}
+		}()
+	}
+}
+
+// --- NATS RPC Handlers ---
+
+func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.HTTPXRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid httpx request: %w", err)
+	}
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received httpx request scan_id=%s targets=%v", req.ScanID, req.Targets))
+	// TODO: execute real httpx scan
+	return map[string]any{
+		"agent_id": r.options.AgentId,
+		"targets":  req.Targets,
+		"scan_id":  req.ScanID,
+		"status":   "received",
+	}, nil
+}
+
+func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.NucleiRetestRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid nuclei-retest request: %w", err)
+	}
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received nuclei-retest request scan_id=%s targets=%v templates=%v",
+		req.ScanID, req.Targets, req.TemplateIDs))
+	// TODO: execute real nuclei retest
+	return map[string]any{
+		"agent_id":     r.options.AgentId,
+		"targets":      req.Targets,
+		"template_ids": req.TemplateIDs,
+		"scan_id":      req.ScanID,
+		"status":       "received",
+	}, nil
+}
+
+func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
+	return natsrpc.HealthCheckData{
+		AgentID:      r.options.AgentId,
+		AgentName:    r.options.AgentName,
+		Version:      "0.1.0",
+		Uptime:       time.Since(r.agentStartTime).String(),
+		TasksRunning: len(pendingTasks.GetAll()),
+	}, nil
+}
+
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
 	// Recommend the time to use on platform dashboard to schedule the scans
@@ -649,6 +866,8 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer func() {
 		cancel()
+		// Drain NATS connection on shutdown
+		r.stopNATSRPC()
 		// Ensure batcher is stopped on shutdown
 		if r.logBatcher != nil {
 			r.logBatcher.Stop()
@@ -1994,6 +2213,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
+	q.Add("agent_group", r.options.AgentGroup)
 
 	// Only add tags if not empty
 	if len(tagsToUse) > 0 {
@@ -2033,6 +2253,27 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	if inResp.StatusCode != http.StatusOK {
 		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(inResp.Body)))
 		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(inResp.Body))
+	}
+
+	// Parse the /in response to extract NATS credentials (if present)
+	var agentInResp AgentInResponse
+	if err := json.Unmarshal(inResp.Body, &agentInResp); err != nil {
+		r.logHelper("WARNING", fmt.Sprintf("failed to parse /in response body: %v", err))
+	} else if agentInResp.Nats != nil {
+		r.natsCredsMu.Lock()
+		prev := r.natsCreds
+		r.natsCreds = agentInResp.Nats
+		r.natsCredsMu.Unlock()
+
+		if prev == nil {
+			r.logHelper("INFO", fmt.Sprintf("received NATS credentials: url=%s stream=%s expires_at=%s",
+				agentInResp.Nats.NatsURL, agentInResp.Nats.Stream, agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.onNATSCredentialsReceived(true)
+		} else if !prev.ExpiresAt.Equal(agentInResp.Nats.ExpiresAt) {
+			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed: url=%s stream=%s expires_at=%s",
+				agentInResp.Nats.NatsURL, agentInResp.Nats.Stream, agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.onNATSCredentialsReceived(false)
+		}
 	}
 
 	if !isRegistered {
@@ -2593,6 +2834,7 @@ func parseOptions() *Options {
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
+		flagSet.StringVar(&options.AgentGroup, "agent-group", AgentGroupEnv, "specify the group for the agent"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
@@ -2616,6 +2858,9 @@ func parseOptions() *Options {
 	if agentName := os.Getenv("PDCP_AGENT_NAME"); agentName != "" && options.AgentName == "" {
 		options.AgentName = agentName
 	}
+	if agentGroup := os.Getenv("AGENT_GROUP"); agentGroup != "" && options.AgentGroup == "" {
+		options.AgentGroup = agentGroup
+	}
 	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
 		options.Verbose = true
 	}
@@ -2632,6 +2877,11 @@ func parseOptions() *Options {
 	// Also support env variable PASSIVE_DISCOVERY
 	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
 		options.PassiveDiscovery = true
+	}
+
+	// Ensure agent group has a default value
+	if options.AgentGroup == "" {
+		options.AgentGroup = "default"
 	}
 
 	// Ensure parallelism values are at least 1
