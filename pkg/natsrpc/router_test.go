@@ -158,7 +158,6 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 	// Send a request
 	reqData, _ := json.Marshal(HTTPXRequest{
 		Targets: []string{"example.com"},
-		ScanID:  "scan-1",
 	})
 
 	msg, err := nc.Request(prefix+".httpx", reqData, 2*time.Second)

@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	json "github.com/json-iterator/go"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,6 +27,7 @@ import (
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/levels"
+	httpxrunner "github.com/projectdiscovery/httpx/runner"
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/pd-agent/pkg"
@@ -711,6 +712,7 @@ func (r *Runner) startNATSRPC() error {
 	// Build and subscribe routers
 	requestRouter := natsrpc.NewRouter()
 	requestRouter.Handle("httpx", r.handleHTTPX)
+	requestRouter.Handle("port-probe", r.handlePortProbe)
 	requestRouter.Handle("nuclei-retest", r.handleNucleiRetest)
 
 	broadcastRouter := natsrpc.NewRouter()
@@ -797,13 +799,96 @@ func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (a
 	if err := json.Unmarshal(data, &req); err != nil {
 		return nil, fmt.Errorf("invalid httpx request: %w", err)
 	}
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received httpx request scan_id=%s targets=%v", req.ScanID, req.Targets))
-	// TODO: execute real httpx scan
+	if len(req.Targets) == 0 {
+		return nil, fmt.Errorf("httpx: no targets provided")
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: httpx targets=%d", len(req.Targets)))
+
+	// Write targets to temp file (httpx SDK uses InputFile)
+	f, err := os.CreateTemp("", "httpx-targets-*.txt")
+	if err != nil {
+		return nil, fmt.Errorf("httpx: create temp file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	for _, t := range req.Targets {
+		fmt.Fprintln(f, t)
+	}
+	f.Close()
+
+	// Collect results via callback
+	var mu sync.Mutex
+	var results []httpxrunner.Result
+
+	opts := httpxrunner.Options{
+		Methods:         http.MethodGet,
+		InputFile:       f.Name(),
+		StatusCode:      true,
+		ExtractTitle:    true,
+		TechDetect:      true,
+		OutputIP:        true,
+		OutputCName:     true,
+		FollowRedirects: true,
+		Timeout:         10,
+		Retries:         2,
+		Threads:         25,
+		RateLimit:       150,
+		Silent:          true,
+		NoColor:         true,
+		OnResult: func(result httpxrunner.Result) {
+			if result.Err != nil {
+				return
+			}
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		},
+	}
+
+	if err := opts.ValidateOptions(); err != nil {
+		return nil, fmt.Errorf("httpx: validate options: %w", err)
+	}
+
+	httpxRunner, err := httpxrunner.New(&opts)
+	if err != nil {
+		return nil, fmt.Errorf("httpx: runner init: %w", err)
+	}
+	defer httpxRunner.Close()
+
+	// RunEnumeration is blocking — completes when all targets are processed
+	httpxRunner.RunEnumeration()
+
+	return results, nil
+}
+
+func (r *Runner) handlePortProbe(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.PortProbeRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid port-probe request: %w", err)
+	}
+	if req.Host == "" {
+		return nil, fmt.Errorf("port-probe: host is required")
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		return nil, fmt.Errorf("port-probe: invalid port %d", req.Port)
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: port-probe host=%s port=%d", req.Host, req.Port))
+
+	target := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
+	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+
+	open := err == nil
+	if open {
+		conn.Close()
+	}
+
 	return map[string]any{
-		"agent_id": r.options.AgentId,
-		"targets":  req.Targets,
-		"scan_id":  req.ScanID,
-		"status":   "received",
+		"host":      req.Host,
+		"port":      req.Port,
+		"protocol":  "tcp",
+		"open":      open,
+		"timestamp": time.Now().UTC(),
 	}, nil
 }
 

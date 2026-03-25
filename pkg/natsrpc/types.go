@@ -13,7 +13,6 @@ type Response struct {
 type HTTPXRequest struct {
 	Targets []string `json:"targets"`
 	Flags   []string `json:"flags,omitempty"`
-	ScanID  string   `json:"scan_id"`
 }
 
 // NucleiRetestRequest is the payload for the "nuclei-retest" RPC method.
@@ -24,6 +23,12 @@ type NucleiRetestRequest struct {
 	VulnID          string   `json:"vuln_id,omitempty"`
 }
 
+
+// PortProbeRequest is the payload for the "port-probe" RPC method.
+type PortProbeRequest struct {
+	Host string `json:"host"`
+	Port int    `json:"port"`
+}
 
 // HealthCheckData is returned by the "health-check" broadcast handler.
 type HealthCheckData struct {
