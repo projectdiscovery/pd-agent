@@ -63,6 +63,15 @@ func (r *Router) SubscribeBroadcast(nc *nats.Conn, subjectPrefix string) (*nats.
 	})
 }
 
+// SubscribeDirect subscribes to subjectPrefix.> for a single agent.
+// Used for agent-specific subjects like groupPrefix.direct.<agentID>.
+func (r *Router) SubscribeDirect(nc *nats.Conn, subjectPrefix string) (*nats.Subscription, error) {
+	subject := subjectPrefix + ".>"
+	return nc.Subscribe(subject, func(msg *nats.Msg) {
+		r.dispatch(msg, subjectPrefix)
+	})
+}
+
 // dispatch extracts the method from the subject suffix and calls the matching handler.
 func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 	method := extractMethod(msg.Subject, subjectPrefix)

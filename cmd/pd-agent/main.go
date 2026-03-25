@@ -735,6 +735,11 @@ func (r *Runner) startNATSRPC() error {
 	broadcastRouter := natsrpc.NewRouter()
 	broadcastRouter.Handle("health-check", r.handleHealthCheck)
 
+	directRouter := natsrpc.NewRouter()
+	directRouter.Handle("health-check", r.handleHealthCheck)
+	directRouter.Handle("debug", r.handleDebug)
+	directRouter.Handle("stop", r.handleStop)
+
 	queueGroup := r.options.AgentGroup
 	if queueGroup == "" {
 		queueGroup = "default"
@@ -750,6 +755,12 @@ func (r *Runner) startNATSRPC() error {
 		return fmt.Errorf("failed to subscribe to broadcast on %s: %w", creds.Subjects.Broadcast, err)
 	}
 
+	directSubject := creds.GroupPrefix + ".direct." + r.options.AgentId
+	if _, err := directRouter.SubscribeDirect(nc, directSubject); err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to direct on %s: %w", directSubject, err)
+	}
+
 	// Swap in the new connection, drain old one
 	r.natsConnMu.Lock()
 	old := r.natsConn
@@ -761,8 +772,8 @@ func (r *Runner) startNATSRPC() error {
 		old.Drain()
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC connected to %s (requests=%s, broadcast=%s, queue=%s)",
-		creds.NatsURL, creds.Subjects.Requests, creds.Subjects.Broadcast, queueGroup))
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC connected to %s (requests=%s, broadcast=%s, direct=%s, queue=%s)",
+		creds.NatsURL, creds.Subjects.Requests, creds.Subjects.Broadcast, directSubject, queueGroup))
 	return nil
 }
 
@@ -1006,6 +1017,71 @@ func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []by
 		Version:      "0.1.0",
 		Uptime:       time.Since(r.agentStartTime).String(),
 		TasksRunning: len(pendingTasks.GetAll()),
+	}, nil
+}
+
+func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (any, error) {
+	uptime := time.Since(r.agentStartTime)
+	hostname, _ := os.Hostname()
+
+	// Process resource usage via getrusage (no external deps)
+	var rusage syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &rusage)
+
+	// Go runtime memory stats
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	var lastGC string
+	if mem.LastGC > 0 {
+		lastGC = time.Unix(0, int64(mem.LastGC)).UTC().Format(time.RFC3339)
+	}
+
+	return natsrpc.DebugData{
+		Agent: natsrpc.AgentInfo{
+			ID:            r.options.AgentId,
+			Name:          r.options.AgentName,
+			Version:       "0.1.0",
+			Uptime:        uptime.Round(time.Second).String(),
+			UptimeSeconds: uptime.Seconds(),
+			TasksRunning:  len(pendingTasks.GetAll()),
+		},
+		System: natsrpc.SystemInfo{
+			OS:       runtime.GOOS,
+			Arch:     runtime.GOARCH,
+			NumCPU:   runtime.NumCPU(),
+			Hostname: hostname,
+		},
+		Process: natsrpc.ProcessInfo{
+			PID:         os.Getpid(),
+			MemoryRSSMB: float64(rusage.Maxrss) / (1024 * 1024),
+			UserTimeSec: float64(rusage.Utime.Sec) + float64(rusage.Utime.Usec)/1e6,
+			SysTimeSec:  float64(rusage.Stime.Sec) + float64(rusage.Stime.Usec)/1e6,
+		},
+		Runtime: natsrpc.RuntimeInfo{
+			GoVersion:    runtime.Version(),
+			NumGoroutine: runtime.NumGoroutine(),
+			HeapAllocMB:  float64(mem.HeapAlloc) / (1024 * 1024),
+			HeapInuseMB:  float64(mem.HeapInuse) / (1024 * 1024),
+			StackInuseMB: float64(mem.StackInuse) / (1024 * 1024),
+			TotalAllocMB: float64(mem.TotalAlloc) / (1024 * 1024),
+			NumGC:        mem.NumGC,
+			LastGC:       lastGC,
+		},
+	}, nil
+}
+
+func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (any, error) {
+	r.logHelper("INFO", "NATS RPC: received stop command, shutting down...")
+	go func() {
+		// Small delay to allow the NATS response to be sent before shutdown
+		time.Sleep(500 * time.Millisecond)
+		p, _ := os.FindProcess(os.Getpid())
+		p.Signal(syscall.SIGTERM)
+	}()
+	return map[string]any{
+		"agent_id": r.options.AgentId,
+		"status":   "stopping",
 	}, nil
 }
 
