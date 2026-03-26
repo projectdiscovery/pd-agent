@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package agentproto;
+
+option go_package = "github.com/projectdiscovery/pd-agent/pkg/agentproto";
+
+enum OptimizationType {
+  OPTIMIZATION_UNKNOWN = 0;
+  OPTIMIZATION_NONE = 1;
+  OPTIMIZATION_HOST_CENTERED = 2;
+}
+
+enum EnrichmentType {
+  ENRICHMENT_UNKNOWN = 0;
+  DNS_RESOLVE = 1;
+  PORT_SCAN = 2;
+  HTTP_PROBE = 3;
+  DNS_BRUTEFORCE = 5;
+  DNS_PERMUTE = 6;
+}
+
+message Target {
+  string Host = 1;
+  string DomainName = 2;
+}
+
+message AssetEnrichmentRequest {
+  EnrichmentType Type = 1;
+  repeated Target Targets = 2;
+  int64 UserID = 3;
+  string ChunkID = 4;
+  string EnrichmentID = 5;
+  string StreamName = 6;
+  bool IsVerification = 7;
+  bool IsPublicEnumeration = 8;
+  bytes EnumerationConfiguration = 9;
+}
+
+message ScanRequest {
+  string ScanID = 1;
+  OptimizationType Optimization = 2;
+  int32 TemplateRequestCount = 3;
+  map<string, int64> Targets = 4;
+  map<string, int64> PublicTemplates = 5;
+  map<string, string> PrivateTemplates = 6;
+  map<string, string> TemplateURLs = 7;
+  int64 UserID = 8;
+  string ChunkID = 9;
+  bytes ScanConfiguration = 10;
+  bool Fork = 11;
+  map<string, int64> PublicWorkflows = 12;
+  map<string, string> PrivateWorkflows = 13;
+  map<string, string> WorkflowsURLs = 14;
+  bool RunHeadlessSync = 15;
+  int64 HistoryID = 16;
+}
