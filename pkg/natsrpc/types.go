@@ -84,3 +84,37 @@ type RuntimeInfo struct {
 	NumGC        uint32  `json:"num_gc"`
 	LastGC       string  `json:"last_gc,omitempty"`
 }
+
+// --- JetStream Work Distribution Types ---
+
+// WorkMessage is published by the server to the group stream to notify agents
+// about a new scan or enumeration to process. All messages (work notifications,
+// chunks, etc.) live in a single group-level stream; consumers use FilterSubject
+// to scope what they read.
+type WorkMessage struct {
+	Type          string   `json:"type"`                      // "scan" or "enumeration"
+	ScanID        string   `json:"scan_id"`                   // scan_id or enumeration_id
+	ChunkSubject  string   `json:"chunk_subject"`             // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
+	ChunkConsumer string   `json:"chunk_consumer"`            // shared consumer name (typically agent-group)
+	ChunkCount    int      `json:"chunk_count,omitempty"`     // number of chunks in the stream
+	Config        string   `json:"config,omitempty"`          // base64 scan configuration
+	Templates     []string `json:"templates,omitempty"`       // nuclei template paths (scans)
+	Steps         []string `json:"steps,omitempty"`           // enumeration steps (enumerations)
+	Assets        []string `json:"assets,omitempty"`          // all targets (for pre-scan port filtering)
+}
+
+// ChunkMessage is a single unit of work decoded from the group stream.
+// For scan chunks: ZSTD-compressed protobuf (ScanRequest).
+// For enumeration chunks: plain protobuf (AssetEnrichmentRequest).
+type ChunkMessage struct {
+	ChunkID          string   `json:"chunk_id"`
+	Targets          []string `json:"targets"`
+	PublicTemplates  []string `json:"public_templates,omitempty"`
+	PrivateTemplates []string `json:"private_templates,omitempty"`
+	ScanConfig       string   `json:"scan_configuration,omitempty"`
+
+	// Enrichment-specific fields (populated for enumeration chunks)
+	EnrichmentID   string `json:"enrichment_id,omitempty"`
+	EnrichmentType string `json:"enrichment_type,omitempty"`
+	EnumConfig     string `json:"enumeration_configuration,omitempty"`
+}
