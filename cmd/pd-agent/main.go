@@ -24,6 +24,7 @@ import (
 
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
@@ -98,6 +99,7 @@ type Options struct {
 	ScanParallelism        int  // Number of scans to process in parallel
 	EnumerationParallelism int  // Number of enumerations to process in parallel
 	KeepOutputFiles        bool // If true, don't delete output files after processing
+	UseJetStream           bool // Use JetStream for scan/enumeration work distribution
 }
 
 // ScanCache represents cached scan execution information
@@ -392,6 +394,10 @@ type Runner struct {
 	natsConn    *nats.Conn
 	natsConnMu  sync.Mutex
 	natsStarted bool // true after first successful NATS connect
+
+	// JetStream work distribution
+	jsPool   *natsrpc.WorkerPool
+	jsCancel context.CancelFunc
 }
 
 var (
@@ -800,6 +806,14 @@ func (r *Runner) onNATSCredentialsReceived(isNew bool) {
 		go func() {
 			if err := r.startNATSRPC(); err != nil {
 				r.logHelper("ERROR", fmt.Sprintf("failed to start NATS RPC: %v", err))
+				return
+			}
+			// Start JetStream workers only if flag is set
+			if r.options.UseJetStream {
+				if err := r.startJetStreamWorkers(); err != nil {
+					r.logHelper("FATAL", fmt.Sprintf("--use-jetstream set but JetStream workers failed: %v", err))
+					os.Exit(1)
+				}
 			}
 		}()
 		return
@@ -1085,6 +1099,189 @@ func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (an
 	}, nil
 }
 
+// --- JetStream Work Distribution ---
+
+// startJetStreamWorkers initialises the JetStream worker pool that replaces
+// HTTP polling for scan/enumeration work distribution. It uses the group-level
+// stream (NATSCredentials.Stream) with a FilterSubject scoped to work
+// notifications (groupPrefix.work.>).
+func (r *Runner) startJetStreamWorkers() error {
+	creds := r.GetNATSCredentials()
+	if creds == nil || creds.Stream == "" {
+		return fmt.Errorf("NATS stream not provided by server")
+	}
+
+	r.natsConnMu.Lock()
+	nc := r.natsConn
+	r.natsConnMu.Unlock()
+	if nc == nil {
+		return fmt.Errorf("NATS connection not available")
+	}
+
+	consumerName := fmt.Sprintf("work-%s", r.options.AgentId)
+	pool, err := natsrpc.NewWorkerPool(nc, creds.Stream, consumerName, creds.GroupPrefix, r.options.ScanParallelism, r.processWorkMessage)
+	if err != nil {
+		return fmt.Errorf("create worker pool: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.jsPool = pool
+	r.jsCancel = cancel
+	pool.Run(ctx)
+
+	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (parallelism=%d, stream=%s, consumer=%s, filter=%s.work.>)",
+		r.options.ScanParallelism, creds.Stream, consumerName, creds.GroupPrefix))
+
+	return nil
+}
+
+// processWorkMessage handles a single work message from the JetStream work
+// stream. It sets up the chunk consumer and dispatches to the appropriate
+// execution function (nuclei scan or enumeration).
+func (r *Runner) processWorkMessage(ctx context.Context, msg jetstream.Msg, work *natsrpc.WorkMessage) error {
+	switch work.Type {
+	case "scan":
+		return r.processJetStreamScan(ctx, work)
+	case "enumeration":
+		return r.processJetStreamEnumeration(ctx, work)
+	default:
+		// Bad message — terminate immediately so it's never redelivered.
+		slog.Error("jetstream: skipping work message with unknown type",
+			"type", work.Type,
+			"id", work.ScanID,
+			"chunk_subject", work.ChunkSubject,
+		)
+		_ = msg.Term()
+		return nil // return nil so the worker doesn't Nak on top of Term
+	}
+}
+
+func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMessage) error {
+	r.logHelper("INFO", fmt.Sprintf("JetStream: processing scan %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
+
+	// Resolve templates — use provided or fall back to defaults
+	templatesToUse := work.Templates
+	if len(templatesToUse) == 0 {
+		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
+		if defaultTemplateDir != "" {
+			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
+			if err == nil && len(allTemplates) > 0 {
+				templatesToUse = allTemplates
+				slog.Info("JetStream scan: using default nuclei templates", "scan_id", work.ScanID, "count", len(allTemplates))
+			}
+		}
+	}
+
+	// Pre-scan port filtering (same logic as elaborateScanChunks lines 2042-2103)
+	targetsWithOpenPorts := make(map[string]struct{})
+	if len(work.Assets) > 0 && len(templatesToUse) > 0 {
+		tmpInputFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			return fmt.Errorf("create temp targets file: %w", err)
+		}
+		defer os.RemoveAll(tmpInputFile)
+
+		if err := os.WriteFile(tmpInputFile, []byte(strings.Join(work.Assets, "\n")), os.ModePerm); err != nil {
+			return fmt.Errorf("write temp targets file: %w", err)
+		}
+
+		tmpTemplatesFile, err := fileutil.GetTempFileName()
+		if err != nil {
+			return fmt.Errorf("create temp templates file: %w", err)
+		}
+		defer os.RemoveAll(tmpTemplatesFile)
+
+		if err := os.WriteFile(tmpTemplatesFile, []byte(strings.Join(templatesToUse, "\n")), os.ModePerm); err != nil {
+			return fmt.Errorf("write temp templates file: %w", err)
+		}
+
+		filteredTargets, _, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, work.ScanID, "pre-scan")
+		if err != nil {
+			slog.Warn("JetStream scan: port filter failed, proceeding with all targets", "scan_id", work.ScanID, "error", err)
+			for _, t := range work.Assets {
+				targetsWithOpenPorts[t] = struct{}{}
+			}
+		} else {
+			for _, t := range filteredTargets {
+				targetsWithOpenPorts[t] = struct{}{}
+			}
+		}
+	}
+
+	slog.Info("JetStream scan: port scan completed", "scan_id", work.ScanID, "targets_with_open_ports", len(targetsWithOpenPorts))
+
+	// Set up scan log batcher
+	var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
+	if scanlog.IsLogUploadEnabled() {
+		scanBatcher = scanlog.NewScanLogBatcher(work.ScanID, r.options.TeamID)
+		defer func() {
+			scanBatcher.Stop()
+			scanBatcher.WaitDone()
+		}()
+	}
+
+	// Consume chunks from the group stream, filtered by chunk subject
+	creds := r.GetNATSCredentials()
+	chunkConsumer := work.ChunkConsumer
+	if chunkConsumer == "" {
+		chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
+	}
+	return natsrpc.ConsumeChunks(ctx, r.jsPool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
+		func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
+			// Filter chunk targets by open ports
+			var filteredTargets []string
+			for _, t := range chunk.Targets {
+				if _, ok := targetsWithOpenPorts[t]; ok {
+					filteredTargets = append(filteredTargets, t)
+				}
+			}
+			if len(filteredTargets) == 0 && len(targetsWithOpenPorts) > 0 {
+				slog.Info("JetStream scan: chunk skipped (no targets with open ports)", "scan_id", work.ScanID, "chunk_id", chunk.ChunkID)
+				return nil
+			}
+
+			// Use chunk targets if no port filtering was done
+			targets := filteredTargets
+			if len(targetsWithOpenPorts) == 0 {
+				targets = chunk.Targets
+			}
+
+			templates := chunk.PublicTemplates
+			if len(templates) == 0 {
+				templates = templatesToUse
+			}
+
+			r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, templates, targets, scanBatcher)
+			return nil
+		},
+	)
+}
+
+func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.WorkMessage) error {
+	r.logHelper("INFO", fmt.Sprintf("JetStream: processing enumeration %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
+
+	creds := r.GetNATSCredentials()
+	chunkConsumer := work.ChunkConsumer
+	if chunkConsumer == "" {
+		chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
+	}
+	return natsrpc.ConsumeChunks(ctx, r.jsPool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
+		func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
+			// Steps can come from the work message or from the chunk's enrichment config.
+			// The server puts enrichment_steps in the chunk's EnumerationConfiguration JSON.
+			steps := work.Steps
+			if len(steps) == 0 && chunk.EnumConfig != "" {
+				enrichmentSteps := gjson.Get(chunk.EnumConfig, "enrichment_steps").String()
+				if enrichmentSteps != "" {
+					steps = strings.Split(enrichmentSteps, ",")
+				}
+			}
+			r.executeEnumeration(ctx, work.ScanID, chunk.ChunkID, steps, chunk.Targets)
+			return nil
+		},
+	)
+}
+
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
 	// Recommend the time to use on platform dashboard to schedule the scans
@@ -1119,6 +1316,13 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer func() {
 		cancel()
+		// Stop JetStream workers first (finish in-progress scans)
+		if r.jsCancel != nil {
+			r.jsCancel()
+		}
+		if r.jsPool != nil {
+			r.jsPool.Stop()
+		}
 		// Drain NATS connection on shutdown
 		r.stopNATSRPC()
 		// Ensure batcher is stopped on shutdown
@@ -1139,8 +1343,14 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		}
 	}()
 
-	go r.monitorScans(ctx)
-	go r.monitorEnumerations(ctx)
+	if r.options.UseJetStream {
+		// JetStream mode: workers are started via onNATSCredentialsReceived
+		r.logHelper("INFO", "using JetStream for work distribution (HTTP polling disabled)")
+	} else {
+		// Legacy mode: HTTP polling
+		go r.monitorScans(ctx)
+		go r.monitorEnumerations(ctx)
+	}
 
 	defer func() {
 		wg.Wait()
@@ -1819,10 +2029,20 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	// Execute using the same pkg.Run logic as pd-agent
-	r.logHelper("INFO", fmt.Sprintf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
+	slog.Info("Starting nuclei scan",
+		"scan_id", scanID,
+		"chunk_id", metaID,
+		"targets", len(filteredTargets),
+		"templates", len(templatesToUse),
+		"extracted_ports", extractedPorts,
+	)
 	taskResult, outputFiles, err := pkg.Run(ctx, task)
 	if err != nil {
-		r.logHelper("ERROR", fmt.Sprintf("Nuclei scan execution failed: %v", err))
+		slog.Error("Nuclei scan execution failed",
+			"scan_id", scanID,
+			"chunk_id", metaID,
+			"error", err,
+		)
 		return
 	}
 
@@ -1831,6 +2051,12 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	if len(outputFiles) > 0 {
 		outputFile = outputFiles[0]
 	}
+
+	slog.Info("Nuclei scan completed",
+		"scan_id", scanID,
+		"chunk_id", metaID,
+		"output_files", len(outputFiles),
+	)
 
 	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
 	if scanBatcher != nil && taskResult != nil && outputFile != "" {
@@ -3092,6 +3318,7 @@ func parseOptions() *Options {
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
 		flagSet.IntVarP(&options.EnumerationParallelism, "enumeration-parallelism", "e", defaultEnumerationParallelism, "number of enumerations to process in parallel"),
+		flagSet.BoolVar(&options.UseJetStream, "use-jetstream", false, "use JetStream for scan/enumeration work distribution instead of HTTP polling"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
@@ -3121,6 +3348,11 @@ func parseOptions() *Options {
 	// Parse keep-output-files from environment variable
 	if keepOutputFiles := os.Getenv("PDCP_KEEP_OUTPUT_FILES"); keepOutputFiles == "true" || keepOutputFiles == "1" {
 		options.KeepOutputFiles = true
+	}
+
+	// Parse use-jetstream from environment variable
+	if useJetStream := os.Getenv("PDCP_USE_JETSTREAM"); useJetStream == "true" || useJetStream == "1" {
+		options.UseJetStream = true
 	}
 
 	// Note: AgentName initialization moved to NewRunner() after AgentId generation
