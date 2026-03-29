@@ -940,12 +940,12 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 	if len(req.Targets) == 0 {
 		return nil, fmt.Errorf("nuclei-retest: no targets provided")
 	}
-	if req.TemplateID == "" && req.TemplateEncoded == "" {
-		return nil, fmt.Errorf("nuclei-retest: template_id or template_encoded required")
+	if req.TemplateID == "" && req.TemplateEncoded == "" && req.TemplateURL == "" {
+		return nil, fmt.Errorf("nuclei-retest: template_id, template_encoded, or template_url required")
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d template_id=%s",
-		len(req.Targets), req.TemplateID))
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d template_id=%s template_url=%s",
+		len(req.Targets), req.TemplateID, req.TemplateURL))
 
 	// Build SDK options — minimal config for fast execution
 	sdkOpts := []nuclei.NucleiSDKOptions{
@@ -953,8 +953,9 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
 	}
 
-	// Handle template source
-	if req.TemplateEncoded != "" {
+	// Handle template source — priority: encoded > url > id
+	switch {
+	case req.TemplateEncoded != "":
 		// base64 decode → temp file (SDK only accepts file paths)
 		decoded, err := base64.StdEncoding.DecodeString(req.TemplateEncoded)
 		if err != nil {
@@ -973,7 +974,36 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{f.Name()},
 		}))
-	} else {
+
+	case req.TemplateURL != "":
+		// Download template from URL → temp file
+		resp, err := http.Get(req.TemplateURL)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: fetch template url: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("nuclei-retest: template url returned %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: read template url body: %w", err)
+		}
+		f, err := os.CreateTemp("", "nuclei-retest-*.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(body); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
+		}
+		f.Close()
+		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
+			Templates: []string{f.Name()},
+		}))
+
+	default:
 		// Load by template ID from installed nuclei-templates
 		sdkOpts = append(sdkOpts, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
 			IDs: []string{req.TemplateID},
@@ -988,7 +1018,6 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 	if err != nil {
 		return nil, fmt.Errorf("nuclei-retest: engine init: %w", err)
 	}
-	defer ne.Close()
 
 	// Load targets (no HTTP probing needed for retest)
 	ne.LoadTargets(req.Targets, false)
@@ -1002,8 +1031,15 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		mu.Unlock()
 	})
 	if err != nil {
+		ne.Close()
 		return nil, fmt.Errorf("nuclei-retest: execution failed: %w", err)
 	}
+
+	// Close the engine BEFORE reading results. This triggers the interactsh
+	// cooldown period — the client sleeps for CooldownPeriod (5s), does a
+	// final poll, and processes any pending OOB interactions. The callback
+	// is still registered, so matches found during cooldown land in results.
+	ne.Close()
 
 	// Return single ResultEvent matching aurora/retest format
 	var result *output.ResultEvent
@@ -1020,6 +1056,10 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 	if req.TemplateEncoded != "" {
 		result.TemplateEncoded = req.TemplateEncoded
 	}
+
+	// Clear Interaction field — it may contain raw binary data from interactsh
+	// DNS responses that fails JSON marshalling with control character errors.
+	result.Interaction = nil
 
 	return result, nil
 }
