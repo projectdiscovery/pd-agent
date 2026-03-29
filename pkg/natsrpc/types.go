@@ -1,6 +1,6 @@
 package natsrpc
 
-import "encoding/json"
+import json "github.com/json-iterator/go"
 
 // Response is the standard JSON envelope sent back over NATS reply subjects.
 type Response struct {
@@ -16,10 +16,12 @@ type HTTPXRequest struct {
 }
 
 // NucleiRetestRequest is the payload for the "nuclei-retest" RPC method.
+// Template resolution priority: template_encoded > template_url > template_id.
 type NucleiRetestRequest struct {
 	Targets         []string `json:"targets"`
 	TemplateID      string   `json:"template_id"`
 	TemplateEncoded string   `json:"template_encoded,omitempty"`
+	TemplateURL     string   `json:"template_url,omitempty"`
 	VulnID          string   `json:"vuln_id,omitempty"`
 }
 

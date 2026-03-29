@@ -2,7 +2,7 @@ package natsrpc
 
 import (
 	"context"
-	"encoding/json"
+	json "github.com/json-iterator/go"
 	"fmt"
 	"log/slog"
 	"sync"
