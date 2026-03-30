@@ -839,21 +839,19 @@ func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (a
 	if err := json.Unmarshal(data, &req); err != nil {
 		return nil, fmt.Errorf("invalid httpx request: %w", err)
 	}
-	if len(req.Targets) == 0 {
-		return nil, fmt.Errorf("httpx: no targets provided")
+	if req.Target == "" {
+		return nil, fmt.Errorf("httpx: target is required")
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: httpx targets=%d", len(req.Targets)))
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: httpx target=%s", req.Target))
 
-	// Write targets to temp file (httpx SDK uses InputFile)
+	// Write target to temp file (httpx SDK uses InputFile)
 	f, err := os.CreateTemp("", "httpx-targets-*.txt")
 	if err != nil {
 		return nil, fmt.Errorf("httpx: create temp file: %w", err)
 	}
 	defer os.Remove(f.Name())
-	for _, t := range req.Targets {
-		fmt.Fprintln(f, t)
-	}
+	fmt.Fprintln(f, req.Target)
 	f.Close()
 
 	// Collect results via callback

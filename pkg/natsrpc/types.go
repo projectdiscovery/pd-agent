@@ -11,8 +11,7 @@ type Response struct {
 
 // HTTPXRequest is the payload for the "httpx" RPC method.
 type HTTPXRequest struct {
-	Targets []string `json:"targets"`
-	Flags   []string `json:"flags,omitempty"`
+	Target string `json:"target"`
 }
 
 // NucleiRetestRequest is the payload for the "nuclei-retest" RPC method.
