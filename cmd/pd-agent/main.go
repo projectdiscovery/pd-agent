@@ -525,13 +525,17 @@ type AgentLogUploadResponse struct {
 
 // logHelper prints the log to console and appends JSON marshalled string to the batcher
 func (r *Runner) logHelper(level, message string) {
+	// Skip DEBUG entirely unless -verbose is set
+	if level == "DEBUG" && !r.options.Verbose {
+		return
+	}
+
 	entry := LogEntry{
 		Timestamp: time.Now().UTC(),
 		Level:     level,
 		Message:   message,
 	}
 
-	// Print to console
 	fmt.Printf("[%s] %s: %s\n", entry.Timestamp.Format(time.RFC3339), entry.Level, entry.Message)
 
 	// Marshal to JSON
@@ -2635,7 +2639,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName))
 				r.options.AgentName = agentInfo.Name
 			}
-			r.logHelper("INFO", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
+			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
 		}
 	}
 
@@ -2676,7 +2680,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	// we simply send an empty string
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
-		r.logHelper("INFO", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
+		r.logHelper("DEBUG", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
 		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
 		r.logHelper("INFO", "No network subnets discovered")
@@ -2721,7 +2725,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		isRegistered = true
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339)))
+	r.logHelper("DEBUG", fmt.Sprintf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339)))
 	return nil
 }
 
