@@ -81,7 +81,7 @@ var (
 	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
 	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
 	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
-	AgentGroupEnv             = envutil.GetEnvOrDefault("AGENT_GROUP", "default")
+	AgentNetworkEnv           = envutil.GetEnvOrDefault("AGENT_NETWORK", "default")
 )
 
 // Options contains the configuration options for the agent
@@ -89,10 +89,9 @@ type Options struct {
 	TeamID                 string
 	AgentId                string
 	AgentTags              goflags.StringSlice
-	AgentNetworks          goflags.StringSlice
+	AgentNetwork           string
 	AgentOutput            string
 	AgentName              string
-	AgentGroup             string
 	Verbose                bool
 	PassiveDiscovery       bool // Enable passive discovery
 	ChunkParallelism       int  // Number of chunks to process in parallel
@@ -458,19 +457,16 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		r.logHelper("VERBOSE", fmt.Sprintf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags))
 	}
 
-	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
+	// Check if task's agent_networks match the runner's agent network (case-insensitive)
 	var hasAgentNetwork bool
 	var taskAgentNetworks []string
 	if agentNetworks.Exists() {
 		agentNetworks.ForEach(func(key, value gjson.Result) bool {
 			networkValue := value.String()
 			taskAgentNetworks = append(taskAgentNetworks, networkValue)
-			// Case-insensitive comparison
-			for _, agentNetwork := range r.options.AgentNetworks {
-				if strings.EqualFold(networkValue, agentNetwork) {
-					hasAgentNetwork = true
-					return false // Stop iteration
-				}
+			if strings.EqualFold(networkValue, r.options.AgentNetwork) {
+				hasAgentNetwork = true
+				return false
 			}
 			return true
 		})
@@ -480,9 +476,9 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 		result = "✓"
 	}
 	if len(taskAgentNetworks) > 0 {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks))
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: %v, agent network: %s)", result, taskAgentNetworks, r.options.AgentNetwork))
 	} else {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks))
+		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: <none>, agent network: %s)", result, r.options.AgentNetwork))
 	}
 
 	// If any condition matches, don't skip
@@ -555,7 +551,7 @@ func (r *Runner) uploadLogs(logs []string) {
 
 	// Get metadata same as /in endpoint
 	tagsToUse := r.options.AgentTags
-	networksToUse := r.options.AgentNetworks
+	networksToUse := []string{r.options.AgentNetwork}
 	networkSubnets := r.getAutoDiscoveredTargets()
 
 	// Build request payload
@@ -606,7 +602,7 @@ func (r *Runner) uploadLogs(logs []string) {
 		return
 	}
 
-	r.logHelper("VERBOSE", fmt.Sprintf("uploaded %d log entries: %s", len(logs), uploadResp.Message))
+	slog.Debug("agent log upload complete", "entries", len(logs), "message", uploadResp.Message)
 }
 
 // NewRunner creates a new runner instance
@@ -638,15 +634,15 @@ func NewRunner(options *Options) (*Runner, error) {
 		}
 	}
 
-	// Initialize log batcher
-	r.logBatcher = batcher.New[string](
-		batcher.WithMaxCapacity[string](100),              // Max 100 logs per batch
-		batcher.WithFlushInterval[string](30*time.Second), // Flush every 30 seconds
-		batcher.WithFlushCallback[string](r.uploadLogs),   // Upload callback
-	)
-
-	// Start the batcher
-	go r.logBatcher.Run()
+	// Initialize log batcher (unless disabled via env)
+	if envutil.GetEnvOrDefault("PDCP_ENABLE_AGENT_LOG_UPLOAD", "true") == "true" {
+		r.logBatcher = batcher.New[string](
+			batcher.WithMaxCapacity[string](100),              // Max 100 logs per batch
+			batcher.WithFlushInterval[string](30*time.Second), // Flush every 30 seconds
+			batcher.WithFlushCallback[string](r.uploadLogs),   // Upload callback
+		)
+		go r.logBatcher.Run()
+	}
 
 	// Start passive discovery if enabled
 	// if r.options.PassiveDiscovery {
@@ -746,10 +742,7 @@ func (r *Runner) startNATSRPC() error {
 	directRouter.Handle("debug", r.handleDebug)
 	directRouter.Handle("stop", r.handleStop)
 
-	queueGroup := r.options.AgentGroup
-	if queueGroup == "" {
-		queueGroup = "default"
-	}
+	queueGroup := r.options.AgentNetwork
 
 	if _, err := requestRouter.SubscribeRequests(nc, creds.Subjects.Requests, queueGroup); err != nil {
 		nc.Close()
@@ -1338,10 +1331,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	} else {
 		infoMessage.WriteString(" (tags: [])")
 	}
-	if len(r.options.AgentNetworks) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (networks: [%s])", strings.Join(r.options.AgentNetworks, ", ")))
-	} else {
-		infoMessage.WriteString(" (networks: [])")
+	if r.options.AgentNetwork != "" {
+		infoMessage.WriteString(fmt.Sprintf(" (network: %s)", r.options.AgentNetwork))
 	}
 
 	r.logHelper("INFO", infoMessage.String())
@@ -2681,7 +2672,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	// Default to local tags and networks
 	tagsToUse := r.options.AgentTags
-	networksToUse := r.options.AgentNetworks
+	networksToUse := []string{r.options.AgentNetwork}
 	var lastUpdate time.Time
 	if resp.Error == nil && resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -2705,7 +2696,9 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
 				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse))
 				networksToUse = agentInfo.Networks
-				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
+				if len(agentInfo.Networks) > 0 {
+					r.options.AgentNetwork = agentInfo.Networks[0] // Use first network from remote
+				}
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
@@ -2730,7 +2723,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
-	q.Add("agent_group", r.options.AgentGroup)
+	q.Add("agent_network", r.options.AgentNetwork)
 
 	// Only add tags if not empty
 	if len(tagsToUse) > 0 {
@@ -3349,9 +3342,8 @@ func parseOptions() *Options {
 		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
-		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", AgentNetworkEnv, "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
-		flagSet.StringVar(&options.AgentGroup, "agent-group", AgentGroupEnv, "specify the group for the agent"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
@@ -3367,8 +3359,8 @@ func parseOptions() *Options {
 	if agentTags := os.Getenv("PDCP_AGENT_TAGS"); agentTags != "" && len(options.AgentTags) == 0 {
 		options.AgentTags = goflags.StringSlice(strings.Split(agentTags, ","))
 	}
-	if agentNetworks := os.Getenv("PDCP_AGENT_NETWORKS"); agentNetworks != "" && len(options.AgentNetworks) == 0 {
-		options.AgentNetworks = goflags.StringSlice(strings.Split(agentNetworks, ","))
+	if agentNetwork := os.Getenv("PDCP_AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+		options.AgentNetwork = agentNetwork
 	}
 	if agentOutput := os.Getenv("PDCP_AGENT_OUTPUT"); agentOutput != "" && options.AgentOutput == "" {
 		options.AgentOutput = agentOutput
@@ -3376,8 +3368,8 @@ func parseOptions() *Options {
 	if agentName := os.Getenv("PDCP_AGENT_NAME"); agentName != "" && options.AgentName == "" {
 		options.AgentName = agentName
 	}
-	if agentGroup := os.Getenv("AGENT_GROUP"); agentGroup != "" && options.AgentGroup == "" {
-		options.AgentGroup = agentGroup
+	if agentNetwork := os.Getenv("AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+		options.AgentNetwork = agentNetwork
 	}
 	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
 		options.Verbose = true
@@ -3402,9 +3394,9 @@ func parseOptions() *Options {
 		options.PassiveDiscovery = true
 	}
 
-	// Ensure agent group has a default value
-	if options.AgentGroup == "" {
-		options.AgentGroup = "default"
+	// Ensure agent network has a default value
+	if options.AgentNetwork == "" {
+		options.AgentNetwork = "default"
 	}
 
 	// Ensure parallelism values are at least 1
