@@ -291,6 +291,18 @@ func ConsumeChunks(
 // ZSTD magic number: 0xFD2FB528 (little-endian)
 var zstdMagic = []byte{0x28, 0xB5, 0x2F, 0xFD}
 
+// Package-level zstd decoder — reused across all chunk decodes.
+// zstd.Decoder.DecodeAll is safe for concurrent use.
+var zstdDecoder *zstd.Decoder
+
+func init() {
+	var err error
+	zstdDecoder, err = zstd.NewReader(nil)
+	if err != nil {
+		panic("zstd init: " + err.Error())
+	}
+}
+
 // decodeChunkMsg deserializes a chunk message from NATS.
 // Scan chunks are ZSTD-compressed protobuf (ScanRequest).
 // Enumeration chunks are plain protobuf (AssetEnrichmentRequest).
@@ -304,13 +316,7 @@ func decodeChunkMsg(data []byte) (*ChunkMessage, error) {
 
 // decodeScanChunk handles ZSTD-compressed protobuf ScanRequest chunks.
 func decodeScanChunk(data []byte) (*ChunkMessage, error) {
-	decoder, err := zstd.NewReader(nil)
-	if err != nil {
-		return nil, fmt.Errorf("create zstd decoder: %w", err)
-	}
-	defer decoder.Close()
-
-	decompressed, err := decoder.DecodeAll(data, nil)
+	decompressed, err := zstdDecoder.DecodeAll(data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("zstd decompress: %w", err)
 	}

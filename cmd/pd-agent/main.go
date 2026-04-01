@@ -73,6 +73,9 @@ func getAllNucleiTemplates(templateDir string) ([]string, error) {
 	return templates, err
 }
 
+// Version is set at build time via -ldflags "-X main.Version=v1.0.0"
+var Version = "dev"
+
 var (
 	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
 	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
@@ -112,6 +115,7 @@ type LocalCache struct {
 	Scans        map[string]ScanCache `json:"scans"`
 	Enumerations map[string]ScanCache `json:"enumerations"`
 	mutex        sync.RWMutex
+	saveMu       sync.Mutex // serializes file writes to prevent corruption
 }
 
 // NewLocalCache creates a new local cache instance
@@ -122,12 +126,15 @@ func NewLocalCache() *LocalCache {
 	}
 }
 
-// Save saves the cache to disk
+// Save saves the cache to disk. Serialized by saveMu to prevent concurrent
+// file writes from corrupting the cache file.
 func (c *LocalCache) Save() error {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
+	c.saveMu.Lock()
+	defer c.saveMu.Unlock()
 
+	c.mutex.RLock()
 	data, err := json.Marshal(c)
+	c.mutex.RUnlock()
 	if err != nil {
 		return fmt.Errorf("error marshaling cache: %v", err)
 	}
@@ -190,38 +197,32 @@ func (c *LocalCache) HasEnumerationBeenExecuted(id string, configHash string) bo
 	return false
 }
 
-// MarkScanExecuted marks a scan as executed
+// MarkScanExecuted marks a scan as executed and persists to disk.
 func (c *LocalCache) MarkScanExecuted(id string, configHash string) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	c.Scans[id] = ScanCache{
 		LastExecuted: time.Now().UTC(),
 		ConfigHash:   configHash,
 	}
-	// Async save
-	go func() {
-		if err := c.Save(); err != nil {
-			slog.Warn("error saving cache", "error", err)
-		}
-	}()
+	c.mutex.Unlock()
+
+	if err := c.Save(); err != nil {
+		slog.Warn("error saving cache", "error", err)
+	}
 }
 
-// MarkEnumerationExecuted marks an enumeration as executed
+// MarkEnumerationExecuted marks an enumeration as executed and persists to disk.
 func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
 	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
 	c.Enumerations[id] = ScanCache{
 		LastExecuted: time.Now().UTC(),
 		ConfigHash:   configHash,
 	}
-	// Async save
-	go func() {
-		if err := c.Save(); err != nil {
-			slog.Warn("error saving cache", "error", err)
-		}
-	}()
+	c.mutex.Unlock()
+
+	if err := c.Save(); err != nil {
+		slog.Warn("error saving cache", "error", err)
+	}
 }
 
 // TaskChunk represents a chunk of scan data from the API
@@ -389,8 +390,12 @@ type Runner struct {
 	natsCreds      *NATSCredentials
 	natsCredsMu    sync.RWMutex
 
+	// Lifecycle context — cancelled on agent shutdown
+	ctx context.Context
+
 	// NATS RPC connection and subscriptions
 	natsConn    *nats.Conn
+	natsSubs    []*nats.Subscription
 	natsConnMu  sync.Mutex
 	natsStarted bool // true after first successful NATS connect
 
@@ -405,7 +410,6 @@ var (
 			Expiration(time.Hour).
 			Build()
 	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
-	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
 
 	// K8s subnets cache
 	k8sSubnetsCache     []string
@@ -728,46 +732,59 @@ func (r *Runner) startNATSRPC() error {
 		return fmt.Errorf("failed to connect to NATS at %s: %w", creds.NatsURL, err)
 	}
 
-	// Build and subscribe routers
-	requestRouter := natsrpc.NewRouter()
+	// Build and subscribe routers — r.ctx propagates cancellation on shutdown
+	requestRouter := natsrpc.NewRouter(r.ctx)
 	requestRouter.Handle("httpx", r.handleHTTPX)
 	requestRouter.Handle("port-probe", r.handlePortProbe)
 	requestRouter.Handle("nuclei-retest", r.handleNucleiRetest)
 
-	broadcastRouter := natsrpc.NewRouter()
+	broadcastRouter := natsrpc.NewRouter(r.ctx)
 	broadcastRouter.Handle("health-check", r.handleHealthCheck)
 
-	directRouter := natsrpc.NewRouter()
+	directRouter := natsrpc.NewRouter(r.ctx)
 	directRouter.Handle("health-check", r.handleHealthCheck)
 	directRouter.Handle("debug", r.handleDebug)
 	directRouter.Handle("stop", r.handleStop)
 
 	queueGroup := r.options.AgentNetwork
 
-	if _, err := requestRouter.SubscribeRequests(nc, creds.Subjects.Requests, queueGroup); err != nil {
+	var subs []*nats.Subscription
+
+	reqSub, err := requestRouter.SubscribeRequests(nc, creds.Subjects.Requests, queueGroup)
+	if err != nil {
 		nc.Close()
 		return fmt.Errorf("failed to subscribe to requests on %s: %w", creds.Subjects.Requests, err)
 	}
+	subs = append(subs, reqSub)
 
-	if _, err := broadcastRouter.SubscribeBroadcast(nc, creds.Subjects.Broadcast); err != nil {
+	bcastSub, err := broadcastRouter.SubscribeBroadcast(nc, creds.Subjects.Broadcast)
+	if err != nil {
 		nc.Close()
 		return fmt.Errorf("failed to subscribe to broadcast on %s: %w", creds.Subjects.Broadcast, err)
 	}
+	subs = append(subs, bcastSub)
 
 	directSubject := creds.GroupPrefix + ".direct." + r.options.AgentId
-	if _, err := directRouter.SubscribeDirect(nc, directSubject); err != nil {
+	directSub, err := directRouter.SubscribeDirect(nc, directSubject)
+	if err != nil {
 		nc.Close()
 		return fmt.Errorf("failed to subscribe to direct on %s: %w", directSubject, err)
 	}
+	subs = append(subs, directSub)
 
-	// Swap in the new connection, drain old one
+	// Swap in the new connection, unsubscribe and drain old one
 	r.natsConnMu.Lock()
 	old := r.natsConn
+	oldSubs := r.natsSubs
 	r.natsConn = nc
+	r.natsSubs = subs
 	r.natsStarted = true
 	r.natsConnMu.Unlock()
 
 	if old != nil {
+		for _, sub := range oldSubs {
+			_ = sub.Unsubscribe()
+		}
 		old.Drain()
 	}
 
@@ -1059,7 +1076,7 @@ func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []by
 	return natsrpc.HealthCheckData{
 		AgentID:      r.options.AgentId,
 		AgentName:    r.options.AgentName,
-		Version:      "0.1.0",
+		Version:      Version,
 		Uptime:       time.Since(r.agentStartTime).String(),
 		TasksRunning: len(pendingTasks.GetAll()),
 	}, nil
@@ -1069,11 +1086,7 @@ func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (a
 	uptime := time.Since(r.agentStartTime)
 	hostname, _ := os.Hostname()
 
-	// Process resource usage via getrusage (no external deps)
-	var rusage syscall.Rusage
-	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &rusage)
-
-	// Go runtime memory stats
+	// Go runtime memory stats — cross-platform, no syscall dependency
 	var mem runtime.MemStats
 	runtime.ReadMemStats(&mem)
 
@@ -1086,7 +1099,7 @@ func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (a
 		Agent: natsrpc.AgentInfo{
 			ID:            r.options.AgentId,
 			Name:          r.options.AgentName,
-			Version:       "0.1.0",
+			Version:       Version,
 			Uptime:        uptime.Round(time.Second).String(),
 			UptimeSeconds: uptime.Seconds(),
 			TasksRunning:  len(pendingTasks.GetAll()),
@@ -1098,10 +1111,8 @@ func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (a
 			Hostname: hostname,
 		},
 		Process: natsrpc.ProcessInfo{
-			PID:         os.Getpid(),
-			MemoryRSSMB: float64(rusage.Maxrss) / (1024 * 1024),
-			UserTimeSec: float64(rusage.Utime.Sec) + float64(rusage.Utime.Usec)/1e6,
-			SysTimeSec:  float64(rusage.Stime.Sec) + float64(rusage.Stime.Usec)/1e6,
+			PID:        os.Getpid(),
+			MemAllocMB: float64(mem.Sys) / (1024 * 1024),
 		},
 		Runtime: natsrpc.RuntimeInfo{
 			GoVersion:    runtime.Version(),
@@ -1343,6 +1354,7 @@ func (r *Runner) Run(ctx context.Context) error {
 // agentMode runs the agent in monitoring mode
 func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	r.ctx = ctx
 	defer func() {
 		cancel()
 		// Stop JetStream workers first (finish in-progress scans)
@@ -3099,55 +3111,6 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 	return fmt.Sprintf("%s/%d", network, prefixLen)
 }
 
-// startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket
-// func (r *Runner) startPassiveDiscovery() {
-// 	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
-// 	ifs, err := pcap.FindAllDevs()
-// 	if err != nil {
-// 		slog.Error("Could not list interfaces for passive discovery: %v", err)
-// 		return
-// 	}
-// 	for _, iface := range ifs {
-// 		go func(iface pcap.Interface) {
-// 			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
-// 			if err != nil {
-// 				slog.Error("Could not open interface %s: %v", iface.Name, err)
-// 				return
-// 			}
-// 			defer handle.Close()
-// 			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-// 			for packet := range packetSource.Packets() {
-// 				if netLayer := packet.NetworkLayer(); netLayer != nil {
-// 					src, dst := netLayer.NetworkFlow().Endpoints()
-// 					for _, ep := range []gopacket.Endpoint{src, dst} {
-// 						ip := net.ParseIP(ep.String())
-// 						if ip != nil && ip.IsPrivate() {
-// 							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
-// 						}
-// 					}
-// 				}
-// 			}
-// 		}(iface)
-// 	}
-// 	slog.Info("Started passive discovery on all interfaces")
-// }
-
-// PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
-// func PopAllPassiveDiscoveredIPs() []string {
-// 	if passiveDiscoveredIPs == nil {
-// 		return nil
-// 	}
-// 	var ips []string
-// 	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
-// 		ips = append(ips, k)
-// 		return nil
-// 	})
-// 	for _, k := range ips {
-// 		passiveDiscoveredIPs.Delete(k)
-// 	}
-// 	return ips
-// }
-
 // computeScanConfigHash computes a hash of the scan configuration
 func computeScanConfigHash(scanConfig string, templates []string, assets []string) string {
 	h := sha256.New()
@@ -3337,30 +3300,7 @@ func configureLogging(options *Options) {
 	}
 }
 
-// deleteCacheFileForTesting deletes the execution cache file on startup.
-// This is FOR TESTING PURPOSES ONLY to ensure scans and enumerations are not skipped
-// due to cached execution history.
-// func deleteCacheFileForTesting() {
-// 	homeDir, err := os.UserHomeDir()
-// 	if err != nil {
-// 		slog.Warn("Could not get home directory to delete cache file: %v", err)
-// 		return
-// 	}
-
-// 	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
-// 	if err := os.Remove(cacheFile); err != nil {
-// 		if !os.IsNotExist(err) {
-// 			slog.Warn("Could not delete cache file (this is ok if it doesn't exist): %v", err)
-// 		}
-// 	} else {
-// 		slog.Info("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
-// 	}
-// }
-
 func main() {
-	// FOR TESTING PURPOSES ONLY: Delete the cache file containing executed scans and enumerations
-	// This ensures that scans/enumerations are not skipped due to cached execution history during testing
-	// deleteCacheFileForTesting()
 
 	options := parseOptions()
 

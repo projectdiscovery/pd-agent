@@ -2,6 +2,7 @@ package natsrpc
 
 import (
 	"context"
+	stdjson "encoding/json"
 	json "github.com/json-iterator/go"
 	"fmt"
 	"testing"
@@ -104,7 +105,7 @@ func TestExtractMethod(t *testing.T) {
 // --- Router handler registration ---
 
 func TestRouterHandle(t *testing.T) {
-	r := NewRouter()
+	r := NewRouter(context.Background())
 	called := false
 	r.Handle("test", func(ctx context.Context, method string, data []byte) (any, error) {
 		called = true
@@ -135,7 +136,7 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 	nc := connect(t, ns)
 	defer nc.Close()
 
-	router := NewRouter()
+	router := NewRouter(context.Background())
 	router.Handle("httpx", func(ctx context.Context, method string, data []byte) (any, error) {
 		var req HTTPXRequest
 		if err := json.Unmarshal(data, &req); err != nil {
@@ -192,7 +193,7 @@ func TestSubscribeRequests_UnknownMethod(t *testing.T) {
 	nc := connect(t, ns)
 	defer nc.Close()
 
-	router := NewRouter()
+	router := NewRouter(context.Background())
 	prefix := "ws-test.scanners.requests"
 	sub, err := router.SubscribeRequests(nc, prefix, "test-group")
 	if err != nil {
@@ -227,7 +228,7 @@ func TestSubscribeRequests_HandlerError(t *testing.T) {
 	nc := connect(t, ns)
 	defer nc.Close()
 
-	router := NewRouter()
+	router := NewRouter(context.Background())
 	router.Handle("fail", func(ctx context.Context, method string, data []byte) (any, error) {
 		return nil, fmt.Errorf("intentional failure")
 	})
@@ -278,7 +279,7 @@ func TestSubscribeBroadcast_AllReceive(t *testing.T) {
 		conns[i] = nc
 
 		agentID := fmt.Sprintf("agent-%d", i)
-		router := NewRouter()
+		router := NewRouter(context.Background())
 		router.Handle("health-check", func(ctx context.Context, method string, data []byte) (any, error) {
 			results <- result{agentID: agentID}
 			return HealthCheckData{AgentID: agentID, Version: "test"}, nil
@@ -344,7 +345,7 @@ func TestSubscribeRequests_QueueGroupLoadBalancing(t *testing.T) {
 		conns[i] = nc
 
 		agentID := fmt.Sprintf("agent-%d", i)
-		router := NewRouter()
+		router := NewRouter(context.Background())
 		router.Handle("httpx", func(ctx context.Context, method string, data []byte) (any, error) {
 			counts <- agentID
 			return map[string]string{"agent": agentID}, nil
@@ -413,7 +414,7 @@ func TestResponseEnvelope_JSON(t *testing.T) {
 			name: "ok response with data",
 			resp: Response{
 				Status: "ok",
-				Data:   json.RawMessage(`{"key":"value"}`),
+				Data:   stdjson.RawMessage(`{"key":"value"}`),
 			},
 			expected: `{"status":"ok","data":{"key":"value"}}`,
 		},

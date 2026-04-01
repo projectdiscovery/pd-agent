@@ -17,15 +17,19 @@ import (
 type HandlerFunc func(ctx context.Context, method string, data []byte) (any, error)
 
 // Router dispatches NATS messages to registered handlers based on the method
-// name extracted from the subject suffix.
+// name extracted from the subject suffix. The lifecycle context is propagated
+// to all handlers so they can be cancelled on agent shutdown.
 type Router struct {
+	ctx      context.Context
 	mu       sync.RWMutex
 	handlers map[string]HandlerFunc
 }
 
-// NewRouter creates a Router ready to accept handler registrations.
-func NewRouter() *Router {
+// NewRouter creates a Router with a lifecycle context. When ctx is cancelled,
+// in-flight handlers receive cancellation and should exit promptly.
+func NewRouter(ctx context.Context) *Router {
 	return &Router{
+		ctx:      ctx,
 		handlers: make(map[string]HandlerFunc),
 	}
 }
@@ -54,8 +58,9 @@ func (r *Router) SubscribeRequests(nc *nats.Conn, subjectPrefix, queueGroup stri
 	})
 }
 
-// SubscribeBroadcast subscribes to subjectPrefix.> using a plain Subscribe so
-// that every agent receives every message.
+// SubscribeBroadcast subscribes to subjectPrefix.> using a plain Subscribe
+// (NOT QueueSubscribe) so that every agent receives every message. This is
+// intentional — broadcast messages like health-check need all agents to respond.
 func (r *Router) SubscribeBroadcast(nc *nats.Conn, subjectPrefix string) (*nats.Subscription, error) {
 	subject := subjectPrefix + ".>"
 	return nc.Subscribe(subject, func(msg *nats.Msg) {
@@ -63,8 +68,10 @@ func (r *Router) SubscribeBroadcast(nc *nats.Conn, subjectPrefix string) (*nats.
 	})
 }
 
-// SubscribeDirect subscribes to subjectPrefix.> for a single agent.
-// Used for agent-specific subjects like groupPrefix.direct.<agentID>.
+// SubscribeDirect subscribes to subjectPrefix.> for a single agent using a
+// plain Subscribe. The subject prefix includes the agent ID
+// (e.g., groupPrefix.direct.<agentID>), so only this agent receives messages.
+// Kept as a separate method from SubscribeBroadcast for call-site readability.
 func (r *Router) SubscribeDirect(nc *nats.Conn, subjectPrefix string) (*nats.Subscription, error) {
 	subject := subjectPrefix + ".>"
 	return nc.Subscribe(subject, func(msg *nats.Msg) {
@@ -92,7 +99,7 @@ func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 		return
 	}
 
-	result, err := fn(context.Background(), method, msg.Data)
+	result, err := fn(r.ctx, method, msg.Data)
 	if err != nil {
 		r.respond(msg, Response{
 			Status: "error",

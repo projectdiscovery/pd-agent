@@ -1,8 +1,9 @@
 package natsrpc
 
-import json "github.com/json-iterator/go"
+import "encoding/json"
 
 // Response is the standard JSON envelope sent back over NATS reply subjects.
+// Data uses encoding/json.RawMessage for compatibility across packages.
 type Response struct {
 	Status string          `json:"status"`         // "ok" or "error"
 	Data   json.RawMessage `json:"data,omitempty"` // handler-specific payload
@@ -67,11 +68,10 @@ type SystemInfo struct {
 }
 
 // ProcessInfo contains pd-agent process resource usage.
+// Uses runtime.MemStats (cross-platform) instead of syscall.Rusage.
 type ProcessInfo struct {
-	PID          int     `json:"pid"`
-	MemoryRSSMB  float64 `json:"memory_rss_mb"`
-	UserTimeSec  float64 `json:"user_time_sec"`
-	SysTimeSec   float64 `json:"sys_time_sec"`
+	PID        int     `json:"pid"`
+	MemAllocMB float64 `json:"mem_alloc_mb"` // runtime.MemStats.Sys — total memory from OS
 }
 
 // RuntimeInfo contains Go runtime metrics.
