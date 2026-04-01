@@ -142,8 +142,8 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 			return nil, err
 		}
 		return map[string]any{
-			"targets": req.Targets,
-			"status":  "received",
+			"target": req.Target,
+			"status": "received",
 		}, nil
 	})
 
@@ -157,7 +157,7 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 
 	// Send a request
 	reqData, _ := json.Marshal(HTTPXRequest{
-		Targets: []string{"example.com"},
+		Target: "example.com",
 	})
 
 	msg, err := nc.Request(prefix+".httpx", reqData, 2*time.Second)
@@ -179,9 +179,9 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 		t.Fatalf("failed to unmarshal data: %v", err)
 	}
 
-	targets, ok := result["targets"].([]any)
-	if !ok || len(targets) != 1 || targets[0] != "example.com" {
-		t.Fatalf("unexpected targets: %v", result["targets"])
+	target, ok := result["target"].(string)
+	if !ok || target != "example.com" {
+		t.Fatalf("unexpected target: %v", result["target"])
 	}
 }
 
