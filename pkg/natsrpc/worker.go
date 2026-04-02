@@ -184,7 +184,7 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 		return
 	}
 
-	if err := msg.Ack(); err != nil {
+	if err := ackWithRetry(ctx, msg, 3); err != nil {
 		slog.Error("jetstream worker: ack failed",
 			"worker", workerID,
 			"type", work.Type,
@@ -226,6 +226,7 @@ func ConsumeChunks(
 		FilterSubject: chunkSubject,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		AckWait:       defaultAckWait,
+		MaxDeliver:    1,
 	})
 	if err != nil {
 		return fmt.Errorf("bind chunk consumer %q on stream %q (filter=%s): %w", consumerName, streamName, chunkSubject, err)
@@ -422,13 +423,33 @@ func processChunkMsg(
 		return
 	}
 
-	if err := msg.Ack(); err != nil {
+	if err := ackWithRetry(ctx, msg, 3); err != nil {
 		slog.Error("chunk consumer: ack failed",
 			"subject", chunkSubject,
 			"chunk_id", chunk.ChunkID,
 			"error", err,
 		)
 	}
+}
+
+// ackWithRetry acknowledges a message using DoubleAck (server-confirmed) with
+// retry logic. Plain Ack() is fire-and-forget — if the ack packet is lost, the
+// message stays unacked and can become orphaned when no consumers are pulling.
+func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error {
+	var err error
+	for i := 0; i <= maxRetries; i++ {
+		ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err = msg.DoubleAck(ackCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return fmt.Errorf("ack: context cancelled: %w", ctx.Err())
+		}
+		slog.Warn("ack: retry", "attempt", i+1, "error", err)
+	}
+	return fmt.Errorf("ack failed after %d retries: %w", maxRetries+1, err)
 }
 
 // StartHeartbeat spawns a goroutine that calls msg.InProgress() at the given
