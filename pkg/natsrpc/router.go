@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/nats-io/nats.go"
 )
@@ -99,8 +100,14 @@ func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 		return
 	}
 
+	slog.Info("NATS RPC: request received", "method", method, "subject", msg.Subject)
+
+	start := time.Now()
 	result, err := fn(r.ctx, method, msg.Data)
+	duration := time.Since(start)
+
 	if err != nil {
+		slog.Warn("NATS RPC: request failed", "method", method, "duration", duration, "error", err)
 		r.respond(msg, Response{
 			Status: "error",
 			Error:  err.Error(),
@@ -117,6 +124,7 @@ func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 		return
 	}
 
+	slog.Info("NATS RPC: request completed", "method", method, "duration", duration)
 	r.respond(msg, Response{
 		Status: "ok",
 		Data:   data,

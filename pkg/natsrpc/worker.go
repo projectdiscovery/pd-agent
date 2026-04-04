@@ -2,10 +2,12 @@ package natsrpc
 
 import (
 	"context"
+	"errors"
 	json "github.com/json-iterator/go"
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/klauspost/compress/zstd"
@@ -37,6 +39,9 @@ type WorkerPool struct {
 	handler      WorkHandler
 	wg           sync.WaitGroup
 	cancel       context.CancelFunc
+
+	lastActivity  atomic.Int64 // unix nanos of last work start/finish
+	activeWorkers atomic.Int32 // number of workers currently processing
 }
 
 // NewWorkerPool creates a WorkerPool that consumes work notifications from
@@ -132,6 +137,10 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 }
 
 func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jetstream.Msg) {
+	wp.activeWorkers.Add(1)
+	defer wp.activeWorkers.Add(-1)
+	wp.touchActivity()
+
 	var work WorkMessage
 	if err := json.Unmarshal(msg.Data(), &work); err != nil {
 		slog.Error("jetstream worker: unmarshal work message", "worker", workerID, "error", err)
@@ -200,6 +209,31 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 			"stream_seq", streamSeq,
 		)
 	}
+
+	wp.touchActivity()
+}
+
+func (wp *WorkerPool) touchActivity() {
+	wp.lastActivity.Store(time.Now().UnixNano())
+}
+
+// LastActivity returns the time of the last work activity.
+// Returns zero time if no work has been processed yet.
+func (wp *WorkerPool) LastActivity() time.Time {
+	nanos := wp.lastActivity.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// IdleSince returns the time the pool became idle, or zero time if it's
+// currently processing work or has never processed any work.
+func (wp *WorkerPool) IdleSince() time.Time {
+	if wp.activeWorkers.Load() > 0 {
+		return time.Time{} // actively working — not idle
+	}
+	return wp.LastActivity()
 }
 
 // ConsumeChunks pulls and processes chunks from the group stream using a shared
@@ -242,6 +276,10 @@ func ConsumeChunks(
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			if isConsumerOrStreamGone(err) {
+				slog.Info("chunk consumer: consumer/stream deleted, finishing", "stream", streamName, "subject", chunkSubject)
+				return nil
+			}
 			slog.Debug("chunk consumer: fetch error", "stream", streamName, "subject", chunkSubject, "error", err)
 			time.Sleep(time.Second)
 			continue
@@ -277,6 +315,10 @@ func ConsumeChunks(
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				if isConsumerOrStreamGone(err) {
+					slog.Info("chunk consumer: consumer/stream deleted, finishing", "stream", streamName, "subject", chunkSubject)
+					return nil
+				}
 				slog.Warn("chunk consumer: info error", "stream", streamName, "subject", chunkSubject, "error", err)
 				continue
 			}
@@ -287,6 +329,15 @@ func ConsumeChunks(
 			// Chunks still pending delivery — keep trying
 		}
 	}
+}
+
+// isConsumerOrStreamGone returns true when the error indicates the consumer or
+// stream has been deleted server-side. These are permanent conditions — retrying
+// will loop forever.
+func isConsumerOrStreamGone(err error) bool {
+	return errors.Is(err, jetstream.ErrConsumerNotFound) ||
+		errors.Is(err, jetstream.ErrConsumerDeleted) ||
+		errors.Is(err, jetstream.ErrStreamNotFound)
 }
 
 // ZSTD magic number: 0xFD2FB528 (little-endian)

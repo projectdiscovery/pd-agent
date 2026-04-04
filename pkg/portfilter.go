@@ -54,8 +54,18 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			continue
 		}
 
+		// Strip URL scheme (e.g. "https://host:port" → "host:port")
+		stripped := line
+		if idx := strings.Index(stripped, "://"); idx != -1 {
+			stripped = stripped[idx+3:]
+		}
+		// Remove trailing path (e.g. "host:port/path" → "host:port")
+		if idx := strings.Index(stripped, "/"); idx != -1 {
+			stripped = stripped[:idx]
+		}
+
 		// Try to split host:port using net.SplitHostPort
-		host, port, err := net.SplitHostPort(line)
+		host, port, err := net.SplitHostPort(stripped)
 		if err == nil {
 			// Successfully split, we have both host and port
 			hosts = append(hosts, host)
@@ -64,7 +74,7 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			}
 		} else {
 			// No port, just host
-			hosts = append(hosts, line)
+			hosts = append(hosts, stripped)
 		}
 	}
 

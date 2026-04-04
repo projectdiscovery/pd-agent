@@ -11,7 +11,8 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/projectdiscovery/gologger"
+	"log/slog"
+
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/conversion"
@@ -239,7 +240,7 @@ func getToolsFromSteps(steps []string) []Tool {
 }
 
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
-	gologger.Verbose().Msgf("uploading to cloud: %s", outputFile)
+	slog.Debug("uploading to cloud", "file", outputFile)
 	f, err := os.Open(outputFile)
 	if err != nil {
 		return "", err
@@ -270,7 +271,6 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 	if err != nil {
 		return "", err
 	}
-	fmt.Println(string(body))
 	data := gjson.ParseBytes(body)
 	assetId := data.Get("asset_id").String()
 	return assetId, nil
@@ -303,11 +303,8 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	if err != nil {
 		return "", err
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	fmt.Println(string(body))
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 	return assetId, nil
 }
 
@@ -410,7 +407,7 @@ func hasMoreThan2GBRAM() bool {
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
-		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling code templates", err)
+		slog.Debug("unable to determine system RAM, disabling code templates", "error", err)
 		return false
 	}
 
@@ -424,7 +421,7 @@ func hasMoreThan8GBRAM() bool {
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
-		gologger.Verbose().Msgf("Unable to determine system RAM: %v, defaulting to disabling headless mode", err)
+		slog.Debug("unable to determine system RAM, disabling headless mode", "error", err)
 		return false
 	}
 
@@ -503,7 +500,7 @@ func getEnvs() []string {
 }
 
 func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, error) {
-	gologger.Info().Msgf("Running:\nCMD: %s\nENVS: %s\nARGS: %s", args[0], envs, args)
+	slog.Debug("running tool", "cmd", args[0])
 
 	// Prepare the command
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
@@ -554,7 +551,7 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStdout: %s\nStderr: %s", args[0], err, string(stdoutOutput), string(stderrOutput))
 	}
 
-	gologger.Info().Msgf("Stdout:\n%s\nStderr:\n%s", string(stdoutOutput), string(stderrOutput))
+	slog.Debug("tool execution completed", "cmd", args[0])
 
 	return taskResult, nil
 }

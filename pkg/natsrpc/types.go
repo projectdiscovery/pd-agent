@@ -39,6 +39,23 @@ type HealthCheckData struct {
 	Version      string `json:"version"`
 	Uptime       string `json:"uptime"`
 	TasksRunning int    `json:"tasks_running"`
+	Idle         bool   `json:"idle"`                // true if idle > 1 min
+	IdleSince    string `json:"idle_since,omitempty"` // RFC3339 timestamp if idle > 1 min
+}
+
+// LogsRequest is the payload for the "logs" RPC method.
+type LogsRequest struct {
+	Offset int    `json:"offset"`          // 0 = oldest available entry
+	Limit  int    `json:"limit"`           // max entries to return (default 100, max 500)
+	Level  string `json:"level,omitempty"` // optional filter: INFO, WARNING, ERROR, etc.
+}
+
+// LogsResponse is returned by the "logs" direct handler.
+type LogsResponse struct {
+	Entries []LogEntry `json:"entries"`
+	Total   int        `json:"total"`  // total entries in buffer
+	Offset  int        `json:"offset"` // actual offset used
+	Limit   int        `json:"limit"`  // actual limit used
 }
 
 // DebugData is returned by the "debug" direct handler.

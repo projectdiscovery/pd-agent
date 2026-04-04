@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -19,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -71,6 +73,30 @@ func getAllNucleiTemplates(templateDir string) ([]string, error) {
 		return nil
 	})
 	return templates, err
+}
+
+// ensureNucleiTemplates downloads nuclei templates if they are not already present.
+func ensureNucleiTemplates() {
+	templateDir := pkg.GetNucleiDefaultTemplateDir()
+	if templateDir == "" {
+		slog.Warn("Could not determine nuclei template directory, skipping template download")
+		return
+	}
+
+	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
+		slog.Info("Nuclei templates directory already exists", "path", templateDir)
+		return
+	}
+
+	slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
+	cmd := exec.Command("nuclei", "-update-templates")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		slog.Error("Failed to download nuclei templates", "error", err)
+	} else {
+		slog.Info("Nuclei templates downloaded successfully")
+	}
 }
 
 // Version is set at build time via -ldflags "-X main.Version=v1.0.0"
@@ -387,11 +413,13 @@ type Runner struct {
 	inRequestCount int       // Number of /in requests sent
 	agentStartTime time.Time // When the agent started
 	logBatcher     *batcher.Batcher[string]
+	logBuffer      *natsrpc.LogBuffer
 	natsCreds      *NATSCredentials
 	natsCredsMu    sync.RWMutex
 
 	// Lifecycle context — cancelled on agent shutdown
-	ctx context.Context
+	ctx       context.Context
+	cancelCtx context.CancelFunc
 
 	// NATS RPC connection and subscriptions
 	natsConn    *nats.Conn
@@ -402,6 +430,8 @@ type Runner struct {
 	// JetStream work distribution
 	jsPool   *natsrpc.WorkerPool
 	jsCancel context.CancelFunc
+
+	restartRequested atomic.Bool
 }
 
 var (
@@ -538,6 +568,14 @@ func (r *Runner) logHelper(level, message string) {
 
 	fmt.Printf("[%s] %s: %s\n", entry.Timestamp.Format(time.RFC3339), entry.Level, entry.Message)
 
+	if r.logBuffer != nil {
+		r.logBuffer.Add(natsrpc.LogEntry{
+			Timestamp: entry.Timestamp,
+			Level:     entry.Level,
+			Message:   entry.Message,
+		})
+	}
+
 	// Marshal to JSON
 	jsonData, err := json.Marshal(entry)
 	if err != nil {
@@ -599,7 +637,7 @@ func (r *Runner) uploadLogs(logs []string) {
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from log upload endpoint: %d, body: %s", resp.StatusCode, string(resp.Body)))
+		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from log upload endpoint: %d", resp.StatusCode))
 		return
 	}
 
@@ -641,6 +679,8 @@ func NewRunner(options *Options) (*Runner, error) {
 			r.options.AgentName = r.options.AgentId
 		}
 	}
+
+	r.logBuffer = natsrpc.NewLogBuffer(5000)
 
 	// Initialize log batcher (unless disabled via env)
 	if envutil.GetEnvOrDefault("PDCP_ENABLE_AGENT_LOG_UPLOAD", "true") == "true" {
@@ -749,6 +789,8 @@ func (r *Runner) startNATSRPC() error {
 	directRouter.Handle("health-check", r.handleHealthCheck)
 	directRouter.Handle("debug", r.handleDebug)
 	directRouter.Handle("stop", r.handleStop)
+	directRouter.Handle("restart", r.handleRestart)
+	directRouter.Handle("logs", r.handleLogs)
 
 	queueGroup := r.options.AgentNetwork
 
@@ -792,8 +834,7 @@ func (r *Runner) startNATSRPC() error {
 		old.Drain()
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC connected to %s (requests=%s, broadcast=%s, direct=%s, queue=%s)",
-		creds.NatsURL, creds.Subjects.Requests, creds.Subjects.Broadcast, directSubject, queueGroup))
+	r.logHelper("INFO", "NATS RPC connected")
 	return nil
 }
 
@@ -857,7 +898,7 @@ func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (a
 		return nil, fmt.Errorf("httpx: target is required")
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: httpx target=%s", req.Target))
+	r.logHelper("DEBUG", fmt.Sprintf("NATS RPC: httpx request received"))
 
 	// Write target to temp file (httpx SDK uses InputFile)
 	f, err := os.CreateTemp("", "httpx-targets-*.txt")
@@ -925,7 +966,7 @@ func (r *Runner) handlePortProbe(ctx context.Context, method string, data []byte
 		return nil, fmt.Errorf("port-probe: invalid port %d", req.Port)
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: port-probe host=%s port=%d", req.Host, req.Port))
+	r.logHelper("DEBUG", "NATS RPC: port-probe request received")
 
 	target := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
 	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
@@ -956,8 +997,7 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		return nil, fmt.Errorf("nuclei-retest: template_id, template_encoded, or template_url required")
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d template_id=%s template_url=%s",
-		len(req.Targets), req.TemplateID, req.TemplateURL))
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d", len(req.Targets)))
 
 	// Build SDK options — minimal config for fast execution
 	sdkOpts := []nuclei.NucleiSDKOptions{
@@ -1077,13 +1117,29 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 }
 
 func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
-	return natsrpc.HealthCheckData{
+	hc := natsrpc.HealthCheckData{
 		AgentID:      r.options.AgentId,
 		AgentName:    r.options.AgentName,
 		Version:      Version,
 		Uptime:       time.Since(r.agentStartTime).String(),
 		TasksRunning: len(pendingTasks.GetAll()),
-	}, nil
+	}
+
+	// Report idle if no tasks running and agent has been up > 1 min
+	if hc.TasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
+		hc.Idle = true
+		if r.jsPool != nil {
+			if idle := r.jsPool.IdleSince(); !idle.IsZero() {
+				hc.IdleSince = idle.UTC().Format(time.RFC3339)
+			} else {
+				hc.IdleSince = r.agentStartTime.UTC().Format(time.RFC3339)
+			}
+		} else {
+			hc.IdleSince = r.agentStartTime.UTC().Format(time.RFC3339)
+		}
+	}
+
+	return hc, nil
 }
 
 func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (any, error) {
@@ -1142,6 +1198,46 @@ func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (an
 	return map[string]any{
 		"agent_id": r.options.AgentId,
 		"status":   "stopping",
+	}, nil
+}
+
+func (r *Runner) handleRestart(ctx context.Context, method string, data []byte) (any, error) {
+	r.logHelper("INFO", "NATS RPC: received restart command, restarting agent...")
+	if r.restartRequested.CompareAndSwap(false, true) {
+		go func() {
+			// Small delay to allow the NATS response to be sent before restart
+			time.Sleep(500 * time.Millisecond)
+			r.cancelCtx()
+		}()
+	}
+	return map[string]any{
+		"agent_id": r.options.AgentId,
+		"status":   "restarting",
+	}, nil
+}
+
+func (r *Runner) handleLogs(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.LogsRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid logs request: %w", err)
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 100
+	}
+	if req.Limit > 500 {
+		req.Limit = 500
+	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
+
+	entries, total := r.logBuffer.Query(req.Offset, req.Limit, req.Level)
+	return natsrpc.LogsResponse{
+		Entries: entries,
+		Total:   total,
+		Offset:  req.Offset,
+		Limit:   req.Limit,
 	}, nil
 }
 
@@ -1330,35 +1426,74 @@ func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.
 
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
-	// Recommend the time to use on platform dashboard to schedule the scans
-	r.logHelper("INFO", "platform dashboard uses UTC timezone")
-	now := time.Now().UTC()
-	recommendedTime := now.Add(5 * time.Minute)
-	r.logHelper("INFO", fmt.Sprintf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST")))
+	for {
+		var infoMessage strings.Builder
+		infoMessage.WriteString("running in agent mode")
+		if r.options.AgentId != "" {
+			infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
+		}
+		if len(r.options.AgentTags) > 0 {
+			infoMessage.WriteString(fmt.Sprintf(" (tags: [%s])", strings.Join(r.options.AgentTags, ", ")))
+		} else {
+			infoMessage.WriteString(" (tags: [])")
+		}
+		if r.options.AgentNetwork != "" {
+			infoMessage.WriteString(fmt.Sprintf(" (network: %s)", r.options.AgentNetwork))
+		}
 
-	var infoMessage strings.Builder
-	infoMessage.WriteString("running in agent mode")
-	if r.options.AgentId != "" {
-		infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
+		r.logHelper("INFO", infoMessage.String())
+
+		if err := r.agentMode(ctx); err != nil {
+			return err
+		}
+
+		if !r.restartRequested.Load() {
+			return nil
+		}
+
+		r.logHelper("INFO", "restart: reinitializing agent...")
+		r.resetForRestart()
 	}
-	if len(r.options.AgentTags) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (tags: [%s])", strings.Join(r.options.AgentTags, ", ")))
-	} else {
-		infoMessage.WriteString(" (tags: [])")
-	}
-	if r.options.AgentNetwork != "" {
-		infoMessage.WriteString(fmt.Sprintf(" (network: %s)", r.options.AgentNetwork))
+}
+
+func (r *Runner) resetForRestart() {
+	r.restartRequested.Store(false)
+
+	// Clear NATS state so the next credential receipt triggers a fresh startNATSRPC
+	r.natsConnMu.Lock()
+	r.natsConn = nil
+	r.natsSubs = nil
+	r.natsStarted = false
+	r.natsConnMu.Unlock()
+
+	// Force isNew=true path in inFunctionTickCallback
+	r.natsCredsMu.Lock()
+	r.natsCreds = nil
+	r.natsCredsMu.Unlock()
+
+	r.ctx = nil
+	r.cancelCtx = nil
+	r.jsPool = nil
+	r.jsCancel = nil
+
+	// Recreate log batcher (can't reuse after Stop+WaitDone — internal channels are closed)
+	if envutil.GetEnvOrDefault("PDCP_ENABLE_AGENT_LOG_UPLOAD", "true") == "true" {
+		r.logBatcher = batcher.New[string](
+			batcher.WithMaxCapacity[string](100),
+			batcher.WithFlushInterval[string](30*time.Second),
+			batcher.WithFlushCallback[string](r.uploadLogs),
+		)
+		go r.logBatcher.Run()
 	}
 
-	r.logHelper("INFO", infoMessage.String())
-
-	return r.agentMode(ctx)
+	isRegistered = false
 }
 
 // agentMode runs the agent in monitoring mode
 func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	r.ctx = ctx
+	r.cancelCtx = cancel
 	defer func() {
 		cancel()
 		// Stop JetStream workers first (finish in-progress scans)
@@ -1471,7 +1606,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
 		}
 
-		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
+		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d", currentPage, totalPages))
 
 		// Process scans in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -1559,7 +1694,7 @@ func (r *Runner) getScans(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
+						r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)", name, targetExecutionTime, now))
 						return
 					}
 				}
@@ -1568,12 +1703,12 @@ func (r *Runner) getScans(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already completed recently\n", name))
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already completed recently", name))
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already in progress\n", name))
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already in progress", name))
 					return
 				}
 
@@ -1725,7 +1860,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
 		}
 
-		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
+		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d", currentPage, totalPages))
 
 		// Process enumerations in parallel
 		result.Get("data").ForEach(func(key, value gjson.Result) bool {
@@ -1792,7 +1927,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
 
 					if !targetExecutionTime.IsZero() && !isInRange {
-						r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
+						r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)", name, targetExecutionTime, now))
 						return
 					}
 				}
@@ -1801,12 +1936,12 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// First check completed and pending tasks
 				if completedTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already completed recently\n", name))
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already completed recently", name))
 					return
 				}
 
 				if pendingTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already in progress\n", name))
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already in progress", name))
 					return
 				}
 
@@ -1817,7 +1952,7 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 					return
 				}
 
-				r.logHelper("VERBOSE", fmt.Sprintf("Before sanitization: %s", enumerationConfig))
+				r.logHelper("DEBUG", "fetched enumeration config for sanitization")
 
 				// Sanitize enumeration config (remove unsupported steps)
 				enumerationConfig = r.sanitizeEnumerationConfig(enumerationConfig, name)
@@ -1843,11 +1978,11 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 
 				// Check cache before proceeding
 				if r.localCache.HasEnumerationBeenExecuted(enumID, configHash) && !schedule.Exists() {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it was already executed with same configuration\n", name))
+					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it was already executed with same configuration", name))
 					return
 				}
 
-				r.logHelper("INFO", fmt.Sprintf("enumeration \"%s\" enqueued...\n", name))
+				r.logHelper("INFO", fmt.Sprintf("enumeration \"%s\" enqueued", name))
 
 				isDistributed := behavior == "distribute"
 
@@ -2056,7 +2191,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s\nStdout: %s\nStderr: %s", scanID, metaID, taskResult.Stdout, taskResult.Stderr))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	} else {
 		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	}
@@ -2130,7 +2265,7 @@ func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, exe
 			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
 				r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status: %v", taskType, err))
 			} else {
-				r.logHelper("INFO", fmt.Sprintf("Updated chunk %s status to in_progress", chunk.ChunkID))
+				r.logHelper("DEBUG", fmt.Sprintf("Updated chunk %s status to in_progress", chunk.ChunkID))
 			}
 
 			// Start a goroutine to periodically update status (heartbeat)
@@ -2323,7 +2458,7 @@ func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config
 
 // elaborateScan processes a non-distributed scan using the same logic as pd-agent
 func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	r.logHelper("INFO", fmt.Sprintf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets)))
+	r.logHelper("DEBUG", fmt.Sprintf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets)))
 	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil)
 }
 
@@ -2385,7 +2520,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s\nStdout: %s\nStderr: %s", enumID, metaID, taskResult.Stdout, taskResult.Stderr))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
 	} else {
 		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
 	}
@@ -2402,7 +2537,7 @@ func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID 
 
 // elaborateEnumeration processes a non-distributed enumeration
 func (r *Runner) elaborateEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	r.logHelper("INFO", fmt.Sprintf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
+	r.logHelper("DEBUG", fmt.Sprintf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
 	r.executeEnumeration(ctx, enumID, metaID, steps, assets)
 }
 
@@ -2695,8 +2830,8 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	if inResp.StatusCode != http.StatusOK {
-		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(inResp.Body)))
-		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(inResp.Body))
+		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d", inResp.StatusCode))
+		return fmt.Errorf("unexpected status code from /in endpoint: %d", inResp.StatusCode)
 	}
 
 	// Parse the /in response to extract NATS credentials (if present)
@@ -2710,12 +2845,12 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		r.natsCredsMu.Unlock()
 
 		if prev == nil {
-			r.logHelper("INFO", fmt.Sprintf("received NATS credentials: url=%s stream=%s expires_at=%s",
-				agentInResp.Nats.NatsURL, agentInResp.Nats.Stream, agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
 			r.onNATSCredentialsReceived(true)
 		} else if !prev.ExpiresAt.Equal(agentInResp.Nats.ExpiresAt) {
-			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed: url=%s stream=%s expires_at=%s",
-				agentInResp.Nats.NatsURL, agentInResp.Nats.Stream, agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
 			r.onNATSCredentialsReceived(false)
 		}
 	}
@@ -2881,7 +3016,7 @@ func getCachedK8sSubnets() []string {
 	k8sSubnetsCacheOnce.Do(func() {
 		k8sSubnetsCache = getK8sSubnets()
 		if len(k8sSubnetsCache) > 0 {
-			fmt.Printf("[INFO] Cached %d Kubernetes subnets for reuse\n", len(k8sSubnetsCache))
+			slog.Debug("cached Kubernetes subnets for reuse", "count", len(k8sSubnetsCache))
 		}
 	})
 	return k8sSubnetsCache
@@ -2933,7 +3068,7 @@ func getK8sSubnets() []string {
 	}
 
 	if len(serviceCidrs) > 0 {
-		slog.Info("Found service CIDRs", "count", len(serviceCidrs), "cidrs", serviceCidrs)
+		slog.Debug("Found service CIDRs", "count", len(serviceCidrs))
 		assets = append(assets, serviceCidrs...)
 	}
 
@@ -2993,13 +3128,13 @@ func getK8sSubnets() []string {
 	// Calculate supernets for node IPs and pod CIDRs
 	if len(nodeIPs) > 0 {
 		nodeSupernets := supernetMultiple(nodeIPs)
-		slog.Info("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets), "supernets", nodeSupernets)
+		slog.Debug("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets))
 		assets = append(assets, nodeSupernets...)
 	}
 
 	if len(podCidrs) > 0 {
 		podSupernets := supernetMultiple(podCidrs)
-		slog.Info("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets), "supernets", podSupernets)
+		slog.Debug("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets))
 		assets = append(assets, podSupernets...)
 	}
 
@@ -3321,6 +3456,9 @@ func main() {
 		slog.Error("Missing required prerequisites", "tools", strings.Join(missingTools, ", "))
 	}
 
+	// Ensure nuclei templates are downloaded before starting the agent
+	ensureNucleiTemplates()
+
 	pdcpRunner, err := NewRunner(options)
 	if err != nil {
 		slog.Error("Could not create runner", "error", err)
@@ -3341,7 +3479,7 @@ func main() {
 
 	err = pdcpRunner.Run(ctx)
 	if err != nil {
-		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s\n", err))
+		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s", err))
 		os.Exit(1)
 	}
 }
