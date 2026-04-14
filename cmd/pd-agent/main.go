@@ -42,6 +42,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
 	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
+	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
@@ -673,10 +674,15 @@ func NewRunner(options *Options) (*Runner, error) {
 		r.logHelper("WARNING", fmt.Sprintf("error loading cache: %v", err))
 	}
 
-	// Generate a unique agent ID using xid (similar to tunnelx)
-	// This creates a globally unique ID like "c5s8v3k0h0ql5r2g0000"
+	// Generate or validate agent ID (xid format: 20 chars, base32-encoded).
 	if r.options.AgentId == "" {
 		r.options.AgentId = xid.New().String()
+	} else {
+		// Validate that a user-provided or self-update-injected ID is a valid xid.
+		if _, err := xid.FromString(r.options.AgentId); err != nil {
+			slog.Error("invalid agent ID (must be a valid xid)", "agent_id", r.options.AgentId, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Initialize AgentName after AgentId is generated
@@ -800,7 +806,10 @@ func (r *Runner) startNATSRPC() error {
 	directRouter.Handle("debug", r.handleDebug)
 	directRouter.Handle("stop", r.handleStop)
 	directRouter.Handle("restart", r.handleRestart)
+	directRouter.Handle("update", r.handleUpdate)
 	directRouter.Handle("logs", r.handleLogs)
+
+	broadcastRouter.Handle("update", r.handleUpdate)
 
 	queueGroup := r.options.AgentNetwork
 
@@ -1239,6 +1248,68 @@ func (r *Runner) handleRestart(ctx context.Context, method string, data []byte) 
 	}, nil
 }
 
+func (r *Runner) handleUpdate(ctx context.Context, method string, data []byte) (any, error) {
+	var req selfupdate.UpdateRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid update request: %w", err)
+	}
+
+	if req.Version == "" {
+		req.Version = "latest"
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received update command (version=%s)", req.Version))
+
+	result := selfupdate.UpdateResult{
+		AgentID:        r.options.AgentId,
+		CurrentVersion: Version,
+		TargetVersion:  req.Version,
+	}
+
+	// Run update in background — we need to send the NATS response first.
+	// Download and verify BEFORE draining connections, so on failure the
+	// agent keeps running normally.
+	go func() {
+		// Small delay to let the NATS response go out.
+		time.Sleep(500 * time.Millisecond)
+
+		// Phase 1: Download and verify (agent still fully operational).
+		r.logHelper("INFO", "selfupdate: downloading and verifying new binary...")
+		newBinary, err := selfupdate.DownloadAndVerify(ctx, Version, req.Version)
+		if err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate failed: %v", err))
+			return // agent keeps running, NATS still connected
+		}
+
+		// Phase 2: Download succeeded — now drain and replace.
+		r.logHelper("INFO", "selfupdate: binary verified, draining in-flight work...")
+
+		if r.jsCancel != nil {
+			r.jsCancel()
+		}
+		if r.jsPool != nil {
+			r.jsPool.Stop()
+		}
+		r.stopNATSRPC()
+
+		r.logHelper("INFO", "selfupdate: applying update...")
+		if err := selfupdate.Apply(newBinary, Version, r.options.AgentId); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate apply failed: %v", err))
+			// Binary replace failed. NATS is drained. Restart the process
+			// to reconnect — same binary, same version.
+			r.logHelper("INFO", "selfupdate: restarting agent to recover NATS connection...")
+			execPath, _ := os.Executable()
+			_ = syscall.Exec(execPath, os.Args, os.Environ())
+			return
+		}
+		// If Apply succeeded, syscall.Exec replaced this process.
+	}()
+
+	result.Status = "updating"
+	result.Message = fmt.Sprintf("downloading %s, will restart after in-flight work completes", req.Version)
+	return result, nil
+}
+
 func (r *Runner) handleLogs(ctx context.Context, method string, data []byte) (any, error) {
 	var req natsrpc.LogsRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -1477,7 +1548,7 @@ func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.
 func (r *Runner) Run(ctx context.Context) error {
 	for {
 		var infoMessage strings.Builder
-		infoMessage.WriteString("running in agent mode")
+		infoMessage.WriteString(fmt.Sprintf("pd-agent %s — running in agent mode", Version))
 		if r.options.AgentId != "" {
 			infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
 		}
@@ -3447,6 +3518,7 @@ func parseOptions() *Options {
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", AgentNetworkEnv, "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
+		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the agent ID (auto-generated if empty, persisted across self-updates)"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
@@ -3519,10 +3591,19 @@ func parseOptions() *Options {
 func configureLogging(options *Options) {
 	if options.Verbose {
 		gologger.DefaultLogger.SetMaxLevel(levels.LevelVerbose)
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 }
 
 func main() {
+	// Handle -version flag before anything else.
+	for _, arg := range os.Args[1:] {
+		if arg == "-version" || arg == "--version" {
+			fmt.Println(Version)
+			os.Exit(0)
+		}
+	}
+
 	// Set GOMAXPROCS from cgroup CPU quota (containers). No-op on bare metal.
 	_, _ = maxprocs.Set(maxprocs.Logger(func(format string, args ...interface{}) {
 		slog.Info(fmt.Sprintf(format, args...))
