@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/projectdiscovery/pd-agent/pkg/agentproto"
+	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -227,6 +228,11 @@ func (wp *WorkerPool) LastActivity() time.Time {
 	return time.Unix(0, nanos)
 }
 
+// ActiveWorkers returns the number of workers currently processing a message.
+func (wp *WorkerPool) ActiveWorkers() int32 {
+	return wp.activeWorkers.Load()
+}
+
 // IdleSince returns the time the pool became idle, or zero time if it's
 // currently processing work or has never processed any work.
 func (wp *WorkerPool) IdleSince() time.Time {
@@ -236,10 +242,22 @@ func (wp *WorkerPool) IdleSince() time.Time {
 	return wp.LastActivity()
 }
 
+// ChunkScaler is the interface for reporting chunk durations to the adaptive
+// scaler. If nil, no duration tracking is performed.
+type ChunkScaler interface {
+	RecordChunkDuration(d time.Duration)
+}
+
 // ConsumeChunks pulls and processes chunks from the group stream using a shared
 // durable consumer with a FilterSubject scoped to the scan's chunk subject.
 // All agents in the same group bind to the same consumer name, so each chunk
 // is delivered to exactly one agent.
+//
+// sem controls how many chunks are processed concurrently. If nil, a fixed
+// semaphore is created from chunkParallelism. When a ResizableSemaphore is
+// provided, the adaptive scaler can adjust concurrency at runtime.
+//
+// scaler (optional) receives chunk duration reports for adaptive scaling.
 //
 // processFn is called for each chunk. If it returns an error, the chunk is
 // nak'd for redelivery. ConsumeChunks returns when the stream is drained
@@ -249,10 +267,17 @@ func ConsumeChunks(
 	js jetstream.JetStream,
 	streamName, consumerName, chunkSubject string,
 	chunkParallelism int,
+	sem *resourceprofile.ResizableSemaphore,
+	scaler ChunkScaler,
 	processFn func(ctx context.Context, chunk *ChunkMessage) error,
 ) error {
 	if chunkParallelism <= 0 {
 		chunkParallelism = 1
+	}
+
+	// If no external semaphore provided, create a fixed one.
+	if sem == nil {
+		sem = resourceprofile.NewResizableSemaphore(chunkParallelism, chunkParallelism)
 	}
 
 	consumer, err := js.CreateOrUpdateConsumer(ctx, streamName, jetstream.ConsumerConfig{
@@ -266,12 +291,22 @@ func ConsumeChunks(
 		return fmt.Errorf("bind chunk consumer %q on stream %q (filter=%s): %w", consumerName, streamName, chunkSubject, err)
 	}
 
+	// Track all in-flight chunks so we can wait for them before exiting.
+	var inflightWg sync.WaitGroup
+	defer inflightWg.Wait() // ensure all chunks finish before ConsumeChunks returns
+
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		batch, err := consumer.Fetch(chunkParallelism, jetstream.FetchMaxWait(5*time.Second))
+		// Use current semaphore size for fetch batch size.
+		fetchSize := sem.Size()
+		if fetchSize < 1 {
+			fetchSize = 1
+		}
+
+		batch, err := consumer.Fetch(fetchSize, jetstream.FetchMaxWait(5*time.Second))
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -288,7 +323,33 @@ func ConsumeChunks(
 		gotMessages := false
 		for msg := range batch.Messages() {
 			gotMessages = true
-			processChunkMsg(ctx, msg, chunkSubject, processFn)
+
+			// Start heartbeat BEFORE acquiring semaphore — keeps the message
+			// alive while waiting for a processing slot.
+			stopHeartbeat := StartHeartbeat(ctx, msg, defaultHeartbeatInterval)
+
+			// Acquire semaphore slot — blocks if all slots are occupied.
+			// This is the only concurrency control: when a chunk finishes and
+			// releases its slot, the next Acquire unblocks immediately. No
+			// batch-level waiting — chunks flow through continuously.
+			if err := sem.Acquire(ctx); err != nil {
+				stopHeartbeat()
+				return err // context cancelled
+			}
+			inflightWg.Add(1)
+			go func(m jetstream.Msg, stopHB context.CancelFunc) {
+				defer inflightWg.Done()
+				defer sem.Release()
+				defer stopHB()
+				// Use a detached context for processing so in-flight chunks
+				// finish even after the fetch context is cancelled.
+				processCtx := context.WithoutCancel(ctx)
+				start := time.Now()
+				processChunkMsg(processCtx, m, chunkSubject, processFn)
+				if scaler != nil {
+					scaler.RecordChunkDuration(time.Since(start))
+				}
+			}(msg, stopHeartbeat)
 		}
 
 		if !gotMessages {

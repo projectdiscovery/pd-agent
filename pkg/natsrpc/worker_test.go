@@ -14,6 +14,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/projectdiscovery/pd-agent/pkg/agentproto"
+	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -181,7 +182,7 @@ func TestConsumeChunks_ProcessesAllChunks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	err := ConsumeChunks(ctx, js, testStreamName, "test-group", chunkSubject, 1,
+	err := ConsumeChunks(ctx, js, testStreamName, "test-group", chunkSubject, 1, nil, nil,
 		func(ctx context.Context, chunk *ChunkMessage) error {
 			mu.Lock()
 			processed[chunk.ChunkID] = true
@@ -233,7 +234,7 @@ func TestConsumeChunks_CompetingConsumers(t *testing.T) {
 	// Agent 1 — same consumer name = shared (competing)
 	go func() {
 		defer wg.Done()
-		_ = ConsumeChunks(ctx, js, testStreamName, "shared-group", chunkSubject, 1,
+		_ = ConsumeChunks(ctx, js, testStreamName, "shared-group", chunkSubject, 1, nil, nil,
 			func(ctx context.Context, chunk *ChunkMessage) error {
 				mu.Lock()
 				agent1Chunks[chunk.ChunkID] = true
@@ -247,7 +248,7 @@ func TestConsumeChunks_CompetingConsumers(t *testing.T) {
 	// Agent 2 — same consumer name
 	go func() {
 		defer wg.Done()
-		_ = ConsumeChunks(ctx, js, testStreamName, "shared-group", chunkSubject, 1,
+		_ = ConsumeChunks(ctx, js, testStreamName, "shared-group", chunkSubject, 1, nil, nil,
 			func(ctx context.Context, chunk *ChunkMessage) error {
 				mu.Lock()
 				agent2Chunks[chunk.ChunkID] = true
@@ -435,5 +436,86 @@ func TestFilterSubject_WorkerOnlySeesWorkMessages(t *testing.T) {
 
 	if len(receivedIDs) != 1 || receivedIDs[0] != "only-work" {
 		t.Errorf("expected exactly 1 work message 'only-work', got %v", receivedIDs)
+	}
+}
+
+// mockScaler implements ChunkScaler for testing.
+type mockScaler struct {
+	durations []time.Duration
+	mu        sync.Mutex
+}
+
+func (m *mockScaler) RecordChunkDuration(d time.Duration) {
+	m.mu.Lock()
+	m.durations = append(m.durations, d)
+	m.mu.Unlock()
+}
+
+func TestConsumeChunks_ParallelProcessing(t *testing.T) {
+	ns := startJetStreamServer(t)
+	_, js := jsConnect(t, ns)
+
+	createStream(t, js, testStreamName, []string{testGroupPrefix + ".>"})
+
+	chunkSubject := testGroupPrefix + ".scan-parallel.chunks"
+	chunkCount := 10
+
+	for i := 1; i <= chunkCount; i++ {
+		publishChunk(t, js, chunkSubject, &agentproto.ScanRequest{
+			ChunkID: fmt.Sprintf("c%d", i),
+			Targets: map[string]int64{fmt.Sprintf("target-%d.example.com", i): 0},
+		})
+	}
+
+	semSize := 3
+	sem := resourceprofile.NewResizableSemaphore(semSize, semSize)
+	scaler := &mockScaler{}
+
+	var concurrent atomic.Int32
+	var maxConcurrent atomic.Int32
+	var processedCount atomic.Int32
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	err := ConsumeChunks(ctx, js, testStreamName, "parallel-group", chunkSubject, semSize, sem, scaler,
+		func(ctx context.Context, chunk *ChunkMessage) error {
+			cur := concurrent.Add(1)
+			defer concurrent.Add(-1)
+
+			// Track max concurrency using CAS loop.
+			for {
+				old := maxConcurrent.Load()
+				if cur <= old || maxConcurrent.CompareAndSwap(old, cur) {
+					break
+				}
+			}
+
+			// Simulate work so chunks overlap.
+			time.Sleep(50 * time.Millisecond)
+			processedCount.Add(1)
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ConsumeChunks: %v", err)
+	}
+
+	// Verify all chunks were processed.
+	if got := processedCount.Load(); got != int32(chunkCount) {
+		t.Errorf("expected %d chunks processed, got %d", chunkCount, got)
+	}
+
+	// Verify max concurrency never exceeded semaphore size.
+	if mc := maxConcurrent.Load(); mc > int32(semSize) {
+		t.Errorf("max concurrent %d exceeded semaphore size %d", mc, semSize)
+	}
+
+	// Verify scaler received duration reports for all chunks.
+	scaler.mu.Lock()
+	durCount := len(scaler.durations)
+	scaler.mu.Unlock()
+	if durCount != chunkCount {
+		t.Errorf("expected %d duration reports, got %d", chunkCount, durCount)
 	}
 }
