@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -106,93 +107,239 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		}
 		return taskResult, outputFiles, nil
 	} else if task.Options.EnumerationID != "" {
-		// run: dnsx | naabu | httpx - for now execute all the tools in parallel
-		// for the time being we ignore the steps from cloud
-		// uploads are performed to different ids - the api was not designed with assets associated to specific enumeration id
-		tools := getToolsFromSteps(task.Options.Steps)
-		// track naabu output as input to next steps
-		var (
-			naabuOutput     []string
-			naabuOutputFile string
-			manualAssetId   = task.Options.EnumerationID
-			outputFiles     []string // Collect all output files from enumeration tools
-		)
-		for _, tool := range tools {
-			// Verify tool exists in PATH
-			if err := verifyToolInPath(tool.Name); err != nil {
-				return nil, nil, err
-			}
+		// Enumeration pipeline: linear flow, each step gates the next.
+		//
+		//   1. dnsx       → resolve hostnames (skip if all IPs)
+		//   2. port scan  → find open ports (always runs)
+		//   3. httpx      → probe web services (only on open ports)
+		//   4. httpx -screenshot → screenshot (only on confirmed web services)
+		//   5. tlsx       → TLS scan (only on open ports)
 
-			// Use naabu output as input for subsequent tools (httpx, tlsx)
-			currentHosts := task.Options.Hosts
-			if len(naabuOutput) > 0 && tool.Name != "dnsx" && tool.Name != "naabu" {
-				currentHosts = naabuOutput
-			}
+		steps := task.Options.Steps
+		wantScreenshot := sliceutil.Contains(steps, "http_screenshot")
+		manualAssetId := task.Options.EnumerationID
+		var outputFiles []string
 
-			// Create a temporary task with current hosts for this tool
-			currentTask := *task
-			currentTask.Options.Hosts = currentHosts
+		hosts := task.Options.Hosts
+		enumID := task.Options.EnumerationID
 
-			// todo: remove this patch for testing
-			// currentTask.Options.Hosts = []string{"192.168.179.2:8000"}
-			envs, args, outputFile, removeFunc, err := parseGenericArgs(&currentTask)
-			if err != nil {
-				return nil, nil, err
-			}
-			defer removeFunc()
-			args[0] = tool.Name
-			// handle per tool specific args
-			if task.Options.Output != "" {
-				_ = fileutil.CreateFolder(task.Options.Output)
-				outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
-				args = append(args, "-o", outputFile)
-			}
-			hasToolDashboardUpload := stringsutil.EqualFoldAny(args[0], "httpx", "naabu", "tlsx")
-			if hasToolDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
-				args = append(args,
-					"-team-id", os.Getenv("PDCP_TEAM_ID"),
-					"-dashboard",
-					"-asset-id", manualAssetId,
-				)
-			}
-			args = append(args, tool.Args...)
-			if _, err := runCommand(ctx, envs, args); err != nil {
-				return nil, nil, err
-			}
-
-			// Collect output file for cleanup
-			if outputFile != "" {
-				outputFiles = append(outputFiles, outputFile)
-			}
-
-			// if tool is naabu get the output for next steps
-			if args[0] == "naabu" && outputFile != "" {
-				c, err := fileutil.ReadFile(outputFile)
+		// --- Step 1: DNS resolve (skip if all targets are IPs) ---
+		if sliceutil.Contains(steps, "dns_resolve") {
+			ips, hostnames := splitIPsAndHostnames(hosts)
+			if len(hostnames) == 0 {
+				slog.Info("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
+			} else {
+				of, err := runEnumTool(ctx, task, "dnsx", hostnames, nil, &manualAssetId, &outputFiles)
 				if err != nil {
 					return nil, nil, err
 				}
-				for line := range c {
-					naabuOutput = append(naabuOutput, line)
-				}
-				naabuOutputFile = outputFile
-				// attempt to update existing asset
-				// upload naabu output
-				assetId, err := uploadToCloudWithId(ctx, task, naabuOutputFile, task.Options.EnumerationID)
-				// if updating fails, upload to a new manual asset
+				// dnsx doesn't change the host list for subsequent tools
+				_ = of
+			}
+		}
+
+		// --- Step 2: Port scan (always — use step's naabu or quick filter) ---
+		var hostsWithOpenPorts []string
+		if sliceutil.Contains(steps, "port_scan") {
+			// Full port scan via naabu
+			var naabuArgs []string
+			if sliceutil.Contains(steps, "ports_service_scan") {
+				naabuArgs = []string{"-nmap-cli", "nmap -sV -Pn"}
+			}
+			of, err := runEnumTool(ctx, task, "naabu", hosts, naabuArgs, &manualAssetId, &outputFiles)
+			if err != nil {
+				return nil, nil, err
+			}
+			if of != "" {
+				c, err := fileutil.ReadFile(of)
 				if err == nil {
-					manualAssetId = assetId
-				} else {
-					manualAssetId, err = uploadToCloud(ctx, task, naabuOutputFile)
-					if err != nil {
-						return nil, nil, err
+					for line := range c {
+						hostsWithOpenPorts = append(hostsWithOpenPorts, line)
 					}
 				}
 			}
+		} else {
+			// No port_scan step — quick filter on HTTP ports (80, 443, 8443)
+			filtered, err := quickPortFilter(ctx, hosts, enumID)
+			if err != nil {
+				slog.Warn("quick port filter failed, proceeding with all hosts", "error", err)
+				hostsWithOpenPorts = hosts
+			} else {
+				hostsWithOpenPorts = filtered
+			}
 		}
+
+		slog.Info("port scan complete",
+			"original_hosts", len(hosts),
+			"hosts_with_open_ports", len(hostsWithOpenPorts),
+			"enumeration_id", enumID)
+
+		if len(hostsWithOpenPorts) == 0 {
+			slog.Info("no open ports found, skipping httpx/tlsx/screenshot", "enumeration_id", enumID)
+			return nil, outputFiles, nil
+		}
+
+		// --- Step 3: httpx probe (on open ports only, no screenshot) ---
+		var webServices []string
+		if sliceutil.Contains(steps, "http_probe") {
+			of, err := runEnumTool(ctx, task, "httpx", hostsWithOpenPorts, []string{"-irr"}, &manualAssetId, &outputFiles)
+			if err != nil {
+				return nil, nil, err
+			}
+			if of != "" {
+				c, err := fileutil.ReadFile(of)
+				if err == nil {
+					for line := range c {
+						webServices = append(webServices, line)
+					}
+				}
+			}
+			slog.Info("httpx probe complete",
+				"input_hosts", len(hostsWithOpenPorts),
+				"web_services_found", len(webServices),
+				"enumeration_id", enumID)
+		}
+
+		// --- Step 4: httpx screenshot (only on confirmed web services) ---
+		if wantScreenshot && len(webServices) > 0 {
+			slog.Info("running httpx screenshot on confirmed web services",
+				"web_services", len(webServices), "enumeration_id", enumID)
+			_, err := runEnumTool(ctx, task, "httpx", webServices, []string{"-screenshot", "-irr"}, &manualAssetId, &outputFiles)
+			if err != nil {
+				return nil, nil, err
+			}
+		} else if wantScreenshot {
+			slog.Info("skipping httpx screenshot, no web services found", "enumeration_id", enumID)
+		}
+
+		// --- Step 5: TLS scan (on open ports only) ---
+		if sliceutil.Contains(steps, "tls_scan") {
+			_, err := runEnumTool(ctx, task, "tlsx", hostsWithOpenPorts, nil, &manualAssetId, &outputFiles)
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+
 		return nil, outputFiles, nil
 	}
 
 	return nil, nil, nil
+}
+
+// runEnumTool executes a single enumeration tool and handles output file, dashboard
+// upload, and asset ID tracking. Returns the output file path (if any).
+func runEnumTool(
+	ctx context.Context,
+	task *types.Task,
+	toolName string,
+	hosts []string,
+	extraArgs []string,
+	manualAssetId *string,
+	outputFiles *[]string,
+) (string, error) {
+	if err := verifyToolInPath(toolName); err != nil {
+		return "", err
+	}
+
+	currentTask := *task
+	currentTask.Options.Hosts = hosts
+
+	envs, args, outputFile, removeFunc, err := parseGenericArgs(&currentTask)
+	if err != nil {
+		return "", err
+	}
+	defer removeFunc()
+	args[0] = toolName
+
+	// Output file
+	if task.Options.Output != "" {
+		_ = fileutil.CreateFolder(task.Options.Output)
+		suffix := toolName
+		if sliceutil.Contains(extraArgs, "-screenshot") {
+			suffix = toolName + "-screenshot"
+		}
+		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", suffix))
+		args = append(args, "-o", outputFile)
+	}
+
+	// httpx/naabu always need an output file so we can read results for the next step.
+	if outputFile == "" && (toolName == "httpx" || toolName == "naabu") {
+		tmpOut, err := fileutil.GetTempFileName()
+		if err != nil {
+			return "", fmt.Errorf("create temp output file for %s: %w", toolName, err)
+		}
+		outputFile = tmpOut
+		args = append(args, "-o", outputFile)
+	}
+
+	// Dashboard upload flags for tools that support it.
+	hasDashboardUpload := stringsutil.EqualFoldAny(toolName, "httpx", "naabu", "tlsx")
+	if hasDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
+		args = append(args,
+			"-team-id", os.Getenv("PDCP_TEAM_ID"),
+			"-dashboard",
+			"-asset-id", *manualAssetId,
+		)
+	}
+
+	// Extra tool-specific args
+	args = append(args, extraArgs...)
+
+	slog.Info("running enumeration tool", "tool", toolName, "hosts", len(hosts), "args_count", len(args))
+
+	if _, err := runCommand(ctx, envs, args); err != nil {
+		return "", err
+	}
+
+	if outputFile != "" {
+		*outputFiles = append(*outputFiles, outputFile)
+	}
+
+	// Manual upload: only if we didn't pass -dashboard to the tool,
+	// and only if the output file is non-empty.
+	if !sliceutil.Contains(args, "-dashboard") && outputFile != "" {
+		info, err := os.Stat(outputFile)
+		if err == nil && info.Size() > 0 {
+			assetId, err := uploadToCloudWithId(ctx, task, outputFile, task.Options.EnumerationID)
+			if err == nil {
+				*manualAssetId = assetId
+			} else {
+				assetId, err = uploadToCloud(ctx, task, outputFile)
+				if err != nil {
+					return outputFile, err
+				}
+				*manualAssetId = assetId
+			}
+		}
+	}
+
+	return outputFile, nil
+}
+
+// splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.
+// Handles host:port format — strips port before checking.
+func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
+	for _, h := range hosts {
+		// Strip port if present (e.g., "10.0.0.1:8080" → "10.0.0.1")
+		host := h
+		if hostOnly, _, err := net.SplitHostPort(h); err == nil {
+			host = hostOnly
+		}
+		if net.ParseIP(host) != nil {
+			ips = append(ips, h) // keep original (with port if present)
+		} else {
+			hostnames = append(hostnames, h)
+		}
+	}
+	return ips, hostnames
+}
+
+// quickPortFilter runs a lightweight naabu scan on HTTP default ports (80, 443, 8443)
+// to check which hosts are alive before launching expensive tools like httpx with Chrome.
+// Returns host:port pairs for hosts with at least one open port.
+func quickPortFilter(ctx context.Context, hosts []string, enumID string) ([]string, error) {
+	httpPorts := []string{"80", "443", "8443"}
+	return runNaabuScan(ctx, hosts, httpPorts, enumID, "quick-filter")
 }
 
 func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
@@ -209,35 +356,6 @@ func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
 	}
 }
 
-type Tool struct {
-	Name string
-	Args []string
-}
-
-func getToolsFromSteps(steps []string) []Tool {
-	var tools []Tool
-	if sliceutil.Contains(steps, "dns_resolve") {
-		tools = append(tools, Tool{Name: "dnsx"})
-	}
-	if sliceutil.Contains(steps, "port_scan") {
-		tool := Tool{Name: "naabu"}
-		if sliceutil.Contains(steps, "ports_service_scan") {
-			tool.Args = append(tool.Args, "-nmap-cli", "nmap -sV -Pn")
-		}
-		tools = append(tools, tool)
-	}
-	if sliceutil.Contains(steps, "http_probe") {
-		tool := Tool{Name: "httpx"}
-		if sliceutil.Contains(steps, "http_screenshot") {
-			tool.Args = append(tool.Args, "-screenshot")
-		}
-		tools = append(tools, tool)
-	}
-	if sliceutil.Contains(steps, "tls_scan") {
-		tools = append(tools, Tool{Name: "tlsx"})
-	}
-	return tools
-}
 
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
 	slog.Debug("uploading to cloud", "file", outputFile)
