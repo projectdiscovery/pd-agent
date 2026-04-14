@@ -95,7 +95,7 @@ func (p *Profiler) sample() {
 	p.prevCPU = currentCPU
 	p.prevSampleTime = now
 
-	slog.Info("resource_profile: sample",
+	slog.Debug("resource_profile: sample",
 		"active_workers", workers,
 		"goroutines", runtime.NumGoroutine(),
 		// Memory — Go heap
