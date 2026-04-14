@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"time"
 
+	"go.uber.org/automaxprocs/maxprocs"
+
 	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -37,6 +39,8 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
+	"github.com/projectdiscovery/pd-agent/pkg/prereq"
+	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
@@ -75,7 +79,9 @@ func getAllNucleiTemplates(templateDir string) ([]string, error) {
 	return templates, err
 }
 
-// ensureNucleiTemplates downloads nuclei templates if they are not already present.
+// ensureNucleiTemplates downloads nuclei templates if missing, or updates them
+// if the directory already exists. Stale templates cause "file not found" errors
+// when the cloud sends template paths that don't exist locally.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
@@ -84,18 +90,18 @@ func ensureNucleiTemplates() {
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
-		slog.Info("Nuclei templates directory already exists", "path", templateDir)
-		return
+		slog.Info("Nuclei templates directory exists, checking for updates...", "path", templateDir)
+	} else {
+		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	}
 
-	slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	cmd := exec.Command("nuclei", "-update-templates")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		slog.Error("Failed to download nuclei templates", "error", err)
+		slog.Error("Failed to update nuclei templates", "error", err)
 	} else {
-		slog.Info("Nuclei templates downloaded successfully")
+		slog.Info("Nuclei templates are up to date", "path", templateDir)
 	}
 }
 
@@ -107,7 +113,7 @@ var (
 	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
 	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
 	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
-	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
+	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "")
 	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
 	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
 	AgentNetworkEnv           = envutil.GetEnvOrDefault("AGENT_NETWORK", "default")
@@ -430,6 +436,10 @@ type Runner struct {
 	// JetStream work distribution
 	jsPool   *natsrpc.WorkerPool
 	jsCancel context.CancelFunc
+
+	// Adaptive chunk parallelism
+	chunkSem    *resourceprofile.ResizableSemaphore
+	chunkScaler *resourceprofile.Scaler
 
 	restartRequested atomic.Bool
 }
@@ -1117,16 +1127,29 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 }
 
 func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
+	// Count running tasks: legacy (pendingTasks) + JetStream (active workers + chunks).
+	tasksRunning := len(pendingTasks.GetAll())
+	chunksActive := 0
+	if r.jsPool != nil {
+		tasksRunning += int(r.jsPool.ActiveWorkers())
+	}
+	if r.chunkSem != nil {
+		chunksActive = r.chunkSem.InUse()
+		if chunksActive > 0 {
+			tasksRunning += chunksActive
+		}
+	}
+
 	hc := natsrpc.HealthCheckData{
 		AgentID:      r.options.AgentId,
 		AgentName:    r.options.AgentName,
 		Version:      Version,
 		Uptime:       time.Since(r.agentStartTime).String(),
-		TasksRunning: len(pendingTasks.GetAll()),
+		TasksRunning: tasksRunning,
 	}
 
-	// Report idle if no tasks running and agent has been up > 1 min
-	if hc.TasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
+	// Report idle only when no work is happening at any level.
+	if tasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
 		hc.Idle = true
 		if r.jsPool != nil {
 			if idle := r.jsPool.IdleSince(); !idle.IsZero() {
@@ -1260,6 +1283,27 @@ func (r *Runner) startJetStreamWorkers() error {
 		return fmt.Errorf("NATS connection not available")
 	}
 
+	// Auto-detect chunk parallelism if not explicitly overridden.
+	// 0 means auto-detect (neither env var nor CLI flag was set).
+	chunkParallelism := r.options.ChunkParallelism
+	source := "user-override"
+	if chunkParallelism == 0 {
+		result := resourceprofile.ComputeChunkParallelism(r.options.ScanParallelism)
+		chunkParallelism = result.ChunkParallelism
+		r.options.ChunkParallelism = chunkParallelism
+		source = "auto-detect"
+		resourceprofile.LogAutoDetectResult(result, source)
+	} else {
+		slog.Info("chunk parallelism override",
+			"chunk_parallelism", chunkParallelism,
+			"source", source,
+		)
+	}
+
+	// Create resizable semaphore and adaptive scaler.
+	r.chunkSem = resourceprofile.NewResizableSemaphore(chunkParallelism, resourceprofile.MaxParallelism)
+	r.chunkScaler = resourceprofile.NewScaler(r.chunkSem)
+
 	consumerName := fmt.Sprintf("work-%s", r.options.AgentId)
 	pool, err := natsrpc.NewWorkerPool(nc, creds.Stream, consumerName, creds.GroupPrefix, r.options.ScanParallelism, r.processWorkMessage)
 	if err != nil {
@@ -1271,8 +1315,11 @@ func (r *Runner) startJetStreamWorkers() error {
 	r.jsCancel = cancel
 	pool.Run(ctx)
 
-	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (parallelism=%d, stream=%s, consumer=%s, filter=%s.work.>)",
-		r.options.ScanParallelism, creds.Stream, consumerName, creds.GroupPrefix))
+	// Start adaptive scaler control loop in background.
+	go r.chunkScaler.Run(ctx)
+
+	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (scan_parallelism=%d, chunk_parallelism=%d, source=%s, stream=%s, consumer=%s, filter=%s.work.>)",
+		r.options.ScanParallelism, chunkParallelism, source, creds.Stream, consumerName, creds.GroupPrefix))
 
 	return nil
 }
@@ -1369,6 +1416,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
 	}
 	return natsrpc.ConsumeChunks(ctx, r.jsPool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
+		r.chunkSem, r.chunkScaler,
 		func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
 			// Filter chunk targets by open ports
 			var filteredTargets []string
@@ -1408,6 +1456,7 @@ func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.
 		chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
 	}
 	return natsrpc.ConsumeChunks(ctx, r.jsPool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
+		r.chunkSem, r.chunkScaler,
 		func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
 			// Steps can come from the work message or from the chunk's enrichment config.
 			// The server puts enrichment_steps in the chunk's EnumerationConfiguration JSON.
@@ -1511,6 +1560,18 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			r.logBatcher.WaitDone()
 		}
 	}()
+
+	// Start resource profiler — samples every 5s for calibration data.
+	// The activeWorkers function is initially a no-op; it gets wired to the
+	// WorkerPool once JetStream workers start (via onNATSCredentialsReceived).
+	resourceprofile.LogStartupResources()
+	profiler := resourceprofile.New(5*time.Second, func() int32 {
+		if r.jsPool != nil {
+			return r.jsPool.ActiveWorkers()
+		}
+		return 0
+	})
+	go profiler.Run(ctx)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -2028,6 +2089,21 @@ func (r *Runner) getEnumerations(ctx context.Context) error {
 // using the same logic as pd-agent
 // If scanBatcher is nil, a new batcher will be created for this scan
 func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+	// Resource profiling: snapshot before scan
+	var activeWorkers int32
+	if r.jsPool != nil {
+		activeWorkers = r.jsPool.ActiveWorkers()
+	}
+	startSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "start", activeWorkers)
+	defer func() {
+		var aw int32
+		if r.jsPool != nil {
+			aw = r.jsPool.ActiveWorkers()
+		}
+		endSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "end", aw)
+		resourceprofile.LogScanDelta(startSnap, endSnap)
+	}()
+
 	// Create batcher for this scan if not provided (if log upload is enabled)
 	if scanBatcher == nil && scanlog.IsLogUploadEnabled() {
 		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
@@ -2697,7 +2773,7 @@ func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*T
 
 // In handles agent registration with the punch-hole server
 func (r *Runner) In(ctx context.Context) error {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer func() {
 		ticker.Stop()
 		if err := r.Out(context.TODO()); err != nil {
@@ -2707,18 +2783,20 @@ func (r *Runner) In(ctx context.Context) error {
 		}
 	}()
 
-	// Run first time to register
+	// First call: register the agent. This one is fatal — we need NATS creds.
 	if err := r.inFunctionTickCallback(ctx); err != nil {
 		return err
 	}
 
+	// Subsequent calls are heartbeats. Failures are logged but not fatal —
+	// the agent keeps scanning via NATS even if the HTTP heartbeat is down.
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			if err := r.inFunctionTickCallback(ctx); err != nil {
-				return err
+				r.logHelper("WARNING", fmt.Sprintf("/in heartbeat failed (will retry in 5m): %v", err))
 			}
 		}
 	}
@@ -2778,9 +2856,13 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		}
 	}
 
-	// Build /in endpoint with query parameters
+	// Build /in endpoint with query parameters.
+	// Use a 30s timeout — heartbeat should be fast, don't hold up the agent.
+	inCtx, inCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer inCancel()
+
 	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inURL, nil)
+	req, err := http.NewRequestWithContext(inCtx, http.MethodPost, inURL, nil)
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to create /in request: %v", err))
 		return err
@@ -2823,7 +2905,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	req.URL.RawQuery = q.Encode()
 
-	inResp := r.makeRequest(ctx, http.MethodPost, req.URL.String(), nil, headers)
+	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, headers)
 	if inResp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /in endpoint: %v", inResp.Error))
 		return inResp.Error
@@ -2838,7 +2920,10 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	var agentInResp AgentInResponse
 	if err := json.Unmarshal(inResp.Body, &agentInResp); err != nil {
 		r.logHelper("WARNING", fmt.Sprintf("failed to parse /in response body: %v", err))
-	} else if agentInResp.Nats != nil {
+	} else if agentInResp.Nats == nil && r.options.UseJetStream && r.natsCreds == nil {
+		r.logHelper("WARNING", "/in response did not include NATS credentials — JetStream workers will not start until credentials are received")
+	}
+	if agentInResp.Nats != nil {
 		r.natsCredsMu.Lock()
 		prev := r.natsCreds
 		r.natsCreds = agentInResp.Nats
@@ -3338,11 +3423,9 @@ func parseOptions() *Options {
 
 	agentTags := strings.Split(AgentTagsEnv, ",")
 
-	// Parse default parallelism values from environment
-	defaultChunkParallelism := runtime.NumCPU()
-	if defaultChunkParallelism <= 0 {
-		defaultChunkParallelism = 1
-	}
+	// Parse default parallelism values from environment.
+	// 0 means auto-detect at startup (based on available resources).
+	defaultChunkParallelism := 0
 	if val, err := strconv.Atoi(ChunkParallelismEnv); err == nil && val > 0 {
 		defaultChunkParallelism = val
 	}
@@ -3419,9 +3502,9 @@ func parseOptions() *Options {
 		options.AgentNetwork = "default"
 	}
 
-	// Ensure parallelism values are at least 1
-	if options.ChunkParallelism < 1 {
-		options.ChunkParallelism = 1
+	// Ensure parallelism values are valid (0 = auto-detect for chunks).
+	if options.ChunkParallelism < 0 {
+		options.ChunkParallelism = 0
 	}
 	if options.ScanParallelism < 1 {
 		options.ScanParallelism = 1
@@ -3440,23 +3523,20 @@ func configureLogging(options *Options) {
 }
 
 func main() {
+	// Set GOMAXPROCS from cgroup CPU quota (containers). No-op on bare metal.
+	_, _ = maxprocs.Set(maxprocs.Logger(func(format string, args ...interface{}) {
+		slog.Info(fmt.Sprintf(format, args...))
+	}))
 
 	options := parseOptions()
 
-	// Check prerequisites before starting the agent
-	prerequisites := pkg.CheckAllPrerequisites()
-	var missingTools []string
-	for toolName, result := range prerequisites {
-		if !result.Found {
-			missingTools = append(missingTools, toolName)
-		}
+	// Check prerequisites — auto-install missing tools (idempotent: fast on restart)
+	if _, failed := prereq.EnsureAll(); len(failed) > 0 {
+		slog.Error("Could not install required tools", "tools", strings.Join(failed, ", "))
+		os.Exit(1)
 	}
 
-	if len(missingTools) > 0 {
-		slog.Error("Missing required prerequisites", "tools", strings.Join(missingTools, ", "))
-	}
-
-	// Ensure nuclei templates are downloaded before starting the agent
+	// Ensure nuclei templates are downloaded or updated before starting the agent
 	ensureNucleiTemplates()
 
 	pdcpRunner, err := NewRunner(options)
@@ -3470,10 +3550,17 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup close handler
+	// Graceful shutdown: on SIGTERM/SIGINT, cancel contexts and let
+	// agentMode's defer handle the blocking wait and cleanup.
+	// k8s sends SIGTERM once, then SIGKILL after terminationGracePeriodSeconds.
 	go func() {
 		<-c
-		fmt.Println("\r- Ctrl+C pressed in Terminal, Exiting...")
+		slog.Info("shutdown signal received, draining in-flight work...")
+		if pdcpRunner.jsCancel != nil {
+			pdcpRunner.jsCancel()
+		}
+		// Cancel the main context — agentMode's defer will call jsPool.Stop()
+		// and wait for in-flight work before cleaning up NATS/batchers.
 		cancel()
 	}()
 
