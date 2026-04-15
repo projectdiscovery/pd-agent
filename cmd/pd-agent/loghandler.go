@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -60,6 +61,29 @@ func (w *dbWriter) ClearLogWriter() {
 	w.mu.Lock()
 	w.logWriter = nil
 	w.mu.Unlock()
+}
+
+// StopLogWriter stops the LogWriter (flush + drain) and then clears it.
+func (w *dbWriter) StopLogWriter() {
+	w.mu.Lock()
+	lw := w.logWriter
+	w.logWriter = nil
+	w.mu.Unlock()
+	if lw != nil {
+		lw.Stop()
+	}
+}
+
+// DirectWrite bypasses the async LogWriter and writes directly to SQLite.
+// Use this in panic recovery where the async channel may not flush in time.
+func (w *dbWriter) DirectWrite(store agentdb.Store, line string) {
+	if store == nil {
+		return
+	}
+	_ = store.InsertLog(context.Background(), &agentdb.LogEntry{
+		Timestamp: time.Now().UTC(),
+		Line:      line,
+	})
 }
 
 // dbWriterInstance is the global writer, wired at startup.
