@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -1651,12 +1652,9 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		if dbWriterInstance != nil {
 			dbWriterInstance.ClearLogWriter()
 		}
-		// Only close DB on actual shutdown, not restart.
-		// On restart, agentMode re-enters and creates a new LogWriter + truncator.
-		if !r.restartRequested.Load() && r.agentDB != nil {
-			r.agentDB.Close()
-			r.agentDB = nil
-		}
+		// DB is NOT closed here — it stays open across restarts and is closed
+		// in main() after Run() returns. This ensures panic recovery in main()
+		// can still write to the DB.
 	}()
 
 	// Upsert agent info and start DB truncator.
@@ -3682,6 +3680,23 @@ func configureLogging(options *Options) {
 }
 
 func main() {
+	// Capture panics into slog (and therefore SQLite) before the process dies.
+	var pdcpRunner *Runner
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("panic: %v\n%s", r, debug.Stack())
+			slog.Error(msg)
+			// Synchronous direct insert — async channel won't flush in time.
+			if dbWriterInstance != nil && pdcpRunner != nil && pdcpRunner.agentDB != nil {
+				dbWriterInstance.DirectWrite(pdcpRunner.agentDB, msg)
+			}
+			if dbWriterInstance != nil {
+				dbWriterInstance.StopLogWriter()
+			}
+			os.Exit(2)
+		}
+	}()
+
 	// Handle -version flag before anything else.
 	for _, arg := range os.Args[1:] {
 		if arg == "-version" || arg == "--version" {
@@ -3706,7 +3721,8 @@ func main() {
 	// Ensure nuclei templates are downloaded or updated before starting the agent
 	ensureNucleiTemplates()
 
-	pdcpRunner, err := NewRunner(options)
+	var err error
+	pdcpRunner, err = NewRunner(options)
 	if err != nil {
 		slog.Error("Could not create runner", "error", err)
 	}
@@ -3732,6 +3748,13 @@ func main() {
 	}()
 
 	err = pdcpRunner.Run(ctx)
+
+	// Close DB after Run returns (covers normal shutdown, restart loop exit, etc.)
+	if pdcpRunner.agentDB != nil {
+		pdcpRunner.agentDB.Close()
+		pdcpRunner.agentDB = nil
+	}
+
 	if err != nil {
 		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s", err))
 		os.Exit(1)
