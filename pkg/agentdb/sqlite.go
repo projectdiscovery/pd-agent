@@ -150,8 +150,8 @@ func (s *SQLiteStore) UpsertAgentInfo(ctx context.Context, info *AgentInfo) erro
 		string(netJSON),
 		info.StartupArgs,
 		info.StartupEnv,
-		info.StartedAt.Format(time.RFC3339Nano),
-		info.UpdatedAt.Format(time.RFC3339Nano),
+		info.StartedAt.UTC().Format(time.RFC3339Nano),
+		info.UpdatedAt.UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
 		return fmt.Errorf("agentdb: upsert agent_info: %w", err)
@@ -216,7 +216,7 @@ func (s *SQLiteStore) GetAgentInfo(ctx context.Context) (*AgentInfo, error) {
 // InsertLog appends a structured log entry.
 func (s *SQLiteStore) InsertLog(ctx context.Context, entry *LogEntry) error {
 	const q = `INSERT INTO logs (timestamp, line) VALUES (?, ?)`
-	_, err := s.db.ExecContext(ctx, q, entry.Timestamp.Format(time.RFC3339Nano), entry.Line)
+	_, err := s.db.ExecContext(ctx, q, entry.Timestamp.UTC().Format(time.RFC3339Nano), entry.Line)
 	if err != nil {
 		return fmt.Errorf("agentdb: insert log: %w", err)
 	}
@@ -230,7 +230,7 @@ func (s *SQLiteStore) InsertMetric(ctx context.Context, sample *MetricSample) er
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.ExecContext(ctx, q,
-		sample.Timestamp.Format(time.RFC3339Nano),
+		sample.Timestamp.UTC().Format(time.RFC3339Nano),
 		sample.CPUPercent,
 		sample.RSSMB,
 		sample.HeapAllocMB,
@@ -258,11 +258,11 @@ func (s *SQLiteStore) QueryLogs(ctx context.Context, filter LogFilter) ([]LogEnt
 
 	if !filter.Since.IsZero() {
 		where = append(where, "timestamp >= ?")
-		args = append(args, filter.Since.Format(time.RFC3339Nano))
+		args = append(args, filter.Since.UTC().Format(time.RFC3339Nano))
 	}
 	if !filter.Until.IsZero() {
 		where = append(where, "timestamp <= ?")
-		args = append(args, filter.Until.Format(time.RFC3339Nano))
+		args = append(args, filter.Until.UTC().Format(time.RFC3339Nano))
 	}
 
 	q := "SELECT id, timestamp, line FROM logs"
@@ -327,8 +327,8 @@ func (s *SQLiteStore) QueryMetrics(ctx context.Context, since, until time.Time, 
 		limit = -1
 	}
 	rows, err := s.db.QueryContext(ctx, q,
-		since.Format(time.RFC3339Nano),
-		until.Format(time.RFC3339Nano),
+		since.UTC().Format(time.RFC3339Nano),
+		until.UTC().Format(time.RFC3339Nano),
 		limit,
 	)
 	if err != nil {

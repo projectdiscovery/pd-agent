@@ -79,7 +79,7 @@ func (t *Truncator) truncateOnce() error {
 
 	// Refresh updated_at so the DB can be used for liveness detection.
 	_, _ = t.store.db.Exec("UPDATE agent_info SET updated_at = ? WHERE id = 1",
-		time.Now().Format(time.RFC3339Nano))
+		time.Now().UTC().Format(time.RFC3339Nano))
 
 	return nil
 }
