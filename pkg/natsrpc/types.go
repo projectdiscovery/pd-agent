@@ -25,7 +25,6 @@ type NucleiRetestRequest struct {
 	VulnID          string   `json:"vuln_id,omitempty"`
 }
 
-
 // PortProbeRequest is the payload for the "port-probe" RPC method.
 type PortProbeRequest struct {
 	Host string `json:"host"`
@@ -39,7 +38,7 @@ type HealthCheckData struct {
 	Version      string `json:"version"`
 	Uptime       string `json:"uptime"`
 	TasksRunning int    `json:"tasks_running"`
-	Idle         bool   `json:"idle"`                // true if idle > 1 min
+	Idle         bool   `json:"idle"`                 // true if idle > 1 min
 	IdleSince    string `json:"idle_since,omitempty"` // RFC3339 timestamp if idle > 1 min
 }
 
@@ -47,15 +46,48 @@ type HealthCheckData struct {
 type LogsRequest struct {
 	Offset int    `json:"offset"`          // 0 = oldest available entry
 	Limit  int    `json:"limit"`           // max entries to return (default 100, max 500)
-	Level  string `json:"level,omitempty"` // optional filter: INFO, WARNING, ERROR, etc.
+	Since  string `json:"since,omitempty"` // RFC3339 UTC
+	Until  string `json:"until,omitempty"` // RFC3339 UTC
 }
 
 // LogsResponse is returned by the "logs" direct handler.
 type LogsResponse struct {
-	Entries []LogEntry `json:"entries"`
-	Total   int        `json:"total"`  // total entries in buffer
-	Offset  int        `json:"offset"` // actual offset used
-	Limit   int        `json:"limit"`  // actual limit used
+	Lines  []string `json:"lines"`
+	Total  int      `json:"total"`
+	Offset int      `json:"offset"`
+	Limit  int      `json:"limit"`
+}
+
+// MetricsRequest is the payload for the "metrics" RPC method.
+type MetricsRequest struct {
+	Range string `json:"range"`           // "5m","15m","30m","1h","3h","6h","24h","custom"
+	Start string `json:"start,omitempty"` // RFC3339 UTC, required when range="custom"
+	End   string `json:"end,omitempty"`   // RFC3339 UTC, required when range="custom"
+}
+
+// MetricsResponse is returned by the "metrics" direct handler.
+type MetricsResponse struct {
+	Range        string        `json:"range"`
+	Since        string        `json:"since"`         // actual start (RFC3339 UTC)
+	Until        string        `json:"until"`         // actual end (RFC3339 UTC)
+	TotalSamples int           `json:"total_samples"` // raw count in DB for this range
+	Returned     int           `json:"returned"`      // points returned after downsampling
+	Points       []MetricPoint `json:"points"`
+}
+
+// MetricPoint is a single data point for time-series graphing.
+type MetricPoint struct {
+	T          string  `json:"t"`   // RFC3339 UTC
+	CPU        float64 `json:"cpu"` // cpu_percent
+	RSSMB      uint64  `json:"rss_mb"`
+	HeapMB     uint64  `json:"heap_mb"` // heap_alloc_mb
+	FDUsed     int     `json:"fd_used"`
+	FDLimit    int     `json:"fd_limit"`
+	MemTotalMB uint64  `json:"mem_total_mb"`
+	MemAvailMB uint64  `json:"mem_avail_mb"`
+	Goroutines int     `json:"goroutines"`
+	Workers    int32   `json:"workers"` // active_workers
+	Chunks     int     `json:"chunks"`  // chunk_parallelism
 }
 
 // DebugData is returned by the "debug" direct handler.
@@ -68,12 +100,12 @@ type DebugData struct {
 
 // AgentInfo contains agent identity and status.
 type AgentInfo struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Version      string `json:"version"`
-	Uptime       string `json:"uptime"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Version       string  `json:"version"`
+	Uptime        string  `json:"uptime"`
 	UptimeSeconds float64 `json:"uptime_seconds"`
-	TasksRunning int    `json:"tasks_running"`
+	TasksRunning  int     `json:"tasks_running"`
 }
 
 // SystemInfo contains host-level resource info.
@@ -110,15 +142,15 @@ type RuntimeInfo struct {
 // chunks, etc.) live in a single group-level stream; consumers use FilterSubject
 // to scope what they read.
 type WorkMessage struct {
-	Type          string   `json:"type"`                      // "scan" or "enumeration"
-	ScanID        string   `json:"scan_id"`                   // scan_id or enumeration_id
-	ChunkSubject  string   `json:"chunk_subject"`             // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
-	ChunkConsumer string   `json:"chunk_consumer"`            // shared consumer name (typically agent-network)
-	ChunkCount    int      `json:"chunk_count,omitempty"`     // number of chunks in the stream
-	Config        string   `json:"config,omitempty"`          // base64 scan configuration
-	Templates     []string `json:"templates,omitempty"`       // nuclei template paths (scans)
-	Steps         []string `json:"steps,omitempty"`           // enumeration steps (enumerations)
-	Assets        []string `json:"assets,omitempty"`          // all targets (for pre-scan port filtering)
+	Type          string   `json:"type"`                  // "scan" or "enumeration"
+	ScanID        string   `json:"scan_id"`               // scan_id or enumeration_id
+	ChunkSubject  string   `json:"chunk_subject"`         // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
+	ChunkConsumer string   `json:"chunk_consumer"`        // shared consumer name (typically agent-network)
+	ChunkCount    int      `json:"chunk_count,omitempty"` // number of chunks in the stream
+	Config        string   `json:"config,omitempty"`      // base64 scan configuration
+	Templates     []string `json:"templates,omitempty"`   // nuclei template paths (scans)
+	Steps         []string `json:"steps,omitempty"`       // enumeration steps (enumerations)
+	Assets        []string `json:"assets,omitempty"`      // all targets (for pre-scan port filtering)
 }
 
 // ChunkMessage is a single unit of work decoded from the group stream.
