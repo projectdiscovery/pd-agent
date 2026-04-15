@@ -5,8 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	json "github.com/json-iterator/go"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"io"
 	"log/slog"
 	"net"
@@ -26,9 +26,9 @@ import (
 
 	"go.uber.org/automaxprocs/maxprocs"
 
-	"github.com/nats-io/nkeys"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nkeys"
 	"github.com/projectdiscovery/gcache"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
@@ -37,6 +37,7 @@ import (
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/pd-agent/pkg"
+	"github.com/projectdiscovery/pd-agent/pkg/agentdb"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
@@ -419,10 +420,9 @@ type Runner struct {
 	localCache     *LocalCache
 	inRequestCount int       // Number of /in requests sent
 	agentStartTime time.Time // When the agent started
-	logBatcher     *batcher.Batcher[string]
-	logBuffer      *natsrpc.LogBuffer
-	natsCreds      *NATSCredentials
-	natsCredsMu    sync.RWMutex
+
+	natsCreds   *NATSCredentials
+	natsCredsMu sync.RWMutex
 
 	// Lifecycle context — cancelled on agent shutdown
 	ctx       context.Context
@@ -441,6 +441,9 @@ type Runner struct {
 	// Adaptive chunk parallelism
 	chunkSem    *resourceprofile.ResizableSemaphore
 	chunkScaler *resourceprofile.Scaler
+
+	// Local observability database (nil if open failed)
+	agentDB agentdb.Store
 
 	restartRequested atomic.Bool
 }
@@ -538,128 +541,19 @@ func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTag
 	return true // Skip
 }
 
-// LogEntry represents a log entry structure
-type LogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Level     string    `json:"level"`
-	Message   string    `json:"message"`
-}
-
-// AgentLogUploadRequest represents the request payload for log upload
-type AgentLogUploadRequest struct {
-	OS             string   `json:"os,omitempty"`
-	Arch           string   `json:"arch,omitempty"`
-	ID             string   `json:"id,omitempty"`
-	Name           string   `json:"name,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Networks       []string `json:"networks,omitempty"`
-	NetworkSubnets []string `json:"network_subnets,omitempty"`
-	Type           string   `json:"type,omitempty"`
-	Logs           []string `json:"logs"`
-}
-
-// AgentLogUploadResponse represents the response from log upload endpoint
-type AgentLogUploadResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
-// logHelper prints the log to console and appends JSON marshalled string to the batcher
+// logHelper delegates to the appropriate slog level.
+// The agentLogHandler tees output to console, ring buffer, and SQLite.
 func (r *Runner) logHelper(level, message string) {
-	// Skip DEBUG entirely unless -verbose is set
-	if level == "DEBUG" && !r.options.Verbose {
-		return
+	switch level {
+	case "WARNING":
+		slog.Warn(message)
+	case "ERROR", "FATAL":
+		slog.Error(message)
+	case "DEBUG", "VERBOSE":
+		slog.Debug(message)
+	default:
+		slog.Info(message)
 	}
-
-	entry := LogEntry{
-		Timestamp: time.Now().UTC(),
-		Level:     level,
-		Message:   message,
-	}
-
-	fmt.Printf("[%s] %s: %s\n", entry.Timestamp.Format(time.RFC3339), entry.Level, entry.Message)
-
-	if r.logBuffer != nil {
-		r.logBuffer.Add(natsrpc.LogEntry{
-			Timestamp: entry.Timestamp,
-			Level:     entry.Level,
-			Message:   entry.Message,
-		})
-	}
-
-	// Marshal to JSON
-	jsonData, err := json.Marshal(entry)
-	if err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error marshaling log entry: %v", err))
-		return
-	}
-
-	// Append to batcher
-	if r.logBatcher != nil {
-		r.logBatcher.Append(string(jsonData))
-	}
-}
-
-// uploadLogs sends batched logs to the /v1/agents/{id}/log endpoint
-func (r *Runner) uploadLogs(logs []string) {
-	if len(logs) == 0 {
-		return
-	}
-
-	// Get metadata same as /in endpoint
-	tagsToUse := r.options.AgentTags
-	networksToUse := []string{r.options.AgentNetwork}
-	networkSubnets := r.getAutoDiscoveredTargets()
-
-	// Build request payload
-	payload := AgentLogUploadRequest{
-		OS:             runtime.GOOS,
-		Arch:           runtime.GOARCH,
-		ID:             r.options.AgentId,
-		Name:           r.options.AgentName,
-		Tags:           tagsToUse,
-		Networks:       networksToUse,
-		NetworkSubnets: networkSubnets,
-		Type:           "agent",
-		Logs:           logs,
-	}
-
-	// Marshal payload to JSON
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error marshaling log upload payload: %v", err))
-		return
-	}
-
-	// Create request
-	apiURL := fmt.Sprintf("%s/v1/agents/%s/log", PdcpApiServer, r.options.AgentId)
-	headers := map[string]string{
-		"x-api-key":    PDCPApiKey,
-		"Content-Type": "application/json",
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp := r.makeRequest(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonPayload), headers)
-	if resp.Error != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error uploading logs: %v", resp.Error))
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from log upload endpoint: %d", resp.StatusCode))
-		return
-	}
-
-	// Parse response
-	var uploadResp AgentLogUploadResponse
-	if err := json.Unmarshal(resp.Body, &uploadResp); err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error unmarshaling log upload response: %v", err))
-		return
-	}
-
-	slog.Debug("agent log upload complete", "entries", len(logs), "message", uploadResp.Message)
 }
 
 // NewRunner creates a new runner instance
@@ -696,16 +590,23 @@ func NewRunner(options *Options) (*Runner, error) {
 		}
 	}
 
-	r.logBuffer = natsrpc.NewLogBuffer(5000)
-
-	// Initialize log batcher (unless disabled via env)
-	if envutil.GetEnvOrDefault("PDCP_ENABLE_AGENT_LOG_UPLOAD", "true") == "true" {
-		r.logBatcher = batcher.New[string](
-			batcher.WithMaxCapacity[string](100),              // Max 100 logs per batch
-			batcher.WithFlushInterval[string](30*time.Second), // Flush every 30 seconds
-			batcher.WithFlushCallback[string](r.uploadLogs),   // Upload callback
-		)
-		go r.logBatcher.Run()
+	// Open local observability database.
+	// PDCP_AGENTDB_DIR overrides the default location (next to binary).
+	// Non-fatal: if it fails, the agent runs without local persistence.
+	dbDir := os.Getenv("PDCP_AGENTDB_DIR")
+	if dbDir == "" {
+		if execPath, err := os.Executable(); err == nil {
+			dbDir = filepath.Dir(execPath)
+		}
+	}
+	if dbDir != "" {
+		dbPath := filepath.Join(dbDir, fmt.Sprintf("pd-agent-%s.db", r.options.AgentId))
+		if db, err := agentdb.Open(dbPath); err != nil {
+			slog.Warn("agentdb: failed to open, local observability disabled", "path", dbPath, "error", err)
+		} else {
+			r.agentDB = db
+			warnOrphanDBs(dbDir, r.options.AgentId)
+		}
 	}
 
 	// Start passive discovery if enabled
@@ -808,6 +709,7 @@ func (r *Runner) startNATSRPC() error {
 	directRouter.Handle("restart", r.handleRestart)
 	directRouter.Handle("update", r.handleUpdate)
 	directRouter.Handle("logs", r.handleLogs)
+	directRouter.Handle("metrics", r.handleMetrics)
 
 	broadcastRouter.Handle("update", r.handleUpdate)
 
@@ -1326,12 +1228,135 @@ func (r *Runner) handleLogs(ctx context.Context, method string, data []byte) (an
 		req.Offset = 0
 	}
 
-	entries, total := r.logBuffer.Query(req.Offset, req.Limit, req.Level)
+	// All logs are persisted to SQLite — no more in-memory ring buffer.
+	if r.agentDB == nil {
+		return nil, fmt.Errorf("local database not available")
+	}
+	filter := agentdb.LogFilter{
+		Offset: req.Offset,
+		Limit:  req.Limit,
+	}
+	if req.Since != "" {
+		t, err := time.Parse(time.RFC3339, req.Since)
+		if err != nil {
+			return nil, fmt.Errorf("invalid since: %w", err)
+		}
+		filter.Since = t
+	}
+	if req.Until != "" {
+		t, err := time.Parse(time.RFC3339, req.Until)
+		if err != nil {
+			return nil, fmt.Errorf("invalid until: %w", err)
+		}
+		filter.Until = t
+	}
+	dbEntries, err := r.agentDB.QueryLogs(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("query logs: %w", err)
+	}
+	lines := make([]string, len(dbEntries))
+	for i, e := range dbEntries {
+		lines[i] = e.Line
+	}
 	return natsrpc.LogsResponse{
-		Entries: entries,
-		Total:   total,
-		Offset:  req.Offset,
-		Limit:   req.Limit,
+		Lines:  lines,
+		Total:  len(lines),
+		Offset: req.Offset,
+		Limit:  req.Limit,
+	}, nil
+}
+
+// handleMetrics returns time-series resource metrics for graph plotting.
+func (r *Runner) handleMetrics(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.MetricsRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid metrics request: %w", err)
+	}
+
+	if r.agentDB == nil {
+		return nil, fmt.Errorf("local database not available")
+	}
+
+	// Resolve time range.
+	var since, until time.Time
+	now := time.Now().UTC()
+
+	presets := map[string]time.Duration{
+		"5m":  5 * time.Minute,
+		"15m": 15 * time.Minute,
+		"30m": 30 * time.Minute,
+		"1h":  1 * time.Hour,
+		"3h":  3 * time.Hour,
+		"6h":  6 * time.Hour,
+		"24h": 24 * time.Hour,
+	}
+
+	if req.Range == "custom" {
+		if req.Start == "" || req.End == "" {
+			return nil, fmt.Errorf("custom range requires start and end")
+		}
+		var err error
+		since, err = time.Parse(time.RFC3339, req.Start)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start: %w", err)
+		}
+		until, err = time.Parse(time.RFC3339, req.End)
+		if err != nil {
+			return nil, fmt.Errorf("invalid end: %w", err)
+		}
+		if !until.After(since) {
+			return nil, fmt.Errorf("end must be after start")
+		}
+		if until.Sub(since) > 24*time.Hour {
+			return nil, fmt.Errorf("max custom range is 24h")
+		}
+	} else if d, ok := presets[req.Range]; ok {
+		since = now.Add(-d)
+		until = now
+	} else {
+		return nil, fmt.Errorf("invalid range %q: use 5m,15m,30m,1h,3h,6h,24h,custom", req.Range)
+	}
+
+	// Query all samples in range (no limit).
+	samples, err := r.agentDB.QueryMetrics(ctx, since, until, 0)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics: %w", err)
+	}
+
+	total := len(samples)
+
+	// Downsample: target ~360 points max.
+	const maxPoints = 360
+	step := 1
+	if total > maxPoints {
+		step = total / maxPoints
+	}
+
+	points := make([]natsrpc.MetricPoint, 0, min(total, maxPoints+1))
+	for i := 0; i < total; i += step {
+		s := samples[i]
+		points = append(points, natsrpc.MetricPoint{
+			T:          s.Timestamp.UTC().Format(time.RFC3339),
+			CPU:        s.CPUPercent,
+			RSSMB:      s.RSSMB,
+			HeapMB:     s.HeapAllocMB,
+			FDUsed:     s.FDUsed,
+			FDLimit:    s.FDLimit,
+			MemTotalMB: s.MemTotalMB,
+			MemAvailMB: s.MemAvailMB,
+			Goroutines: s.Goroutines,
+			Workers:    s.ActiveWorkers,
+			Chunks:     s.ChunkParallelism,
+		})
+	}
+
+	return natsrpc.MetricsResponse{
+		Range:        req.Range,
+		Since:        since.UTC().Format(time.RFC3339),
+		Until:        until.UTC().Format(time.RFC3339),
+		TotalSamples: total,
+		Returned:     len(points),
+		Points:       points,
 	}, nil
 }
 
@@ -1596,16 +1621,6 @@ func (r *Runner) resetForRestart() {
 	r.jsPool = nil
 	r.jsCancel = nil
 
-	// Recreate log batcher (can't reuse after Stop+WaitDone — internal channels are closed)
-	if envutil.GetEnvOrDefault("PDCP_ENABLE_AGENT_LOG_UPLOAD", "true") == "true" {
-		r.logBatcher = batcher.New[string](
-			batcher.WithMaxCapacity[string](100),
-			batcher.WithFlushInterval[string](30*time.Second),
-			batcher.WithFlushCallback[string](r.uploadLogs),
-		)
-		go r.logBatcher.Run()
-	}
-
 	isRegistered = false
 }
 
@@ -1614,6 +1629,9 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	r.ctx = ctx
 	r.cancelCtx = cancel
+
+	var agentLogWriter *agentdb.LogWriter
+
 	defer func() {
 		cancel()
 		// Stop JetStream workers first (finish in-progress scans)
@@ -1625,12 +1643,62 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		}
 		// Drain NATS connection on shutdown
 		r.stopNATSRPC()
-		// Ensure batcher is stopped on shutdown
-		if r.logBatcher != nil {
-			r.logBatcher.Stop()
-			r.logBatcher.WaitDone()
+		// Stop LogWriter so shutdown logs are flushed.
+		if agentLogWriter != nil {
+			agentLogWriter.Stop()
+			agentLogWriter = nil
+		}
+		if dbWriterInstance != nil {
+			dbWriterInstance.ClearLogWriter()
+		}
+		// Only close DB on actual shutdown, not restart.
+		// On restart, agentMode re-enters and creates a new LogWriter + truncator.
+		if !r.restartRequested.Load() && r.agentDB != nil {
+			r.agentDB.Close()
+			r.agentDB = nil
 		}
 	}()
+
+	// Upsert agent info and start DB truncator.
+	if r.agentDB != nil {
+		hostname, _ := os.Hostname()
+		netInfo := agentdb.DetectNetInfo()
+		if err := r.agentDB.UpsertAgentInfo(ctx, &agentdb.AgentInfo{
+			AgentID:      r.options.AgentId,
+			AgentName:    r.options.AgentName,
+			AgentNetwork: r.options.AgentNetwork,
+			UseJetStream: r.options.UseJetStream,
+			Version:      Version,
+			OS:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			NumCPU:       runtime.NumCPU(),
+			Hostname:     hostname,
+			PID:          os.Getpid(),
+			NetworkInfo:  netInfo,
+			StartupArgs:  agentdb.MaskArgs(os.Args),
+			StartupEnv:   agentdb.MaskEnv(),
+			StartedAt:    r.agentStartTime,
+			UpdatedAt:    time.Now(),
+		}); err != nil {
+			slog.Warn("agentdb: failed to upsert agent info", "error", err)
+		}
+
+		caps, err := agentdb.LoadSizeCaps()
+		if err != nil {
+			slog.Warn("agentdb: invalid size cap env, using defaults", "error", err)
+		}
+		if sqlStore, ok := r.agentDB.(*agentdb.SQLiteStore); ok {
+			go agentdb.NewTruncator(sqlStore, caps.LogCapBytes, caps.MetricCapBytes).Run(ctx)
+
+			// Start async log writer. Runs independently of ctx so shutdown
+			// logs are captured. Stopped explicitly in the defer above.
+			agentLogWriter = agentdb.NewLogWriter(sqlStore)
+			go agentLogWriter.Run()
+			if dbWriterInstance != nil {
+				dbWriterInstance.SetLogWriter(agentLogWriter)
+			}
+		}
+	}
 
 	// Start resource profiler — samples every 5s for calibration data.
 	// The activeWorkers function is initially a no-op; it gets wired to the
@@ -1641,7 +1709,25 @@ func (r *Runner) agentMode(ctx context.Context) error {
 			return r.jsPool.ActiveWorkers()
 		}
 		return 0
-	})
+	}, resourceprofile.WithMetricsHook(func(snap resourceprofile.MetricSnapshot) {
+		if r.agentDB == nil {
+			return
+		}
+		_ = r.agentDB.InsertMetric(context.Background(), &agentdb.MetricSample{
+			Timestamp:        time.Now(),
+			CPUPercent:       snap.CPUPercent,
+			RSSMB:            snap.RSSMB,
+			HeapAllocMB:      snap.HeapAllocMB,
+			HeapSysMB:        snap.HeapSysMB,
+			FDUsed:           snap.FDUsed,
+			FDLimit:          snap.FDLimit,
+			MemTotalMB:       snap.MemTotalMB,
+			MemAvailMB:       snap.MemAvailMB,
+			Goroutines:       snap.Goroutines,
+			ActiveWorkers:    snap.ActiveWorkers,
+			ChunkParallelism: r.options.ChunkParallelism,
+		})
+	}))
 	go profiler.Run(ctx)
 
 	var wg sync.WaitGroup
@@ -3589,9 +3675,9 @@ func parseOptions() *Options {
 }
 
 func configureLogging(options *Options) {
+	initLogging(options.Verbose)
 	if options.Verbose {
 		gologger.DefaultLogger.SetMaxLevel(levels.LevelVerbose)
-		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	}
 }
 
@@ -3649,5 +3735,23 @@ func main() {
 	if err != nil {
 		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s", err))
 		os.Exit(1)
+	}
+}
+
+// warnOrphanDBs logs a warning if other pd-agent DB files exist in the directory.
+func warnOrphanDBs(dir, myAgentID string) {
+	matches, err := filepath.Glob(filepath.Join(dir, "pd-agent-*.db"))
+	if err != nil {
+		return
+	}
+	myFile := fmt.Sprintf("pd-agent-%s.db", myAgentID)
+	var orphans []string
+	for _, m := range matches {
+		if filepath.Base(m) != myFile {
+			orphans = append(orphans, filepath.Base(m))
+		}
+	}
+	if len(orphans) > 0 {
+		slog.Warn("agentdb: found other agent DB files", "count", len(orphans), "files", orphans)
 	}
 }

@@ -16,19 +16,19 @@ endif
 
 all: build
 build:
-	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent" cmd/pd-agent/main.go
+	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent" ./cmd/pd-agent/
 build-linux-amd64:
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
 	CC="zig cc -target x86_64-linux-musl" \
 	CXX="zig c++ -target x86_64-linux-musl" \
 	CGO_CFLAGS="-I$(CURDIR)/build/libpcap-linux-amd64/include" \
 	CGO_LDFLAGS="-L$(CURDIR)/build/libpcap-linux-amd64/lib" \
-	$(GOBUILD) -ldflags '-s -w -X main.Version=$(VERSION) -extldflags "-static"' -o "pd-agent-linux-amd64" cmd/pd-agent/main.go
+	$(GOBUILD) -ldflags '-s -w -X main.Version=$(VERSION) -extldflags "-static"' -o "pd-agent-linux-amd64" ./cmd/pd-agent/
 build-linux-arm64:
 	CGO_ENABLED=1 GOOS=linux GOARCH=arm64 \
 	CC="zig cc -target aarch64-linux-musl" \
 	CXX="zig c++ -target aarch64-linux-musl" \
-	$(GOBUILD) -ldflags '-s -w -X main.Version=$(VERSION) -extldflags "-static"' -o "pd-agent-linux-arm64" cmd/pd-agent/main.go
+	$(GOBUILD) -ldflags '-s -w -X main.Version=$(VERSION) -extldflags "-static"' -o "pd-agent-linux-arm64" ./cmd/pd-agent/
 test:
 	$(GOTEST) $(GOFLAGS) ./...
 tidy:

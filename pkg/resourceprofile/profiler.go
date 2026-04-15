@@ -13,6 +13,33 @@ import (
 // ActiveWorkersFn returns the current number of active workers.
 type ActiveWorkersFn func() int32
 
+// MetricSnapshot is a point-in-time resource measurement passed to the metrics hook.
+type MetricSnapshot struct {
+	CPUPercent    float64
+	RSSMB         uint64
+	HeapAllocMB   uint64
+	HeapSysMB     uint64
+	FDUsed        int
+	FDLimit       int
+	Goroutines    int
+	ActiveWorkers int32
+	MemTotalMB    uint64
+	MemAvailMB    uint64
+}
+
+// MetricsHookFn is called after each profiler sample with the collected metrics.
+type MetricsHookFn func(snap MetricSnapshot)
+
+// Option configures the Profiler.
+type Option func(*Profiler)
+
+// WithMetricsHook sets a callback invoked after each sample.
+func WithMetricsHook(fn MetricsHookFn) Option {
+	return func(p *Profiler) {
+		p.metricsHook = fn
+	}
+}
+
 // Profiler samples system resources at a fixed interval and logs them
 // as structured slog entries. The output is designed for offline analysis
 // to calibrate per-worker resource budgets (memory, FDs, CPU).
@@ -21,21 +48,26 @@ type Profiler struct {
 	activeWorkers  ActiveWorkersFn
 	prevCPU        cpuSample
 	prevSampleTime time.Time
+	metricsHook    MetricsHookFn
 }
 
 // New creates a Profiler that samples every interval.
 // activeWorkers may be nil if the worker pool hasn't started yet.
-func New(interval time.Duration, activeWorkers ActiveWorkersFn) *Profiler {
+func New(interval time.Duration, activeWorkers ActiveWorkersFn, opts ...Option) *Profiler {
 	if interval <= 0 {
 		interval = 5 * time.Second
 	}
 	if activeWorkers == nil {
 		activeWorkers = func() int32 { return 0 }
 	}
-	return &Profiler{
+	p := &Profiler{
 		interval:      interval,
 		activeWorkers: activeWorkers,
 	}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
 }
 
 // Run starts the periodic sampling loop. Blocks until ctx is cancelled.
@@ -87,6 +119,7 @@ func (p *Profiler) sample() {
 	fdUsed, fdLimit := readFDs()
 	memTotal, memAvail := readMemory()
 	workers := p.activeWorkers()
+	rss := readRSS()
 
 	// CPU usage since last sample
 	now := time.Now()
@@ -104,7 +137,7 @@ func (p *Profiler) sample() {
 		"heap_objects", ms.HeapObjects,
 		"gc_pause_ns", ms.PauseNs[(ms.NumGC+255)%256],
 		// Memory — OS level
-		"rss_mb", readRSS()/(1024*1024),
+		"rss_mb", rss/(1024*1024),
 		"mem_total_mb", memTotal/(1024*1024),
 		"mem_available_mb", memAvail/(1024*1024),
 		// File descriptors
@@ -113,6 +146,21 @@ func (p *Profiler) sample() {
 		// CPU
 		"cpu_percent", fmt.Sprintf("%.1f", cpuPercent),
 	)
+
+	if p.metricsHook != nil {
+		p.metricsHook(MetricSnapshot{
+			CPUPercent:    cpuPercent,
+			RSSMB:         rss / (1024 * 1024),
+			HeapAllocMB:   ms.HeapAlloc / (1024 * 1024),
+			HeapSysMB:     ms.HeapSys / (1024 * 1024),
+			FDUsed:        fdUsed,
+			FDLimit:       fdLimit,
+			Goroutines:    runtime.NumGoroutine(),
+			ActiveWorkers: workers,
+			MemTotalMB:    memTotal / (1024 * 1024),
+			MemAvailMB:    memAvail / (1024 * 1024),
+		})
+	}
 }
 
 // ScanSnapshot captures a resource snapshot tied to a scan lifecycle event.
