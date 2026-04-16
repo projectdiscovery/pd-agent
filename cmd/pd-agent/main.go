@@ -405,8 +405,10 @@ type NATSCredentials struct {
 		Broadcast string `json:"broadcast"`
 		Requests  string `json:"requests"`
 	} `json:"subjects"`
-	InboxPrefix string    `json:"inbox_prefix"`
-	ExpiresAt   time.Time `json:"expires_at"`
+	InboxPrefix          string    `json:"inbox_prefix"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	DebugUploadURL       string    `json:"debug_upload_url,omitempty"`
+	DebugUploadExpiresAt time.Time `json:"debug_upload_expires_at,omitempty"`
 }
 
 // AgentInResponse represents the response from POST /v1/agents/in
@@ -1349,17 +1351,17 @@ func (r *Runner) handleMetrics(ctx context.Context, method string, data []byte) 
 	for i := 0; i < total; i += step {
 		s := samples[i]
 		points = append(points, natsrpc.MetricPoint{
-			T:          s.Timestamp.UTC().Format(time.RFC3339),
-			CPU:        s.CPUPercent,
-			RSSMB:      s.RSSMB,
-			HeapMB:     s.HeapAllocMB,
-			FDUsed:     s.FDUsed,
-			FDLimit:    s.FDLimit,
-			MemTotalMB: s.MemTotalMB,
-			MemAvailMB: s.MemAvailMB,
-			Goroutines: s.Goroutines,
-			Workers:    s.ActiveWorkers,
-			Chunks:     s.ChunkParallelism,
+			T:             s.Timestamp.UTC().Format(time.RFC3339),
+			CPU:           s.CPUPercent,
+			RSSMB:         s.RSSMB,
+			HeapMB:        s.HeapAllocMB,
+			FDUsed:        s.FDUsed,
+			FDLimit:       s.FDLimit,
+			MemTotalMB:    s.MemTotalMB,
+			MemAvailMB:    s.MemAvailMB,
+			Goroutines:    s.Goroutines,
+			ActiveWorkers: s.ActiveWorkers,
+			Capacity:      s.ChunkParallelism,
 		})
 	}
 
@@ -3761,8 +3763,10 @@ func main() {
 
 	err = pdcpRunner.Run(ctx)
 
-	// Close DB after Run returns (covers normal shutdown, restart loop exit, etc.)
+	// Upload debug DB to GCS (best-effort), then close.
+	// All writers are stopped (agentMode defer ran), so WAL checkpoint is safe.
 	if pdcpRunner.agentDB != nil {
+		pdcpRunner.uploadDebugDB()
 		pdcpRunner.agentDB.Close()
 		pdcpRunner.agentDB = nil
 	}
@@ -3773,7 +3777,79 @@ func main() {
 	}
 }
 
-// warnOrphanDBs logs a warning if other pd-agent DB files exist in the directory.
+// uploadDebugDB uploads the local SQLite DB to GCS using the pre-generated
+// presigned URL from the last /in response. Best-effort: logs errors but
+// never blocks shutdown. Must be called after all DB writers have stopped.
+func (r *Runner) uploadDebugDB() {
+	r.natsCredsMu.RLock()
+	creds := r.natsCreds
+	r.natsCredsMu.RUnlock()
+
+	if creds == nil || creds.DebugUploadURL == "" {
+		slog.Debug("agentdb: no debug upload URL, skipping DB upload")
+		return
+	}
+	if time.Now().After(creds.DebugUploadExpiresAt) {
+		slog.Warn("agentdb: debug upload URL expired, skipping",
+			"expired_at", creds.DebugUploadExpiresAt.Format(time.RFC3339))
+		return
+	}
+
+	sqlStore, ok := r.agentDB.(*agentdb.SQLiteStore)
+	if !ok {
+		return
+	}
+
+	if err := sqlStore.CheckpointWAL(); err != nil {
+		slog.Warn("agentdb: WAL checkpoint failed, skipping upload", "error", err)
+		return
+	}
+
+	f, err := os.Open(sqlStore.DBPath())
+	if err != nil {
+		slog.Warn("agentdb: failed to open DB for upload", "error", err)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		slog.Warn("agentdb: failed to stat DB", "error", err)
+		return
+	}
+
+	uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, creds.DebugUploadURL, f)
+	if err != nil {
+		slog.Warn("agentdb: failed to create upload request", "error", err)
+		return
+	}
+	req.ContentLength = fi.Size()
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Goog-Content-Length-Range", "0,52428800")
+
+	slog.Info("agentdb: uploading debug DB", "size_bytes", fi.Size())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("agentdb: debug DB upload failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		slog.Warn("agentdb: debug DB upload non-200",
+			"status", resp.StatusCode, "body", string(body))
+		return
+	}
+
+	slog.Info("agentdb: debug DB uploaded successfully", "size_bytes", fi.Size())
+}
+
+// warnOrphanDBs logs a warning if other pd-agent DB files exist in the directory
+// and deletes orphan DBs (plus WAL/SHM sidecars) older than 7 days.
 func warnOrphanDBs(dir, myAgentID string) {
 	matches, err := filepath.Glob(filepath.Join(dir, "pd-agent-*.db"))
 	if err != nil {
@@ -3782,8 +3858,22 @@ func warnOrphanDBs(dir, myAgentID string) {
 	myFile := fmt.Sprintf("pd-agent-%s.db", myAgentID)
 	var orphans []string
 	for _, m := range matches {
-		if filepath.Base(m) != myFile {
-			orphans = append(orphans, filepath.Base(m))
+		base := filepath.Base(m)
+		if base == myFile {
+			continue
+		}
+		orphans = append(orphans, base)
+
+		fi, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if time.Since(fi.ModTime()) > 7*24*time.Hour {
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				os.Remove(m + suffix)
+			}
+			slog.Info("agentdb: deleted orphan DB", "file", base,
+				"age", time.Since(fi.ModTime()).Round(time.Hour))
 		}
 	}
 	if len(orphans) > 0 {

@@ -77,17 +77,17 @@ type MetricsResponse struct {
 
 // MetricPoint is a single data point for time-series graphing.
 type MetricPoint struct {
-	T          string  `json:"t"`   // RFC3339 UTC
-	CPU        float64 `json:"cpu"` // cpu_percent
-	RSSMB      uint64  `json:"rss_mb"`
-	HeapMB     uint64  `json:"heap_mb"` // heap_alloc_mb
-	FDUsed     int     `json:"fd_used"`
-	FDLimit    int     `json:"fd_limit"`
-	MemTotalMB uint64  `json:"mem_total_mb"`
-	MemAvailMB uint64  `json:"mem_avail_mb"`
-	Goroutines int     `json:"goroutines"`
-	Workers    int32   `json:"workers"` // active_workers
-	Chunks     int     `json:"chunks"`  // chunk_parallelism
+	T             string  `json:"t"`   // RFC3339 UTC
+	CPU           float64 `json:"cpu"` // cpu_percent
+	RSSMB         uint64  `json:"rss_mb"`
+	HeapMB        uint64  `json:"heap_mb"` // heap_alloc_mb
+	FDUsed        int     `json:"fd_used"`
+	FDLimit       int     `json:"fd_limit"`
+	MemTotalMB    uint64  `json:"mem_total_mb"`
+	MemAvailMB    uint64  `json:"mem_avail_mb"`
+	Goroutines    int     `json:"goroutines"`
+	ActiveWorkers int32   `json:"active_workers"` // chunks currently being processed
+	Capacity      int     `json:"capacity"`       // max concurrent chunks (parallelism)
 }
 
 // DebugData is returned by the "debug" direct handler.
