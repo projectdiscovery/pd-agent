@@ -1169,6 +1169,18 @@ func (r *Runner) handleUpdate(ctx context.Context, method string, data []byte) (
 		TargetVersion:  req.Version,
 	}
 
+	// Fail fast: container or same version — return immediately, no goroutine.
+	if selfupdate.IsContainer() {
+		result.Status = "skipped"
+		result.Message = "running in a container — update the image instead of self-updating"
+		return result, nil
+	}
+	if req.Version == Version {
+		result.Status = "skipped"
+		result.Message = fmt.Sprintf("already running %s", Version)
+		return result, nil
+	}
+
 	// Run update in background — we need to send the NATS response first.
 	// Download and verify BEFORE draining connections, so on failure the
 	// agent keeps running normally.

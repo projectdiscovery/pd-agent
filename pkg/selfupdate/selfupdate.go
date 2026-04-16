@@ -55,7 +55,7 @@ type UpdateResult struct {
 //
 //	PDCP_UPDATE_URL=http://localhost:9999/pd-agent_2.0.0_macos_arm64.zip
 func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion string) (string, error) {
-	if isContainer() {
+	if IsContainer() {
 		return "", fmt.Errorf("running in a container — update the image instead of self-updating")
 	}
 
@@ -380,8 +380,8 @@ func ensureArg(args []string, key, value string) []string {
 	return result
 }
 
-// isContainer checks if we're running inside a Docker/k8s container.
-func isContainer() bool {
+// IsContainer checks if we're running inside a Docker/k8s container.
+func IsContainer() bool {
 	// Kubernetes injects this env var into every pod.
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return true
