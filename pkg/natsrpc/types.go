@@ -33,13 +33,17 @@ type PortProbeRequest struct {
 
 // HealthCheckData is returned by the "health-check" broadcast handler.
 type HealthCheckData struct {
-	AgentID      string `json:"agent_id"`
-	AgentName    string `json:"agent_name"`
-	Version      string `json:"version"`
-	Uptime       string `json:"uptime"`
-	TasksRunning int    `json:"tasks_running"`
-	Idle         bool   `json:"idle"`                 // true if idle > 1 min
-	IdleSince    string `json:"idle_since,omitempty"` // RFC3339 timestamp if idle > 1 min
+	AgentID      string   `json:"agent_id"`
+	AgentName    string   `json:"agent_name"`
+	Version      string   `json:"version"`
+	Uptime       string   `json:"uptime"`
+	NumCPU       int      `json:"num_cpu"`
+	MemTotalMB   uint64   `json:"mem_total_mb"`
+	TasksRunning int      `json:"tasks_running"`
+	ActiveScans  []string `json:"active_scans,omitempty"`
+	ActiveEnums  []string `json:"active_enums,omitempty"`
+	Idle         bool     `json:"idle"`                 // true if idle > 1 min
+	IdleSince    string   `json:"idle_since,omitempty"` // RFC3339 timestamp if idle > 1 min
 }
 
 // LogsRequest is the payload for the "logs" RPC method.
@@ -92,10 +96,18 @@ type MetricPoint struct {
 
 // DebugData is returned by the "debug" direct handler.
 type DebugData struct {
-	Agent   AgentInfo   `json:"agent"`
-	System  SystemInfo  `json:"system"`
-	Process ProcessInfo `json:"process"`
-	Runtime RuntimeInfo `json:"runtime"`
+	Agent       AgentInfo   `json:"agent"`
+	System      SystemInfo  `json:"system"`
+	Process     ProcessInfo `json:"process"`
+	Runtime     RuntimeInfo `json:"runtime"`
+	ActiveTasks []TaskInfo  `json:"active_tasks,omitempty"`
+}
+
+// TaskInfo describes an active scan or enumeration.
+type TaskInfo struct {
+	Type      string `json:"type"` // "scan" or "enumeration"
+	TaskID    string `json:"task_id"`
+	StartedAt string `json:"started_at"` // RFC3339 UTC
 }
 
 // AgentInfo contains agent identity and status.

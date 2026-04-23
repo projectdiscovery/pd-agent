@@ -3,9 +3,10 @@ package natsrpc
 import (
 	"context"
 	"errors"
-	json "github.com/json-iterator/go"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -545,9 +546,13 @@ func processChunkMsg(
 }
 
 // ackWithRetry acknowledges a message using DoubleAck (server-confirmed) with
-// retry logic. Plain Ack() is fire-and-forget — if the ack packet is lost, the
-// message stays unacked and can become orphaned when no consumers are pulling.
+// retry logic and jitter to avoid thundering herd when many chunks finish
+// simultaneously. Plain Ack() is fire-and-forget — if the ack packet is lost,
+// the message stays unacked and can become orphaned when no consumers are pulling.
 func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error {
+	// Jitter 0-500ms to stagger acks when many chunks finish at once.
+	time.Sleep(time.Duration(rand.IntN(500)) * time.Millisecond)
+
 	var err error
 	for i := 0; i <= maxRetries; i++ {
 		ackCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -559,7 +564,7 @@ func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error 
 		if ctx.Err() != nil {
 			return fmt.Errorf("ack: context cancelled: %w", ctx.Err())
 		}
-		slog.Warn("ack: retry", "attempt", i+1, "error", err)
+		slog.Debug("ack: retry", "attempt", i+1, "error", err)
 	}
 	return fmt.Errorf("ack failed after %d retries: %w", maxRetries+1, err)
 }
