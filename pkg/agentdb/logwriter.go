@@ -1,16 +1,14 @@
 package agentdb
 
 import (
-	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 )
 
 const (
-	logWriterChanSize      = 1024
-	logWriterFlushInterval = 2 * time.Second
-	logWriterMaxBatch      = 256
+	logWriterChanSize = 8192
+	logWriterMaxBatch = 512
 )
 
 // LogWriter is an async, channel-based log writer that batches inserts
@@ -19,8 +17,9 @@ type LogWriter struct {
 	store   *SQLiteStore
 	ch      chan LogEntry
 	stopped atomic.Bool
-	stopCh  chan struct{} // signal to stop
-	done    chan struct{} // closed when Run() exits
+	dropped atomic.Int64
+	stopCh  chan struct{}
+	done    chan struct{}
 }
 
 // NewLogWriter creates a LogWriter backed by the given store.
@@ -43,47 +42,54 @@ func (w *LogWriter) Write(entry LogEntry) {
 	select {
 	case w.ch <- entry:
 	default:
+		w.dropped.Add(1)
 	}
 }
 
-// Run drains the channel, batching inserts into transactions.
-// Blocks until Stop() is called. Does NOT depend on context —
-// keeps accepting writes through shutdown so diagnostic logs are captured.
+// Run continuously drains the channel, batching inserts into transactions.
+// No ticker — flushes as fast as entries arrive.
 func (w *LogWriter) Run() {
 	defer close(w.done)
-
-	ticker := time.NewTicker(logWriterFlushInterval)
-	defer ticker.Stop()
 
 	var buf []LogEntry
 
 	for {
+		// Block until at least one entry arrives or stop signal.
 		select {
 		case entry := <-w.ch:
 			buf = append(buf, entry)
-			if len(buf) >= logWriterMaxBatch {
-				w.flush(buf)
-				buf = buf[:0]
-			}
-		case <-ticker.C:
-			if len(buf) > 0 {
-				w.flush(buf)
-				buf = buf[:0]
-			}
 		case <-w.stopCh:
-			// Stop accepting new writes, drain remaining.
-			w.stopped.Store(true)
-		drain:
-			for {
-				select {
-				case entry := <-w.ch:
-					buf = append(buf, entry)
-				default:
-					break drain
-				}
+			w.drain(&buf)
+			return
+		}
+
+		// Drain everything currently in the channel (non-blocking).
+		// This naturally batches: if 200 entries arrived while we were
+		// flushing the last batch, we pick them all up in one pass.
+	drain:
+		for len(buf) < logWriterMaxBatch {
+			select {
+			case entry := <-w.ch:
+				buf = append(buf, entry)
+			default:
+				break drain
 			}
-			if len(buf) > 0 {
-				w.flush(buf)
+		}
+
+		w.flush(buf)
+		buf = buf[:0]
+	}
+}
+
+// drain collects all remaining entries from the channel into buf and flushes.
+func (w *LogWriter) drain(buf *[]LogEntry) {
+	for {
+		select {
+		case entry := <-w.ch:
+			*buf = append(*buf, entry)
+		default:
+			if len(*buf) > 0 {
+				w.flush(*buf)
 			}
 			return
 		}
@@ -93,6 +99,7 @@ func (w *LogWriter) Run() {
 // Stop signals the writer to flush remaining entries and exit.
 // Blocks until all buffered entries are written to the DB.
 func (w *LogWriter) Stop() {
+	w.stopped.Store(true)
 	close(w.stopCh)
 	<-w.done
 }
@@ -128,5 +135,7 @@ func (w *LogWriter) flush(entries []LogEntry) {
 		return
 	}
 
-	slog.Debug(fmt.Sprintf("agentdb: logwriter flushed %d entries", len(entries)))
+	if dropped := w.dropped.Swap(0); dropped > 0 {
+		slog.Warn("agentdb: logwriter dropped entries (channel full)", "dropped", dropped)
+	}
 }
