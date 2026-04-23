@@ -39,9 +39,9 @@ type Scaler struct {
 
 	// Baseline: median duration at the initial parallelism level.
 	// Set after the first batch of samples.
-	baseline     time.Duration
-	baselineSet  bool
-	baselineMu   sync.Mutex
+	baseline    time.Duration
+	baselineSet bool
+	baselineMu  sync.Mutex
 
 	// Cooldown tracking.
 	lastResize time.Time
@@ -221,7 +221,7 @@ func (s *Scaler) measurePressure() resourcePressure {
 	// the runtime — number of goroutines vs GOMAXPROCS as a proxy.
 	// A proper implementation would track CPU samples over time.
 	// For now, we read the cgroup/proc stats directly.
-	memTotal, memAvail := readMemory()
+	memTotal, memAvail := ReadMemory()
 	if memTotal > 0 {
 		p.mem = 1.0 - float64(memAvail)/float64(memTotal)
 	}

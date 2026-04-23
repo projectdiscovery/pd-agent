@@ -94,7 +94,7 @@ func (p *Profiler) Run(ctx context.Context) {
 func LogStartupResources() {
 	cpus := runtime.GOMAXPROCS(0)
 	numCPU := runtime.NumCPU()
-	memTotal, memAvail := readMemory()
+	memTotal, memAvail := ReadMemory()
 	fdUsed, fdLimit := readFDs()
 	cgroupCPU := readCgroupCPUs()
 
@@ -117,7 +117,7 @@ func (p *Profiler) sample() {
 	runtime.ReadMemStats(&ms)
 
 	fdUsed, fdLimit := readFDs()
-	memTotal, memAvail := readMemory()
+	memTotal, memAvail := ReadMemory()
 	workers := p.activeWorkers()
 	rss := readRSS()
 

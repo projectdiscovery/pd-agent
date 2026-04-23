@@ -26,7 +26,7 @@ func readRSS() uint64 {
 // On macOS there is no direct "available memory" syscall. We parse vm_stat
 // output for free + inactive pages to approximate available memory. If that
 // fails, we fall back to 50% of total as a conservative safety heuristic.
-func readMemory() (total, available uint64) {
+func ReadMemory() (total, available uint64) {
 	total = readSysctlUint64("hw.memsize")
 	if total == 0 {
 		return 0, 0

@@ -33,10 +33,10 @@ type AutoDetectResult struct {
 	Bottleneck       string // which dimension was the tightest
 
 	// Detected raw values
-	EffectiveCPUs   int
-	AvailableMemMB  uint64
-	FDLimit         int
-	FDUsed          int
+	EffectiveCPUs  int
+	AvailableMemMB uint64
+	FDLimit        int
+	FDUsed         int
 }
 
 // ComputeChunkParallelism detects machine resources and computes the optimal
@@ -49,7 +49,7 @@ type AutoDetectResult struct {
 func ComputeChunkParallelism(scanParallelism int) AutoDetectResult {
 	// Detect resources
 	effectiveCPUs := runtime.GOMAXPROCS(0) // cgroup-aware after automaxprocs
-	_, memAvail := readMemory()
+	_, memAvail := ReadMemory()
 	fdUsed, fdLimit := readFDs()
 
 	// Compute per-dimension workers

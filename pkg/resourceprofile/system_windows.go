@@ -54,7 +54,7 @@ type memoryStatusEx struct {
 }
 
 // readMemory returns (total, available) physical memory on Windows.
-func readMemory() (total, available uint64) {
+func ReadMemory() (total, available uint64) {
 	var ms memoryStatusEx
 	ms.Length = uint32(unsafe.Sizeof(ms))
 	ret, _, _ := procGMSE.Call(uintptr(unsafe.Pointer(&ms)))
@@ -100,4 +100,3 @@ func readCPU() cpuSample {
 func filetimeToNanos(ft windows.Filetime) uint64 {
 	return (uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)) * 100
 }
-

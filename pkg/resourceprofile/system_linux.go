@@ -33,7 +33,7 @@ func readRSS() uint64 {
 
 // readMemory returns (total, available) memory in bytes.
 // Uses cgroup memory limits first, falls back to /proc/meminfo.
-func readMemory() (total, available uint64) {
+func ReadMemory() (total, available uint64) {
 	// Try cgroup v2 first
 	if t, a := readCgroupV2Memory(); t > 0 {
 		return t, a
