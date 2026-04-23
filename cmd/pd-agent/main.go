@@ -1041,29 +1041,34 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 }
 
 func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
-	// Count running tasks: legacy (pendingTasks) + JetStream (active workers + chunks).
-	tasksRunning := len(pendingTasks.GetAll())
-	chunksActive := 0
-	if r.jsPool != nil {
-		tasksRunning += int(r.jsPool.ActiveWorkers())
+	memTotal, _ := resourceprofile.ReadMemory()
+
+	hc := natsrpc.HealthCheckData{
+		AgentID:    r.options.AgentId,
+		AgentName:  r.options.AgentName,
+		Version:    Version,
+		Uptime:     time.Since(r.agentStartTime).String(),
+		NumCPU:     runtime.NumCPU(),
+		MemTotalMB: memTotal / (1024 * 1024),
 	}
-	if r.chunkSem != nil {
-		chunksActive = r.chunkSem.InUse()
-		if chunksActive > 0 {
-			tasksRunning += chunksActive
+
+	// Active tasks from SQLite — source of truth.
+	if r.agentDB != nil {
+		if tasks, err := r.agentDB.ActiveTasks(context.Background()); err == nil {
+			for _, t := range tasks {
+				switch t.Type {
+				case "scan":
+					hc.ActiveScans = append(hc.ActiveScans, t.TaskID)
+				case "enumeration":
+					hc.ActiveEnums = append(hc.ActiveEnums, t.TaskID)
+				}
+			}
+			hc.TasksRunning = len(tasks)
 		}
 	}
 
-	hc := natsrpc.HealthCheckData{
-		AgentID:      r.options.AgentId,
-		AgentName:    r.options.AgentName,
-		Version:      Version,
-		Uptime:       time.Since(r.agentStartTime).String(),
-		TasksRunning: tasksRunning,
-	}
-
 	// Report idle only when no work is happening at any level.
-	if tasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
+	if hc.TasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
 		hc.Idle = true
 		if r.jsPool != nil {
 			if idle := r.jsPool.IdleSince(); !idle.IsZero() {
@@ -1092,14 +1097,14 @@ func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (a
 		lastGC = time.Unix(0, int64(mem.LastGC)).UTC().Format(time.RFC3339)
 	}
 
-	return natsrpc.DebugData{
+	dd := natsrpc.DebugData{
 		Agent: natsrpc.AgentInfo{
 			ID:            r.options.AgentId,
 			Name:          r.options.AgentName,
 			Version:       Version,
 			Uptime:        uptime.Round(time.Second).String(),
 			UptimeSeconds: uptime.Seconds(),
-			TasksRunning:  len(pendingTasks.GetAll()),
+			TasksRunning:  0, // populated below from SQLite active tasks
 		},
 		System: natsrpc.SystemInfo{
 			OS:       runtime.GOOS,
@@ -1121,7 +1126,22 @@ func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (a
 			NumGC:        mem.NumGC,
 			LastGC:       lastGC,
 		},
-	}, nil
+	}
+
+	if r.agentDB != nil {
+		if tasks, err := r.agentDB.ActiveTasks(context.Background()); err == nil {
+			dd.Agent.TasksRunning = len(tasks)
+			for _, t := range tasks {
+				dd.ActiveTasks = append(dd.ActiveTasks, natsrpc.TaskInfo{
+					Type:      t.Type,
+					TaskID:    t.TaskID,
+					StartedAt: t.StartedAt.UTC().Format(time.RFC3339),
+				})
+			}
+		}
+	}
+
+	return dd, nil
 }
 
 func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (any, error) {
@@ -1265,7 +1285,7 @@ func (r *Runner) handleLogs(ctx context.Context, method string, data []byte) (an
 		}
 		filter.Until = t
 	}
-	dbEntries, err := r.agentDB.QueryLogs(ctx, filter)
+	dbEntries, err := r.agentDB.QueryLogs(context.Background(), filter)
 	if err != nil {
 		return nil, fmt.Errorf("query logs: %w", err)
 	}
@@ -1333,7 +1353,7 @@ func (r *Runner) handleMetrics(ctx context.Context, method string, data []byte) 
 	}
 
 	// Query all samples in range (no limit).
-	samples, err := r.agentDB.QueryMetrics(ctx, since, until, 0)
+	samples, err := r.agentDB.QueryMetrics(context.Background(), since, until, 0)
 	if err != nil {
 		return nil, fmt.Errorf("query metrics: %w", err)
 	}
@@ -1459,6 +1479,13 @@ func (r *Runner) processWorkMessage(ctx context.Context, msg jetstream.Msg, work
 func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMessage) error {
 	r.logHelper("INFO", fmt.Sprintf("JetStream: processing scan %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
 
+	if r.agentDB != nil {
+		_ = r.agentDB.InsertTask(ctx, &agentdb.Task{Type: "scan", TaskID: work.ScanID})
+		defer func() {
+			_ = r.agentDB.FinishTask(ctx, work.ScanID, "completed")
+		}()
+	}
+
 	// Resolve templates — use provided or fall back to defaults
 	templatesToUse := work.Templates
 	if len(templatesToUse) == 0 {
@@ -1560,6 +1587,13 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 
 func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.WorkMessage) error {
 	r.logHelper("INFO", fmt.Sprintf("JetStream: processing enumeration %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
+
+	if r.agentDB != nil {
+		_ = r.agentDB.InsertTask(ctx, &agentdb.Task{Type: "enumeration", TaskID: work.ScanID})
+		defer func() {
+			_ = r.agentDB.FinishTask(ctx, work.ScanID, "completed")
+		}()
+	}
 
 	creds := r.GetNATSCredentials()
 	chunkConsumer := work.ChunkConsumer
@@ -1717,8 +1751,9 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	// WorkerPool once JetStream workers start (via onNATSCredentialsReceived).
 	resourceprofile.LogStartupResources()
 	profiler := resourceprofile.New(5*time.Second, func() int32 {
-		if r.jsPool != nil {
-			return r.jsPool.ActiveWorkers()
+		// Report chunk-level concurrency (active scans), not work-message count.
+		if r.chunkSem != nil {
+			return int32(r.chunkSem.InUse())
 		}
 		return 0
 	}, resourceprofile.WithMetricsHook(func(snap resourceprofile.MetricSnapshot) {
@@ -2379,8 +2414,22 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 		"templates", len(templatesToUse),
 		"extracted_ports", extractedPorts,
 	)
-	taskResult, outputFiles, err := pkg.Run(ctx, task)
+
+	// Hard cap: 20 minutes per chunk. If nuclei hangs or targets are slow,
+	// we abort so the chunk gets nak'd and doesn't block the semaphore forever.
+	scanCtx, scanCancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer scanCancel()
+
+	taskResult, outputFiles, err := pkg.Run(scanCtx, task)
 	if err != nil {
+		if scanCtx.Err() == context.DeadlineExceeded {
+			slog.Error("Nuclei scan timed out (20m hard cap)",
+				"scan_id", scanID,
+				"chunk_id", metaID,
+				"targets", len(filteredTargets),
+			)
+			return
+		}
 		slog.Error("Nuclei scan execution failed",
 			"scan_id", scanID,
 			"chunk_id", metaID,
