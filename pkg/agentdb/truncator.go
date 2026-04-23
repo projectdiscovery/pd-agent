@@ -73,6 +73,10 @@ func (t *Truncator) truncateOnce() error {
 	if err := t.truncateTable("metrics", t.maxMetRows); err != nil {
 		return fmt.Errorf("truncate metrics: %w", err)
 	}
+	// Cap tasks at 1000 rows.
+	if err := t.truncateTable("tasks", 1000); err != nil {
+		return fmt.Errorf("truncate tasks: %w", err)
+	}
 	if _, err := t.store.db.Exec(fmt.Sprintf("PRAGMA incremental_vacuum(%d)", vacuumPages)); err != nil {
 		return fmt.Errorf("incremental_vacuum: %w", err)
 	}
@@ -87,7 +91,7 @@ func (t *Truncator) truncateOnce() error {
 // truncateTable deletes the oldest rows from table if count exceeds maxRows,
 // keeping retainPercent of maxRows.
 func (t *Truncator) truncateTable(table string, maxRows int64) error {
-	if table != "logs" && table != "metrics" {
+	if table != "logs" && table != "metrics" && table != "tasks" {
 		return fmt.Errorf("invalid table: %q", table)
 	}
 	if maxRows <= 0 {

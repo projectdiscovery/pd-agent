@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS metrics (
     chunk_parallelism INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp);
+
+CREATE TABLE IF NOT EXISTS tasks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    type        TEXT NOT NULL,
+    task_id     TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'running',
+    started_at  TEXT NOT NULL,
+    finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+CREATE INDEX IF NOT EXISTS idx_tasks_task_id ON tasks(task_id);
 `
 
 // Open creates or opens a SQLite database at dbPath and returns an SQLiteStore.
@@ -365,6 +376,71 @@ func (s *SQLiteStore) QueryMetrics(ctx context.Context, since, until time.Time, 
 	return samples, nil
 }
 
+// InsertTask records a new scan/enumeration task as running.
+func (s *SQLiteStore) InsertTask(ctx context.Context, task *Task) error {
+	const q = `INSERT INTO tasks (type, task_id, status, started_at) VALUES (?, ?, 'running', ?)`
+	_, err := s.db.ExecContext(ctx, q, task.Type, task.TaskID, time.Now().UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return fmt.Errorf("agentdb: insert task: %w", err)
+	}
+	return nil
+}
+
+// FinishTask updates a task's status and sets finished_at.
+func (s *SQLiteStore) FinishTask(ctx context.Context, taskID, status string) error {
+	const q = `UPDATE tasks SET status = ?, finished_at = ? WHERE task_id = ? AND status = 'running'`
+	_, err := s.db.ExecContext(ctx, q, status, time.Now().UTC().Format(time.RFC3339Nano), taskID)
+	if err != nil {
+		return fmt.Errorf("agentdb: finish task: %w", err)
+	}
+	return nil
+}
+
+// ActiveTasks returns all tasks with status "running".
+func (s *SQLiteStore) ActiveTasks(ctx context.Context) ([]Task, error) {
+	return s.queryTasks(ctx, "SELECT id, type, task_id, status, started_at, finished_at FROM tasks WHERE status = 'running' ORDER BY id DESC")
+}
+
+// RecentTasks returns the most recent tasks (any status), ordered newest-first.
+func (s *SQLiteStore) RecentTasks(ctx context.Context, limit int) ([]Task, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	return s.queryTasks(ctx, fmt.Sprintf("SELECT id, type, task_id, status, started_at, finished_at FROM tasks ORDER BY id DESC LIMIT %d", limit))
+}
+
+func (s *SQLiteStore) queryTasks(ctx context.Context, q string) ([]Task, error) {
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("agentdb: query tasks: %w", err)
+	}
+	defer rows.Close()
+
+	var tasks []Task
+	for rows.Next() {
+		var (
+			t          Task
+			startedAt  string
+			finishedAt sql.NullString
+		)
+		if err := rows.Scan(&t.ID, &t.Type, &t.TaskID, &t.Status, &startedAt, &finishedAt); err != nil {
+			return nil, fmt.Errorf("agentdb: scan task: %w", err)
+		}
+		t.StartedAt, _ = time.Parse(time.RFC3339Nano, startedAt)
+		if finishedAt.Valid {
+			t.FinishedAt, _ = time.Parse(time.RFC3339Nano, finishedAt.String)
+		}
+		tasks = append(tasks, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("agentdb: rows iteration: %w", err)
+	}
+	if tasks == nil {
+		tasks = []Task{}
+	}
+	return tasks, nil
+}
+
 // DBSizeBytes returns the current database file size in bytes.
 func (s *SQLiteStore) DBSizeBytes() (int64, error) {
 	fi, err := os.Stat(s.dbPath)
@@ -377,4 +453,19 @@ func (s *SQLiteStore) DBSizeBytes() (int64, error) {
 // Close closes the database connection.
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// CheckpointWAL forces all WAL frames into the main DB file and truncates the WAL.
+// Call after all writers have stopped and before uploading the .db file.
+func (s *SQLiteStore) CheckpointWAL() error {
+	_, err := s.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	if err != nil {
+		return fmt.Errorf("agentdb: wal_checkpoint: %w", err)
+	}
+	return nil
+}
+
+// DBPath returns the filesystem path of the database file.
+func (s *SQLiteStore) DBPath() string {
+	return s.dbPath
 }

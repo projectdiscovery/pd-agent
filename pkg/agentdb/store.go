@@ -35,6 +35,18 @@ type Store interface {
 	// QueryMetrics returns metric samples within the time range, ordered oldest-first.
 	QueryMetrics(ctx context.Context, since, until time.Time, limit int) ([]MetricSample, error)
 
+	// InsertTask records a new scan/enumeration task as running.
+	InsertTask(ctx context.Context, task *Task) error
+
+	// FinishTask updates a task's status and sets finished_at.
+	FinishTask(ctx context.Context, taskID, status string) error
+
+	// ActiveTasks returns all tasks with status "running".
+	ActiveTasks(ctx context.Context) ([]Task, error)
+
+	// RecentTasks returns the most recent tasks (any status), ordered newest-first.
+	RecentTasks(ctx context.Context, limit int) ([]Task, error)
+
 	// DBSizeBytes returns the current database file size in bytes.
 	DBSizeBytes() (int64, error)
 
@@ -107,6 +119,16 @@ type MetricSample struct {
 	Goroutines       int
 	ActiveWorkers    int32
 	ChunkParallelism int
+}
+
+// Task tracks a scan or enumeration the agent is working on.
+type Task struct {
+	ID         int64
+	Type       string // "scan" or "enumeration"
+	TaskID     string // scan_id or enumeration_id
+	Status     string // "running", "completed", "failed"
+	StartedAt  time.Time
+	FinishedAt time.Time // zero if still running
 }
 
 // cgnatRange is RFC6598 (Carrier-Grade NAT), not covered by net.IP.IsPrivate().
