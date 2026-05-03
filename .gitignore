@@ -22,6 +22,8 @@ pd-agent-*.db-wal
 
 # Local binaries at repo root
 /pd-agent-linux-amd64
+/pd-agent-linux-arm64
+/pd-agent-windows-amd64.exe
 /interactsh-debug
 
 # Scan logs
