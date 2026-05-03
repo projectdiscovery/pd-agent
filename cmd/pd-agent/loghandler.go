@@ -17,7 +17,8 @@ import (
 type dbWriter struct {
 	mu        sync.Mutex
 	logWriter *agentdb.LogWriter
-	earlyLogs []string // buffered before DB ready, cap 1000
+	store     *agentdb.SQLiteStore // synchronous fallback when logWriter is nil
+	earlyLogs []string             // buffered before DB ready, cap 1000
 }
 
 // Write captures each slog line and sends it to the LogWriter.
@@ -32,6 +33,13 @@ func (w *dbWriter) Write(p []byte) (int, error) {
 
 	if w.logWriter != nil {
 		w.logWriter.Write(agentdb.LogEntry{
+			Timestamp: time.Now().UTC(),
+			Line:      line,
+		})
+	} else if w.store != nil {
+		// LogWriter stopped but DB still open — write synchronously so
+		// shutdown logs aren't lost.
+		_ = w.store.InsertLog(context.Background(), &agentdb.LogEntry{
 			Timestamp: time.Now().UTC(),
 			Line:      line,
 		})
@@ -54,6 +62,14 @@ func (w *dbWriter) SetLogWriter(lw *agentdb.LogWriter) {
 		})
 	}
 	w.earlyLogs = nil
+}
+
+// SetStore wires the SQLite store as a synchronous fallback when the async
+// LogWriter is nil (pre-init or post-shutdown).
+func (w *dbWriter) SetStore(store *agentdb.SQLiteStore) {
+	w.mu.Lock()
+	w.store = store
+	w.mu.Unlock()
 }
 
 // ClearLogWriter disables writing (call before DB close on shutdown).

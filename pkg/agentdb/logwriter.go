@@ -110,6 +110,14 @@ func (w *LogWriter) flush(entries []LogEntry) {
 		return
 	}
 
+	// Always report drops, even if commit fails; otherwise the warn is gated
+	// behind a successful flush and the counter grows silently.
+	defer func() {
+		if dropped := w.dropped.Swap(0); dropped > 0 {
+			slog.Warn("agentdb: logwriter dropped entries (channel full)", "dropped", dropped)
+		}
+	}()
+
 	tx, err := w.store.db.Begin()
 	if err != nil {
 		slog.Debug("agentdb: logwriter begin tx", "error", err)
@@ -133,9 +141,5 @@ func (w *LogWriter) flush(entries []LogEntry) {
 	if err := tx.Commit(); err != nil {
 		slog.Debug("agentdb: logwriter commit", "error", err)
 		return
-	}
-
-	if dropped := w.dropped.Swap(0); dropped > 0 {
-		slog.Warn("agentdb: logwriter dropped entries (channel full)", "dropped", dropped)
 	}
 }

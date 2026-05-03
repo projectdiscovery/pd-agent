@@ -42,9 +42,9 @@ const (
 type Priority int
 
 const (
-	Critical Priority = iota // Agent cannot function — exit if install fails
-	Important                // Some features degrade — warn and continue
-	Optional                 // Nice-to-have — log status only, never install
+	Critical  Priority = iota // Agent cannot function — exit if install fails
+	Important                 // Some features degrade — warn and continue
+	Optional                  // Nice-to-have — log status only, never install
 )
 
 // Tool describes an external dependency.
@@ -116,13 +116,13 @@ var tools = []Tool{
 
 // Result holds the outcome of checking/installing a single tool.
 type Result struct {
-	Name     string
-	Priority Priority
-	Found    bool
-	Path     string
-	Version  string
+	Name      string
+	Priority  Priority
+	Found     bool
+	Path      string
+	Version   string
 	Installed bool // true if we installed it this run
-	Error    error
+	Error     error
 }
 
 // EnsureAll checks every prerequisite and installs missing ones.
@@ -226,12 +226,26 @@ func warmupBrowser() error {
 }
 
 // check looks up a tool in PATH and optionally reads its version.
+//
+// If LookPath misses, falls back to probing the resolved install dir directly
+// and adds it to PATH on hit. Handles the common case where the parent process
+// (systemd unit, container CMD, etc.) doesn't include the install dir in PATH.
 func check(t Tool) Result {
 	r := Result{Name: t.Name, Priority: t.Priority}
 
 	path, err := exec.LookPath(t.Name)
 	if err != nil {
-		return r
+		binName := t.Name
+		if runtime.GOOS == "windows" {
+			binName += ".exe"
+		}
+		candidate := filepath.Join(resolveInstallDir(), binName)
+		if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+			ensureInPath(filepath.Dir(candidate))
+			path = candidate
+		} else {
+			return r
+		}
 	}
 	r.Found = true
 	r.Path = path

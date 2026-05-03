@@ -8,3 +8,38 @@ cmd/openapi-mcp/openapi-mcp
 cmd/fleetx/fleetx
 cmd/pd-agent/pd-agent
 output/*
+
+# Local runtime and scratch
+.claude/
+REVIEW.md
+chrome-ps-aux.txt
+ubisoft.txt
+
+# SQLite runtime files
+pd-agent-*.db
+pd-agent-*.db-shm
+pd-agent-*.db-wal
+
+# Local binaries at repo root
+/pd-agent-linux-amd64
+/interactsh-debug
+
+# Scan logs
+scan-*.log
+
+# Local helper scripts at repo root
+/bench-create.sh
+/bench-create-multi.sh
+/cidr-ip.sh
+/start.sh
+/start-mac.sh
+/ssh-config
+
+# Local build artifacts
+/build/
+
+# Local-only tools / docs / deployment manifests
+/cmd/interactsh-debug/
+/docs/
+/pd-agent-deployment.yaml
+/pd-agent-deployment-prod.yaml

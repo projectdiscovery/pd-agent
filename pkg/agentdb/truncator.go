@@ -18,6 +18,8 @@ const (
 	retainPercent = 80
 	// vacuumPages is the number of free pages to reclaim per cycle.
 	vacuumPages = 200
+	// maxTaskRows is the cap for the tasks table; only non-running rows count.
+	maxTaskRows = 10000
 )
 
 // Truncator runs a periodic maintenance loop that enforces table size caps
@@ -73,8 +75,9 @@ func (t *Truncator) truncateOnce() error {
 	if err := t.truncateTable("metrics", t.maxMetRows); err != nil {
 		return fmt.Errorf("truncate metrics: %w", err)
 	}
-	// Cap tasks at 1000 rows.
-	if err := t.truncateTable("tasks", 1000); err != nil {
+	// Cap tasks at maxTaskRows; only non-running rows are counted/deleted so
+	// long-running scans don't get evicted and don't push out completed history.
+	if err := t.truncateTasks(maxTaskRows); err != nil {
 		return fmt.Errorf("truncate tasks: %w", err)
 	}
 	if _, err := t.store.db.Exec(fmt.Sprintf("PRAGMA incremental_vacuum(%d)", vacuumPages)); err != nil {
@@ -91,7 +94,7 @@ func (t *Truncator) truncateOnce() error {
 // truncateTable deletes the oldest rows from table if count exceeds maxRows,
 // keeping retainPercent of maxRows.
 func (t *Truncator) truncateTable(table string, maxRows int64) error {
-	if table != "logs" && table != "metrics" && table != "tasks" {
+	if table != "logs" && table != "metrics" {
 		return fmt.Errorf("invalid table: %q", table)
 	}
 	if maxRows <= 0 {
@@ -113,6 +116,33 @@ func (t *Truncator) truncateTable(table string, maxRows int64) error {
 	q := fmt.Sprintf("DELETE FROM %s WHERE id IN (SELECT id FROM %s ORDER BY id ASC LIMIT ?)", table, table)
 	if _, err := t.store.db.Exec(q, deleteCount); err != nil {
 		return fmt.Errorf("delete from %s: %w", table, err)
+	}
+
+	return nil
+}
+
+// truncateTasks deletes the oldest non-running task rows when the count of
+// non-running rows exceeds maxRows. Running tasks are never evicted.
+func (t *Truncator) truncateTasks(maxRows int64) error {
+	if maxRows <= 0 {
+		return nil
+	}
+
+	var count int64
+	if err := t.store.db.QueryRow("SELECT COUNT(*) FROM tasks WHERE status != 'running'").Scan(&count); err != nil {
+		return fmt.Errorf("count tasks: %w", err)
+	}
+
+	if count <= maxRows {
+		return nil
+	}
+
+	retain := maxRows * retainPercent / 100
+	deleteCount := count - retain
+
+	q := "DELETE FROM tasks WHERE status != 'running' AND id IN (SELECT id FROM tasks WHERE status != 'running' ORDER BY id ASC LIMIT ?)"
+	if _, err := t.store.db.Exec(q, deleteCount); err != nil {
+		return fmt.Errorf("delete from tasks: %w", err)
 	}
 
 	return nil

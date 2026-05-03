@@ -22,7 +22,6 @@ import (
 const (
 	defaultHeartbeatInterval = 10 * time.Second
 	defaultAckWait           = 5 * time.Minute
-	defaultFetchTimeout      = 30 * time.Second
 )
 
 // WorkHandler processes a work message (scan or enumeration).
@@ -124,7 +123,11 @@ func (wp *WorkerPool) worker(ctx context.Context, id int) {
 				return
 			}
 			slog.Warn("jetstream worker: fetch error", "worker", id, "error", err)
-			time.Sleep(time.Second) // brief backoff on transient errors
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
 			continue
 		}
 
@@ -302,10 +305,7 @@ func ConsumeChunks(
 		}
 
 		// Use current semaphore size for fetch batch size.
-		fetchSize := sem.Size()
-		if fetchSize < 1 {
-			fetchSize = 1
-		}
+		fetchSize := max(sem.Size(), 1)
 
 		batch, err := consumer.Fetch(fetchSize, jetstream.FetchMaxWait(5*time.Second))
 		if err != nil {
@@ -565,6 +565,16 @@ func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error 
 			return fmt.Errorf("ack: context cancelled: %w", ctx.Err())
 		}
 		slog.Debug("ack: retry", "attempt", i+1, "error", err)
+
+		if i < maxRetries {
+			// Exponential backoff with re-jitter between retries.
+			backoff := time.Duration(100*(1<<i))*time.Millisecond + time.Duration(rand.IntN(100))*time.Millisecond
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("ack: context cancelled during backoff: %w", ctx.Err())
+			case <-time.After(backoff):
+			}
+		}
 	}
 	return fmt.Errorf("ack failed after %d retries: %w", maxRetries+1, err)
 }
@@ -577,15 +587,23 @@ func StartHeartbeat(ctx context.Context, msg jetstream.Msg, interval time.Durati
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		const maxConsecutiveFailures = 3
+		consecFails := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				if err := msg.InProgress(); err != nil {
-					slog.Debug("heartbeat: InProgress failed", "error", err)
-					return
+					consecFails++
+					slog.Debug("heartbeat: InProgress failed", "error", err, "consecutive_failures", consecFails)
+					if consecFails >= maxConsecutiveFailures {
+						slog.Warn("heartbeat: giving up after consecutive failures", "consecutive_failures", consecFails)
+						return
+					}
+					continue
 				}
+				consecFails = 0
 			}
 		}
 	}()

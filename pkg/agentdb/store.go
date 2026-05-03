@@ -41,10 +41,10 @@ type Store interface {
 	// FinishTask updates a task's status and sets finished_at.
 	FinishTask(ctx context.Context, taskID, status string) error
 
-	// ActiveTasks returns all tasks with status "running".
+	// ActiveTasks returns all tasks with status "running", ordered by id DESC (newest first).
 	ActiveTasks(ctx context.Context) ([]Task, error)
 
-	// RecentTasks returns the most recent tasks (any status), ordered newest-first.
+	// RecentTasks returns the most recent tasks (any status), ordered by id DESC (newest first).
 	RecentTasks(ctx context.Context, limit int) ([]Task, error)
 
 	// DBSizeBytes returns the current database file size in bytes.
@@ -59,7 +59,6 @@ type AgentInfo struct {
 	AgentID      string
 	AgentName    string
 	AgentNetwork string
-	UseJetStream bool
 	Version      string
 	OS           string
 	Arch         string

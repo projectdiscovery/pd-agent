@@ -28,7 +28,6 @@ CREATE TABLE IF NOT EXISTS agent_info (
     agent_id       TEXT NOT NULL,
     agent_name     TEXT NOT NULL DEFAULT '',
     agent_network  TEXT NOT NULL DEFAULT '',
-    use_jetstream  INTEGER NOT NULL DEFAULT 0,
     version        TEXT NOT NULL DEFAULT '',
     os             TEXT NOT NULL DEFAULT '',
     arch           TEXT NOT NULL DEFAULT '',
@@ -138,20 +137,14 @@ func (s *SQLiteStore) UpsertAgentInfo(ctx context.Context, info *AgentInfo) erro
 		return fmt.Errorf("agentdb: marshal network_info: %w", err)
 	}
 
-	jsInt := 0
-	if info.UseJetStream {
-		jsInt = 1
-	}
-
 	const q = `INSERT OR REPLACE INTO agent_info
-		(id, agent_id, agent_name, agent_network, use_jetstream, version, os, arch, num_cpu, hostname, pid, network_info, startup_args, startup_env, started_at, updated_at)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		(id, agent_id, agent_name, agent_network, version, os, arch, num_cpu, hostname, pid, network_info, startup_args, startup_env, started_at, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err = s.db.ExecContext(ctx, q,
 		info.AgentID,
 		info.AgentName,
 		info.AgentNetwork,
-		jsInt,
 		info.Version,
 		info.OS,
 		info.Arch,
@@ -172,13 +165,12 @@ func (s *SQLiteStore) UpsertAgentInfo(ctx context.Context, info *AgentInfo) erro
 
 // GetAgentInfo returns the current agent info, or (nil, nil) if no row exists.
 func (s *SQLiteStore) GetAgentInfo(ctx context.Context) (*AgentInfo, error) {
-	const q = `SELECT agent_id, agent_name, agent_network, use_jetstream, version, os, arch, num_cpu, hostname, pid,
+	const q = `SELECT agent_id, agent_name, agent_network, version, os, arch, num_cpu, hostname, pid,
 		network_info, startup_args, startup_env, started_at, updated_at FROM agent_info WHERE id = 1`
 
 	var (
 		info      AgentInfo
 		netJSON   string
-		jsInt     int
 		startedAt string
 		updatedAt string
 	)
@@ -187,7 +179,6 @@ func (s *SQLiteStore) GetAgentInfo(ctx context.Context) (*AgentInfo, error) {
 		&info.AgentID,
 		&info.AgentName,
 		&info.AgentNetwork,
-		&jsInt,
 		&info.Version,
 		&info.OS,
 		&info.Arch,
@@ -200,7 +191,6 @@ func (s *SQLiteStore) GetAgentInfo(ctx context.Context) (*AgentInfo, error) {
 		&startedAt,
 		&updatedAt,
 	)
-	info.UseJetStream = jsInt != 0
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
