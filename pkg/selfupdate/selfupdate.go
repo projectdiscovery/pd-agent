@@ -4,6 +4,7 @@ package selfupdate
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -19,6 +20,13 @@ import (
 
 	"github.com/tidwall/gjson"
 )
+
+// PreflightEnvVar is set on the new binary's environment during a self-update
+// preflight. The new binary should exit 0 cleanly soon after parsing flags
+// (and any other safe init that does not touch shared state). Callers use
+// this to detect "binary won't even start with the current args" before
+// committing to swap, so a broken update does not brick the agent.
+const PreflightEnvVar = "PDCP_PREFLIGHT"
 
 const (
 	githubRepo      = "projectdiscovery/pd-agent"
@@ -103,12 +111,62 @@ func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion str
 	return newBinary, nil
 }
 
+// Prevalidate runs the new binary with the exact args Apply will exec with
+// (current os.Args + injected --agent-id) and PDCP_PREFLIGHT=1 in the env.
+// If the binary exits within preflightWindow, the update is aborted with the
+// captured stderr so the running agent can keep serving instead of getting
+// bricked.
+//
+// A binary that respects PreflightEnvVar exits 0 cleanly after flag parsing.
+// Older binaries that do not honor the var either run normally (and would
+// conflict with the live agent's NATS session) or die fast on flag mismatches.
+// In both cases an early exit is treated as a failed preflight.
+func Prevalidate(newBinaryPath, agentID string) error {
+	const preflightWindow = 15 * time.Second
+
+	args := ensureArg(os.Args, "--agent-id", agentID)
+	if len(args) == 0 {
+		return fmt.Errorf("preflight: empty restart args")
+	}
+
+	cmd := exec.Command(newBinaryPath, args[1:]...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = io.Discard
+	cmd.Env = append(os.Environ(), PreflightEnvVar+"=1")
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("preflight start: %w", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	select {
+	case err := <-done:
+		out := strings.TrimSpace(stderr.String())
+		if err != nil {
+			return fmt.Errorf("preflight: new binary exited early: %v (stderr: %s)", err, out)
+		}
+		return fmt.Errorf("preflight: new binary exited cleanly without honoring %s — likely an older build (stderr: %s)", PreflightEnvVar, out)
+	case <-time.After(preflightWindow):
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		slog.Info("selfupdate: preflight passed", "path", newBinaryPath, "window", preflightWindow)
+		return nil
+	}
+}
+
 // Apply replaces the running binary with the new one and restarts via
 // syscall.Exec. Call this AFTER draining connections and in-flight work.
 // agentID is injected into the restart args so the new process keeps the same ID.
 //
 // On success, this function does not return — the process is replaced.
 // On failure, it returns an error and cleans up.
+//
+// The previous binary is left at execPath + ".old" so an operator can revert
+// if the new binary turns out to be broken. CleanupOldBinary should be called
+// from the new process after a startup-success milestone (e.g., NATS RPC up).
 func Apply(newBinaryPath, currentVersion, agentID string) error {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -135,11 +193,11 @@ func Apply(newBinaryPath, currentVersion, agentID string) error {
 		return fmt.Errorf("chmod: %w", err)
 	}
 
-	slog.Info("selfupdate: binary replaced, restarting", "path", execPath, "agent_id", agentID)
+	slog.Info("selfupdate: binary replaced, restarting", "path", execPath, "backup", backupPath, "agent_id", agentID)
 
-	// Clean up temp and backup.
+	// Remove the temp source. Backup at execPath+".old" is intentionally kept
+	// for recovery; CleanupOldBinary deletes it after the new process proves healthy.
 	_ = os.Remove(newBinaryPath)
-	_ = os.Remove(backupPath)
 
 	// Build restart args: inject --agent-id so the new process keeps the same identity.
 	args := ensureArg(os.Args, "--agent-id", agentID)
@@ -147,6 +205,30 @@ func Apply(newBinaryPath, currentVersion, agentID string) error {
 	// Exec replaces the current process with the new binary.
 	// Same PID, same env, args with persisted agent ID.
 	return syscall.Exec(execPath, args, os.Environ())
+}
+
+// CleanupOldBinary removes execPath+".old" if present. Call this from the
+// running agent after it has reached a startup-success milestone (NATS up,
+// agent registered) so a failed update can be recovered by booting from the
+// backup until then.
+func CleanupOldBinary() {
+	execPath, err := os.Executable()
+	if err != nil {
+		return
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return
+	}
+	backupPath := execPath + ".old"
+	if _, err := os.Stat(backupPath); err != nil {
+		return // nothing to clean up
+	}
+	if err := os.Remove(backupPath); err != nil {
+		slog.Warn("selfupdate: failed to remove .old backup", "path", backupPath, "error", err)
+		return
+	}
+	slog.Info("selfupdate: removed .old backup after successful startup", "path", backupPath)
 }
 
 // resolveLatest fetches the latest release tag and download URL from GitHub.

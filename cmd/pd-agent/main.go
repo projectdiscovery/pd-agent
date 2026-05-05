@@ -991,7 +991,16 @@ func (r *Runner) handleUpdate(ctx context.Context, method string, data []byte) (
 			return // agent keeps running, NATS still connected
 		}
 
-		// Phase 2: Download succeeded — now drain and replace.
+		// Phase 1b: Preflight — run the new binary with the exact restart args
+		// to confirm it accepts them before we commit to swapping. Catches the
+		// "new binary doesn't recognize one of our flags" bricking failure.
+		if err := selfupdate.Prevalidate(newBinary, r.options.AgentId); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate aborted at preflight: %v", err))
+			_ = os.Remove(newBinary)
+			return // agent keeps running on the old binary
+		}
+
+		// Phase 2: Download succeeded and preflight passed — drain and replace.
 		r.logHelper("INFO", "selfupdate: binary verified, draining in-flight work...")
 
 		if cancel := r.jsCancel.Load(); cancel != nil {
@@ -1609,6 +1618,18 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 	// JetStream workers are started via onNATSCredentialsReceived
 	r.logHelper("INFO", "using JetStream for work distribution")
+
+	// After 60s of healthy uptime, drop the .old self-update backup. If the
+	// agent dies before this fires (panic, NATS unreachable, etc.) the backup
+	// stays so an operator can revert manually.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(60 * time.Second):
+			selfupdate.CleanupOldBinary()
+		}
+	}()
 
 	defer func() {
 		wg.Wait()
@@ -2578,6 +2599,15 @@ func main() {
 
 	options := parseOptions()
 
+	// Self-update preflight: a parent process is probing this binary with the
+	// exact restart args before swapping. Exit 0 cleanly here so the parent
+	// knows the binary accepts these args. Stay above any code that touches
+	// shared state (DB, NATS) to avoid conflicting with the still-running agent.
+	if os.Getenv(selfupdate.PreflightEnvVar) == "1" {
+		fmt.Println("preflight ok")
+		os.Exit(0)
+	}
+
 	// Check prerequisites — auto-install missing tools (idempotent: fast on restart)
 	if _, failed := prereq.EnsureAll(); len(failed) > 0 {
 		slog.Error("Could not install required tools", "tools", strings.Join(failed, ", "))
@@ -2632,7 +2662,14 @@ func main() {
 // uploadDebugDB uploads the local SQLite DB to GCS using the pre-generated
 // presigned URL from the last /in response. Best-effort: logs errors but
 // never blocks shutdown. Must be called after all DB writers have stopped.
+//
+// Set PDCP_DISABLE_DIAGNOSTIC_UPLOAD=1 (or true) to opt out.
 func (r *Runner) uploadDebugDB() {
+	if v := os.Getenv("PDCP_DISABLE_DIAGNOSTIC_UPLOAD"); v == "1" || v == "true" {
+		slog.Info("agentdb: diagnostic upload disabled via PDCP_DISABLE_DIAGNOSTIC_UPLOAD")
+		return
+	}
+
 	r.natsCredsMu.RLock()
 	creds := r.natsCreds
 	r.natsCredsMu.RUnlock()
