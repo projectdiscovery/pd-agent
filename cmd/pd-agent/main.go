@@ -2021,7 +2021,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	if err := json.Unmarshal(inResp.Body, &agentInResp); err != nil {
 		r.logHelper("WARNING", fmt.Sprintf("failed to parse /in response body: %v", err))
 	} else if agentInResp.Nats == nil && r.natsCreds == nil {
-		r.logHelper("WARNING", "/in response did not include NATS credentials — JetStream workers will not start until credentials are received")
+		return fmt.Errorf("/in response did not include NATS credentials; agent cannot start without JetStream connectivity")
 	}
 	if agentInResp.Nats != nil {
 		r.natsCredsMu.Lock()
