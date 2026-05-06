@@ -288,7 +288,12 @@ type Runner struct {
 	jsPool   atomic.Pointer[natsrpc.WorkerPool]
 	jsCancel atomic.Pointer[context.CancelFunc]
 
-	// Adaptive chunk parallelism
+	// Chunk parallelism semaphores. scanSem is fixed at NumCPU because nuclei
+	// is heavy and warms up slowly — letting the adaptive scaler ramp it up
+	// before nuclei reaches steady-state CPU/mem causes oversubscription.
+	// chunkSem (enumeration) keeps the adaptive scaler since discovery work
+	// is short and resource-light.
+	scanSem     atomic.Pointer[resourceprofile.ResizableSemaphore]
 	chunkSem    atomic.Pointer[resourceprofile.ResizableSemaphore]
 	chunkScaler atomic.Pointer[resourceprofile.Scaler]
 
@@ -1234,11 +1239,15 @@ func (r *Runner) startJetStreamWorkers() error {
 		)
 	}
 
-	// Create resizable semaphore and adaptive scaler.
+	// Enumeration semaphore: resizable + adaptive scaler.
 	chunkSem := resourceprofile.NewResizableSemaphore(chunkParallelism, resourceprofile.MaxParallelism)
 	chunkScaler := resourceprofile.NewScaler(chunkSem)
 	r.chunkSem.Store(chunkSem)
 	r.chunkScaler.Store(chunkScaler)
+
+	// Scan semaphore: pinned at NumCPU. Initial == max so Resize is a no-op.
+	scanChunkParallelism := max(runtime.GOMAXPROCS(0), 1)
+	r.scanSem.Store(resourceprofile.NewResizableSemaphore(scanChunkParallelism, scanChunkParallelism))
 
 	consumerName := fmt.Sprintf("work-%s", r.options.AgentId)
 	pool, err := natsrpc.NewWorkerPool(nc, creds.Stream, consumerName, creds.GroupPrefix, r.options.ScanParallelism, r.processWorkMessage)
@@ -1258,8 +1267,8 @@ func (r *Runner) startJetStreamWorkers() error {
 	// local work consumer name are all known at this point.
 	r.groupMetrics.Store(natsrpc.NewGroupMetricsCollector(pool.JS(), creds.Stream, consumerName, 5*time.Second))
 
-	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (scan_parallelism=%d, chunk_parallelism=%d, source=%s, stream=%s, consumer=%s, filter=%s.work.>)",
-		r.options.ScanParallelism, chunkParallelism, source, creds.Stream, consumerName, creds.GroupPrefix))
+	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (scan_parallelism=%d, scan_chunk_parallelism=%d, enum_chunk_parallelism=%d, source=%s, stream=%s, consumer=%s, filter=%s.work.>)",
+		r.options.ScanParallelism, scanChunkParallelism, chunkParallelism, source, creds.Stream, consumerName, creds.GroupPrefix))
 
 	return nil
 }
@@ -1313,15 +1322,14 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		if pool == nil {
 			return fmt.Errorf("jetstream pool not initialized")
 		}
-		// Convert typed-nil *Scaler to interface-nil so the nil-guard inside
-		// ConsumeChunks works correctly. A typed-nil pointer wrapped in an
-		// interface is non-nil and would panic on method call.
-		var scaler natsrpc.ChunkScaler
-		if s := r.chunkScaler.Load(); s != nil {
-			scaler = s
+		scanSem := r.scanSem.Load()
+		if scanSem == nil {
+			return fmt.Errorf("scan semaphore not initialized")
 		}
-		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
-			r.chunkSem.Load(), scaler,
+		// Nuclei runs on a fixed semaphore at NumCPU and intentionally has no
+		// scaler — the warmup window confuses the pressure-based scaler.
+		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, scanSem.Size(),
+			scanSem, nil,
 			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
 				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.Targets, scanBatcher)
 				return nil
@@ -1450,6 +1458,7 @@ func (r *Runner) resetForRestart() {
 	r.cancelCtx = nil
 	r.jsPool.Store(nil)
 	r.jsCancel.Store(nil)
+	r.scanSem.Store(nil)
 	r.chunkSem.Store(nil)
 	r.chunkScaler.Store(nil)
 	r.groupMetrics.Store(nil)
@@ -1547,11 +1556,15 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	// WorkerPool once JetStream workers start (via onNATSCredentialsReceived).
 	resourceprofile.LogStartupResources()
 	profiler := resourceprofile.New(1*time.Minute, func() int32 {
-		// Report chunk-level concurrency (active scans), not work-message count.
-		if sem := r.chunkSem.Load(); sem != nil {
-			return int32(sem.InUse())
+		// Report chunk-level concurrency (active scans + enrichments), not work-message count.
+		var n int32
+		if sem := r.scanSem.Load(); sem != nil {
+			n += int32(sem.InUse())
 		}
-		return 0
+		if sem := r.chunkSem.Load(); sem != nil {
+			n += int32(sem.InUse())
+		}
+		return n
 	}, resourceprofile.WithMetricsHook(func(snap resourceprofile.MetricSnapshot) {
 		if r.agentDB == nil {
 			return
