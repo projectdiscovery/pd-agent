@@ -42,6 +42,7 @@ scan-*.log
 
 # Local-only tools / docs / deployment manifests
 /cmd/interactsh-debug/
-/docs/
+/docs/*
+!/docs/scaling.md
 /pd-agent-deployment.yaml
 /pd-agent-deployment-prod.yaml

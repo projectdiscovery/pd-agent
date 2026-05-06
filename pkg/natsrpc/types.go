@@ -160,9 +160,7 @@ type WorkMessage struct {
 	ChunkConsumer string   `json:"chunk_consumer"`        // shared consumer name (typically agent-network)
 	ChunkCount    int      `json:"chunk_count,omitempty"` // number of chunks in the stream
 	Config        string   `json:"config,omitempty"`      // base64 scan configuration
-	Templates     []string `json:"templates,omitempty"`   // nuclei template paths (scans)
 	Steps         []string `json:"steps,omitempty"`       // enumeration steps (enumerations)
-	Assets        []string `json:"assets,omitempty"`      // all targets (for pre-scan port filtering)
 }
 
 // ChunkMessage is a single unit of work decoded from the group stream.

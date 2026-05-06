@@ -292,6 +292,10 @@ type Runner struct {
 	chunkSem    atomic.Pointer[resourceprofile.ResizableSemaphore]
 	chunkScaler atomic.Pointer[resourceprofile.Scaler]
 
+	// Group-level chunk backlog metrics (for autoscaling). Set when JetStream
+	// workers come up; cleared on resetForRestart.
+	groupMetrics atomic.Pointer[natsrpc.GroupMetricsCollector]
+
 	// Short cache for ActiveTasks to absorb bursty health-check/debug calls.
 	activeTasksCache atomic.Pointer[activeTasksCacheEntry]
 
@@ -493,6 +497,7 @@ func (r *Runner) startNATSRPC() error {
 	directRouter.Handle("update", r.handleUpdate)
 	directRouter.Handle("logs", r.handleLogs)
 	directRouter.Handle("metrics", r.handleMetrics)
+	directRouter.Handle("group-metrics", r.handleGroupMetrics)
 
 	broadcastRouter.Handle("update", r.handleUpdate)
 
@@ -1177,6 +1182,22 @@ func (r *Runner) handleMetrics(ctx context.Context, method string, data []byte) 
 	}, nil
 }
 
+// handleGroupMetrics returns the group-level chunk backlog from JetStream
+// consumer state. All agents in the same group return identical numbers
+// because they share a stream — the operator (or a Prometheus HPA pipeline
+// scraping any one pod) can read this off any agent and decide whether to
+// scale the deployment up or down.
+//
+// Returns the GroupMetrics struct directly so the response Data field is
+// the metrics payload as JSON.
+func (r *Runner) handleGroupMetrics(ctx context.Context, method string, data []byte) (any, error) {
+	collector := r.groupMetrics.Load()
+	if collector == nil {
+		return nil, fmt.Errorf("group metrics not initialised (NATS not yet ready)")
+	}
+	return collector.Get(ctx), nil
+}
+
 // --- JetStream Work Distribution ---
 
 // startJetStreamWorkers initialises the JetStream worker pool that replaces
@@ -1233,6 +1254,10 @@ func (r *Runner) startJetStreamWorkers() error {
 	// Start adaptive scaler control loop in background.
 	go chunkScaler.Run(ctx)
 
+	// Initialise group metrics collector. JetStream handle, stream, and the
+	// local work consumer name are all known at this point.
+	r.groupMetrics.Store(natsrpc.NewGroupMetricsCollector(pool.JS(), creds.Stream, consumerName, 5*time.Second))
+
 	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (scan_parallelism=%d, chunk_parallelism=%d, source=%s, stream=%s, consumer=%s, filter=%s.work.>)",
 		r.options.ScanParallelism, chunkParallelism, source, creds.Stream, consumerName, creds.GroupPrefix))
 
@@ -1268,57 +1293,6 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 	}
 
 	err := func() error {
-		// Resolve templates — use provided or fall back to defaults
-		templatesToUse := work.Templates
-		if len(templatesToUse) == 0 {
-			defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-			if defaultTemplateDir != "" {
-				allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-				if err == nil && len(allTemplates) > 0 {
-					templatesToUse = allTemplates
-					slog.Info("JetStream scan: using default nuclei templates", "scan_id", work.ScanID, "count", len(allTemplates))
-				}
-			}
-		}
-
-		// Pre-scan port filtering: identify targets with open ports before scanning
-		targetsWithOpenPorts := make(map[string]struct{})
-		if len(work.Assets) > 0 && len(templatesToUse) > 0 {
-			tmpInputFile, err := fileutil.GetTempFileName()
-			if err != nil {
-				return fmt.Errorf("create temp targets file: %w", err)
-			}
-			defer os.RemoveAll(tmpInputFile)
-
-			if err := os.WriteFile(tmpInputFile, []byte(strings.Join(work.Assets, "\n")), os.ModePerm); err != nil {
-				return fmt.Errorf("write temp targets file: %w", err)
-			}
-
-			tmpTemplatesFile, err := fileutil.GetTempFileName()
-			if err != nil {
-				return fmt.Errorf("create temp templates file: %w", err)
-			}
-			defer os.RemoveAll(tmpTemplatesFile)
-
-			if err := os.WriteFile(tmpTemplatesFile, []byte(strings.Join(templatesToUse, "\n")), os.ModePerm); err != nil {
-				return fmt.Errorf("write temp templates file: %w", err)
-			}
-
-			filteredTargets, _, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, work.ScanID, "pre-scan")
-			if err != nil {
-				slog.Warn("JetStream scan: port filter failed, proceeding with all targets", "scan_id", work.ScanID, "error", err)
-				for _, t := range work.Assets {
-					targetsWithOpenPorts[t] = struct{}{}
-				}
-			} else {
-				for _, t := range filteredTargets {
-					targetsWithOpenPorts[t] = struct{}{}
-				}
-			}
-		}
-
-		slog.Info("JetStream scan: port scan completed", "scan_id", work.ScanID, "targets_with_open_ports", len(targetsWithOpenPorts))
-
 		// Set up scan log batcher
 		var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
 		if scanlog.IsLogUploadEnabled() {
@@ -1349,30 +1323,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
 			r.chunkSem.Load(), scaler,
 			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
-				// Filter chunk targets by open ports
-				var filteredTargets []string
-				for _, t := range chunk.Targets {
-					if _, ok := targetsWithOpenPorts[t]; ok {
-						filteredTargets = append(filteredTargets, t)
-					}
-				}
-				if len(filteredTargets) == 0 && len(targetsWithOpenPorts) > 0 {
-					slog.Info("JetStream scan: chunk skipped (no targets with open ports)", "scan_id", work.ScanID, "chunk_id", chunk.ChunkID)
-					return nil
-				}
-
-				// Use chunk targets if no port filtering was done
-				targets := filteredTargets
-				if len(targetsWithOpenPorts) == 0 {
-					targets = chunk.Targets
-				}
-
-				templates := chunk.PublicTemplates
-				if len(templates) == 0 {
-					templates = templatesToUse
-				}
-
-				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, templates, targets, scanBatcher)
+				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.Targets, scanBatcher)
 				return nil
 			},
 		)
@@ -1501,6 +1452,7 @@ func (r *Runner) resetForRestart() {
 	r.jsCancel.Store(nil)
 	r.chunkSem.Store(nil)
 	r.chunkScaler.Store(nil)
+	r.groupMetrics.Store(nil)
 
 	isRegistered = false
 }
@@ -1513,6 +1465,14 @@ func (r *Runner) agentMode(ctx context.Context) error {
 
 	var agentLogWriter *agentdb.LogWriter
 
+	// Optional Prometheus HTTP server for HPA scraping (off unless
+	// PDCP_METRICS_ADDR is set). Started early so /healthz is reachable
+	// before the JS workers come up.
+	promServer, err := r.startPrometheusServer(ctx)
+	if err != nil {
+		slog.Warn("prometheus: failed to start", "error", err)
+	}
+
 	defer func() {
 		cancel()
 		// Stop JetStream workers first (finish in-progress scans)
@@ -1521,6 +1481,11 @@ func (r *Runner) agentMode(ctx context.Context) error {
 		}
 		if pool := r.jsPool.Load(); pool != nil {
 			pool.Stop()
+		}
+		if promServer != nil {
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = promServer.Shutdown(shutCtx)
+			shutCancel()
 		}
 		// Drain NATS connection on shutdown
 		r.stopNATSRPC()
