@@ -540,7 +540,7 @@ func (r *Runner) startNATSRPC() error {
 		for _, sub := range oldSubs {
 			_ = sub.Unsubscribe()
 		}
-		old.Drain()
+		_ = old.Drain()
 	}
 
 	r.logHelper("INFO", "NATS RPC connected")
@@ -923,7 +923,7 @@ func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (an
 		// Small delay to allow the NATS response to be sent before shutdown
 		time.Sleep(500 * time.Millisecond)
 		p, _ := os.FindProcess(os.Getpid())
-		p.Signal(os.Interrupt)
+		_ = p.Signal(os.Interrupt)
 	}()
 	return map[string]any{
 		"agent_id": r.options.AgentId,

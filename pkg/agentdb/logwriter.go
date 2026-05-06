@@ -126,7 +126,7 @@ func (w *LogWriter) flush(entries []LogEntry) {
 
 	stmt, err := tx.Prepare("INSERT INTO logs (timestamp, line) VALUES (?, ?)")
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		slog.Debug("agentdb: logwriter prepare", "error", err)
 		return
 	}

@@ -3,8 +3,8 @@ package natsrpc
 import (
 	"context"
 	stdjson "encoding/json"
-	json "github.com/json-iterator/go"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"testing"
 	"time"
 
@@ -153,7 +153,7 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 	nc.Flush()
 
 	// Send a request
@@ -199,7 +199,7 @@ func TestSubscribeRequests_UnknownMethod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 	nc.Flush()
 
 	msg, err := nc.Request(prefix+".unknown-tool", nil, 2*time.Second)
@@ -238,7 +238,7 @@ func TestSubscribeRequests_HandlerError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
-	defer sub.Unsubscribe()
+	defer func() { _ = sub.Unsubscribe() }()
 	nc.Flush()
 
 	msg, err := nc.Request(prefix+".fail", nil, 2*time.Second)
@@ -295,7 +295,7 @@ func TestSubscribeBroadcast_AllReceive(t *testing.T) {
 
 	defer func() {
 		for i := 0; i < numAgents; i++ {
-			subs[i].Unsubscribe()
+			_ = subs[i].Unsubscribe()
 			conns[i].Close()
 		}
 	}()
@@ -361,7 +361,7 @@ func TestSubscribeRequests_QueueGroupLoadBalancing(t *testing.T) {
 
 	defer func() {
 		for i := 0; i < numAgents; i++ {
-			subs[i].Unsubscribe()
+			_ = subs[i].Unsubscribe()
 			conns[i].Close()
 		}
 	}()
