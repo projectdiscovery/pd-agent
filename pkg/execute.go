@@ -356,7 +356,6 @@ func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
 	}
 }
 
-
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
 	slog.Debug("uploading to cloud", "file", outputFile)
 	f, err := os.Open(outputFile)
@@ -613,6 +612,15 @@ func getEnvs() []string {
 		"HOME=" + os.Getenv("HOME"),
 		"PDCP_TEAM_ID=" + os.Getenv("PDCP_TEAM_ID"),
 		"PATH=" + os.Getenv("PATH"),
+	}
+	if runtime.GOOS == "windows" {
+		// Without these, Go's os.TempDir() falls through to C:\Windows (read-only)
+		// and tools like naabu fail to create their working directories.
+		for _, k := range []string{"TEMP", "TMP", "USERPROFILE", "SystemRoot", "SystemDrive", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "windir"} {
+			if v := os.Getenv(k); v != "" {
+				envs = append(envs, k+"="+v)
+			}
+		}
 	}
 	return envs
 }
