@@ -185,6 +185,10 @@ func EnsureAll() (results []Result, failed []string) {
 		failed = append(failed, "browser (Chrome)")
 	}
 
+	// Windows-only: warn loudly if Defender exclusions are missing.
+	// No-op on Linux/macOS.
+	CheckDefenderExclusions()
+
 	return results, failed
 }
 
