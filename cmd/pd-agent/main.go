@@ -383,9 +383,22 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	// Open local observability database.
-	// PDCP_AGENTDB_DIR overrides the default location (next to binary).
-	// Non-fatal: if it fails, the agent runs without local persistence.
+	// Default location: ~/.pd-agent (cross-platform via os.UserHomeDir).
+	// PDCP_AGENTDB_DIR overrides the default for users who want it elsewhere.
+	// Last-resort fallback: next to the binary, preserving prior behaviour
+	// when HOME isn't set (e.g. some service contexts).
+	// Non-fatal: if everything fails, the agent runs without local persistence.
 	dbDir := os.Getenv("PDCP_AGENTDB_DIR")
+	if dbDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			candidate := filepath.Join(home, ".pd-agent")
+			if err := os.MkdirAll(candidate, 0o755); err == nil {
+				dbDir = candidate
+			} else {
+				slog.Warn("agentdb: cannot create ~/.pd-agent, falling back to binary dir", "error", err)
+			}
+		}
+	}
 	if dbDir == "" {
 		if execPath, err := os.Executable(); err == nil {
 			dbDir = filepath.Dir(execPath)
@@ -393,6 +406,7 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 	if dbDir != "" {
 		dbPath := filepath.Join(dbDir, fmt.Sprintf("pd-agent-%s.db", r.options.AgentId))
+		slog.Info("agentdb: opening local DB", "path", dbPath)
 		if db, err := agentdb.Open(dbPath); err != nil {
 			slog.Warn("agentdb: failed to open, local observability disabled", "path", dbPath, "error", err)
 		} else {
