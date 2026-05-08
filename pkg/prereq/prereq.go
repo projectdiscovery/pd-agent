@@ -11,6 +11,7 @@ package prereq
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/tidwall/gjson"
 )
 
@@ -82,14 +84,7 @@ var tools = []Tool{
 		GitHubRepo: "projectdiscovery/naabu",
 		VersionArg: "-version",
 	},
-	{
-		Name:       "httpx",
-		Priority:   Critical,
-		GoInstall:  "github.com/projectdiscovery/httpx/cmd/httpx@latest",
-		GitHubRepo: "projectdiscovery/httpx",
-		VersionArg: "-version",
-	},
-	// dnsx and tlsx are embedded via pkg/runtools — no install needed.
+	// httpx, dnsx, and tlsx are embedded via pkg/runtools — no install needed.
 	{
 		Name:     "nmap",
 		Priority: Important,
@@ -179,40 +174,43 @@ func EnsureAll() (results []Result, failed []string) {
 	return results, failed
 }
 
-// warmupBrowser runs httpx -screenshot against a known host to trigger
-// Chrome download and validate that all shared libraries are present.
-// warmupBrowser runs httpx -screenshot against a known host to download
-// Chrome (if needed) and validate that all shared libraries are present.
-// Always runs the actual screenshot to catch missing deps — not just a file check.
+// warmupBrowser runs an embedded httpx screenshot probe against a known host
+// to trigger Chrome download (via go-rod) and validate that the browser starts
+// — surfaces missing shared libraries as a clear startup error instead of a
+// confusing mid-scan failure.
 func warmupBrowser() error {
-	httpxPath, err := exec.LookPath("httpx")
+	slog.Info("prereq: validating browser (embedded httpx screenshot probe)...")
+	tmp, err := os.CreateTemp("", "httpx-warmup-*.jsonl")
 	if err != nil {
-		return nil // httpx not installed, skip
+		return fmt.Errorf("warmup tmp file: %w", err)
 	}
+	tmpPath := tmp.Name()
+	tmp.Close()
+	defer os.Remove(tmpPath)
 
-	slog.Info("prereq: validating browser (running httpx -screenshot test)...")
-	cmd := exec.Command(httpxPath, "-silent", "-screenshot")
-	cmd.Stdin = strings.NewReader("www.example.com")
-	output, err := cmd.CombinedOutput()
-	outStr := string(output)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	// Check output for browser failures regardless of exit code.
-	// httpx writes [FTL] to stderr and exits 1, but CombinedOutput captures both.
-	if strings.Contains(outStr, "cannot open shared object") ||
-		strings.Contains(outStr, "Failed to launch the browser") ||
-		strings.Contains(outStr, "error while loading shared libraries") {
+	_, _, runErr := runtools.RunHttpx(ctx, []string{"www.example.com"}, runtools.HttpxOptions{
+		OutputFile: tmpPath,
+		Screenshot: true,
+		Timeout:    10 * time.Second,
+	})
+	if runErr == nil {
+		slog.Info("prereq: browser validation complete")
+		return nil
+	}
+	msg := runErr.Error()
+	if strings.Contains(msg, "cannot open shared object") ||
+		strings.Contains(msg, "Failed to launch the browser") ||
+		strings.Contains(msg, "error while loading shared libraries") {
 		slog.Error("prereq: browser validation failed — missing Chrome dependencies",
-			"output", outStr,
+			"error", msg,
 			"hint", "install Chrome deps: sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnspr4 libnss3 libxcomposite1 libxfixes3 libxshmfence1 libxkbcommon0")
 		return fmt.Errorf("missing Chrome shared libraries")
 	}
-
-	if err != nil {
-		// Non-browser error (e.g., network timeout, DNS failure) — Chrome itself works
-		slog.Info("prereq: browser validation complete (Chrome works, httpx had non-fatal error)")
-		return nil
-	}
-	slog.Info("prereq: browser validation complete")
+	// Non-browser error (network timeout, DNS, etc.) — Chrome itself works.
+	slog.Info("prereq: browser validation complete (Chrome works, probe had non-fatal error)", "error", msg)
 	return nil
 }
 

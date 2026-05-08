@@ -185,17 +185,13 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		// --- Step 3: httpx probe (on open ports only, no screenshot) ---
 		var webServices []string
 		if sliceutil.Contains(steps, "http_probe") {
-			of, err := runEnumTool(ctx, task, "httpx", hostsWithOpenPorts, []string{"-irr"}, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "httpx", func(ctx context.Context, outputFile string) error {
+				_, urls, err := runtools.RunHttpx(ctx, hostsWithOpenPorts, runtools.HttpxOptions{OutputFile: outputFile})
+				webServices = urls
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
-			}
-			if of != "" {
-				c, err := fileutil.ReadFile(of)
-				if err == nil {
-					for line := range c {
-						webServices = append(webServices, line)
-					}
-				}
 			}
 			slog.Info("httpx probe complete",
 				"input_hosts", len(hostsWithOpenPorts),
@@ -207,7 +203,13 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		if wantScreenshot && len(webServices) > 0 {
 			slog.Info("running httpx screenshot on confirmed web services",
 				"web_services", len(webServices), "enumeration_id", enumID)
-			_, err := runEnumTool(ctx, task, "httpx", webServices, []string{"-screenshot", "-irr"}, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "httpx-screenshot", func(ctx context.Context, outputFile string) error {
+				_, _, err := runtools.RunHttpx(ctx, webServices, runtools.HttpxOptions{
+					OutputFile: outputFile,
+					Screenshot: true,
+				})
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
