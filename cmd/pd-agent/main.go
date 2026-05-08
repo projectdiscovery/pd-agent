@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -42,6 +41,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
 	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
+	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
@@ -59,7 +59,8 @@ import (
 
 // ensureNucleiTemplates downloads nuclei templates if missing, or updates them
 // if the directory already exists. Stale templates cause "file not found" errors
-// when the cloud sends template paths that don't exist locally.
+// when the cloud sends template paths that don't exist locally. Uses the
+// embedded nuclei TemplateManager SDK — no shell-out.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
@@ -73,14 +74,11 @@ func ensureNucleiTemplates() {
 		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	}
 
-	cmd := exec.Command("nuclei", "-update-templates")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := runtools.UpdateNucleiTemplates(); err != nil {
 		slog.Error("Failed to update nuclei templates", "error", err)
-	} else {
-		slog.Info("Nuclei templates are up to date", "path", templateDir)
+		return
 	}
+	slog.Info("Nuclei templates are up to date", "path", templateDir)
 }
 
 // Version is set at build time via -ldflags "-X main.Version=v1.0.0"
