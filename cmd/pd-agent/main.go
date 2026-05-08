@@ -57,28 +57,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// getAllNucleiTemplates recursively finds all .yaml and .yml files in the nuclei template directory
-func getAllNucleiTemplates(templateDir string) ([]string, error) {
-	var templates []string
-	err := filepath.Walk(templateDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			ext := filepath.Ext(path)
-			if ext == ".yaml" || ext == ".yml" {
-				// Get relative path from template directory
-				relPath, err := filepath.Rel(templateDir, path)
-				if err == nil {
-					templates = append(templates, relPath)
-				}
-			}
-		}
-		return nil
-	})
-	return templates, err
-}
-
 // ensureNucleiTemplates downloads nuclei templates if missing, or updates them
 // if the directory already exists. Stale templates cause "file not found" errors
 // when the cloud sends template paths that don't exist locally.
@@ -1345,7 +1323,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, scanSem.Size(),
 			scanSem, nil,
 			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
-				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.Targets, scanBatcher)
+				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets, scanBatcher)
 				return nil
 			},
 		)
@@ -1633,9 +1611,12 @@ func (r *Runner) agentMode(ctx context.Context) error {
 }
 
 // executeNucleiScan is the shared implementation for executing nuclei scans
-// using the same logic as pd-agent
-// If scanBatcher is nil, a new batcher will be created for this scan
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+// using the same logic as pd-agent.
+// privateTemplates maps name -> base64-encoded YAML; entries are decoded and
+// written to a per-chunk temp dir, with their paths appended to the templates
+// list passed to nuclei. The temp dir is cleaned up before the function returns.
+// If scanBatcher is nil, a new batcher will be created for this scan.
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates []string, privateTemplates map[string]string, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
 	// Resource profiling: snapshot before scan
 	var activeWorkers int32
 	if pool := r.jsPool.Load(); pool != nil {
@@ -1664,21 +1645,35 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 		}()
 	}
 
-	// If templates are empty, use all default nuclei templates
-	templatesToUse := templates
-	if len(templates) == 0 {
-		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-		if defaultTemplateDir != "" {
-			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-			if err == nil && len(allTemplates) > 0 {
-				templatesToUse = allTemplates
-				slog.Info("No templates specified, using all default nuclei templates",
-					"scan_id", scanID,
-					"chunk_id", metaID,
-					"template_count", len(allTemplates))
-			}
+	// Build the template list from whatever the chunk supplied. We never fall
+	// back to "scan with all default templates" - a chunk that arrives with
+	// no templates of either kind is a server-side bug, not a default-scan
+	// signal, so we error out instead of silently scanning thousands of
+	// templates the platform never asked for.
+	templatesToUse := append([]string(nil), templates...)
+
+	// Materialize private templates to a per-chunk temp dir so the nuclei
+	// binary can load them by path. Cleaned up when the scan returns.
+	if len(privateTemplates) > 0 {
+		paths, cleanup, err := materializePrivateTemplates(scanID, metaID, privateTemplates)
+		if err != nil {
+			slog.Error("Failed to materialize private templates, continuing without them",
+				"scan_id", scanID, "chunk_id", metaID, "error", err)
+		} else {
+			defer cleanup()
+			templatesToUse = append(templatesToUse, paths...)
+			slog.Info("Materialized private templates",
+				"scan_id", scanID, "chunk_id", metaID, "count", len(paths))
 		}
 	}
+
+	if len(templatesToUse) == 0 {
+		slog.Error("Refusing to run nuclei: chunk has no public or private templates",
+			"scan_id", scanID, "chunk_id", metaID,
+			"public_count", len(templates), "private_count", len(privateTemplates))
+		return
+	}
+
 	// Set output directory if agent output is specified
 	var outputDir string
 	if r.options.AgentOutput != "" {

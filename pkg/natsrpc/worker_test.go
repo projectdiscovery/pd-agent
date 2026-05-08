@@ -519,3 +519,84 @@ func TestConsumeChunks_ParallelProcessing(t *testing.T) {
 		t.Errorf("expected %d duration reports, got %d", chunkCount, durCount)
 	}
 }
+
+// decodeScanChunk should preserve both name and contents of every
+// PrivateTemplates entry. Earlier versions extracted only the keys, dropping
+// the YAML body and breaking private-template scans.
+func TestDecodeScanChunk_PrivateTemplatesRoundTrip(t *testing.T) {
+	priv := map[string]string{
+		"my-check.yaml":   "BASE64_ENCODED_YAML_A",
+		"second.yaml":     "BASE64_ENCODED_YAML_B",
+		"deep/nested.yml": "BASE64_ENCODED_YAML_C",
+	}
+
+	req := &agentproto.ScanRequest{
+		ChunkID:          "c-priv",
+		Targets:          map[string]int64{"example.com": 0},
+		PublicTemplates:  map[string]int64{"http/cves/2024/CVE-2024-1.yaml": 1},
+		PrivateTemplates: priv,
+	}
+	raw, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd: %v", err)
+	}
+	compressed := enc.EncodeAll(raw, nil)
+	enc.Close()
+
+	chunk, err := decodeScanChunk(compressed)
+	if err != nil {
+		t.Fatalf("decodeScanChunk: %v", err)
+	}
+
+	if got, want := len(chunk.PrivateTemplates), len(priv); got != want {
+		t.Fatalf("private template count: got %d, want %d", got, want)
+	}
+	for name, contents := range priv {
+		got, ok := chunk.PrivateTemplates[name]
+		if !ok {
+			t.Errorf("missing private template %q", name)
+			continue
+		}
+		if got != contents {
+			t.Errorf("private template %q contents: got %q, want %q", name, got, contents)
+		}
+	}
+
+	// Decoded map must be independent — mutating the proto request after
+	// decoding must not affect the chunk message.
+	delete(req.PrivateTemplates, "my-check.yaml")
+	if _, ok := chunk.PrivateTemplates["my-check.yaml"]; !ok {
+		t.Error("decoded map shares storage with proto request — should be a copy")
+	}
+}
+
+// decodeScanChunk should leave PrivateTemplates as a nil map when the proto
+// has no entries, so callers can do a zero-allocation len() check.
+func TestDecodeScanChunk_PrivateTemplatesAbsent(t *testing.T) {
+	req := &agentproto.ScanRequest{
+		ChunkID: "c-empty",
+		Targets: map[string]int64{"example.com": 0},
+	}
+	raw, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	enc, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatalf("zstd: %v", err)
+	}
+	compressed := enc.EncodeAll(raw, nil)
+	enc.Close()
+
+	chunk, err := decodeScanChunk(compressed)
+	if err != nil {
+		t.Fatalf("decodeScanChunk: %v", err)
+	}
+	if chunk.PrivateTemplates != nil {
+		t.Errorf("expected nil map for absent PrivateTemplates, got %v", chunk.PrivateTemplates)
+	}
+}

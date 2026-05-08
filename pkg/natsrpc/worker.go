@@ -6,6 +6,7 @@ import (
 	"fmt"
 	json "github.com/json-iterator/go"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
@@ -452,9 +453,12 @@ func decodeScanChunk(data []byte) (*ChunkMessage, error) {
 		publicTemplates = append(publicTemplates, t)
 	}
 
-	privateTemplates := make([]string, 0, len(req.PrivateTemplates))
-	for t := range req.PrivateTemplates {
-		privateTemplates = append(privateTemplates, t)
+	// Private templates arrive as map[name]base64-encoded-YAML. Pass through
+	// without flattening so executeNucleiScan can materialize each file with
+	// its real name before invoking the nuclei binary.
+	var privateTemplates map[string]string
+	if len(req.PrivateTemplates) > 0 {
+		privateTemplates = maps.Clone(req.PrivateTemplates)
 	}
 
 	return &ChunkMessage{

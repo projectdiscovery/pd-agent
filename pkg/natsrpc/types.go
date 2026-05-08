@@ -167,11 +167,14 @@ type WorkMessage struct {
 // For scan chunks: ZSTD-compressed protobuf (ScanRequest).
 // For enumeration chunks: plain protobuf (AssetEnrichmentRequest).
 type ChunkMessage struct {
-	ChunkID          string   `json:"chunk_id"`
-	Targets          []string `json:"targets"`
-	PublicTemplates  []string `json:"public_templates,omitempty"`
-	PrivateTemplates []string `json:"private_templates,omitempty"`
-	ScanConfig       string   `json:"scan_configuration,omitempty"`
+	ChunkID         string   `json:"chunk_id"`
+	Targets         []string `json:"targets"`
+	PublicTemplates []string `json:"public_templates,omitempty"`
+	// PrivateTemplates maps a template file name to its base64-encoded YAML
+	// contents. Materialized to disk in executeNucleiScan before the nuclei
+	// binary is invoked.
+	PrivateTemplates map[string]string `json:"private_templates,omitempty"`
+	ScanConfig       string            `json:"scan_configuration,omitempty"`
 
 	// Enrichment-specific fields (populated for enumeration chunks)
 	EnrichmentID   string `json:"enrichment_id,omitempty"`
