@@ -339,7 +339,17 @@ func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
 // Returns host:port pairs for hosts with at least one open port.
 func quickPortFilter(ctx context.Context, hosts []string, enumID string) ([]string, error) {
 	httpPorts := []string{"80", "443", "8443"}
-	return runNaabuScan(ctx, hosts, httpPorts, enumID, "quick-filter")
+	hostPorts, err := runNaabuScan(ctx, hosts, httpPorts, enumID, "quick-filter")
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(hostPorts))
+	for h, ports := range hostPorts {
+		for _, p := range ports {
+			out = append(out, net.JoinHostPort(h, p))
+		}
+	}
+	return out, nil
 }
 
 func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
