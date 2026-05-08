@@ -11,6 +11,7 @@ package prereq
 
 import (
 	"archive/zip"
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -171,6 +172,12 @@ func EnsureAll() (results []Result, failed []string) {
 // to trigger Chrome download (via go-rod) and validate that the browser starts
 // — surfaces missing shared libraries as a clear startup error instead of a
 // confusing mid-scan failure.
+//
+// First-time runs are slow because Chrome itself has to download (~150 MB) on
+// first launch, so timeouts here are generous. We validate success by
+// confirming an actual screenshot file landed on disk; the JSON Result alone
+// is unreliable since httpx still emits a record (with screenshot_path set)
+// even when the screenshot itself timed out.
 func warmupBrowser() error {
 	slog.Info("prereq: validating browser (embedded httpx screenshot probe)...")
 	tmp, err := os.CreateTemp("", "httpx-warmup-*.jsonl")
@@ -181,30 +188,62 @@ func warmupBrowser() error {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	_, _, runErr := runtools.RunHttpx(ctx, []string{"www.example.com"}, runtools.HttpxOptions{
-		OutputFile: tmpPath,
-		Screenshot: true,
-		Timeout:    10 * time.Second,
+		OutputFile:        tmpPath,
+		Screenshot:        true,
+		Timeout:           20 * time.Second,
+		ScreenshotTimeout: 90 * time.Second,
 	})
-	if runErr == nil {
-		slog.Info("prereq: browser validation complete")
-		return nil
+	if runErr != nil {
+		msg := runErr.Error()
+		if strings.Contains(msg, "cannot open shared object") ||
+			strings.Contains(msg, "Failed to launch the browser") ||
+			strings.Contains(msg, "error while loading shared libraries") {
+			slog.Error("prereq: browser validation failed — missing Chrome dependencies",
+				"error", msg,
+				"hint", "install Chrome deps: sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnspr4 libnss3 libxcomposite1 libxfixes3 libxshmfence1 libxkbcommon0")
+			return fmt.Errorf("missing Chrome shared libraries")
+		}
+		slog.Warn("prereq: browser validation httpx probe had non-fatal error", "error", msg)
 	}
-	msg := runErr.Error()
-	if strings.Contains(msg, "cannot open shared object") ||
-		strings.Contains(msg, "Failed to launch the browser") ||
-		strings.Contains(msg, "error while loading shared libraries") {
-		slog.Error("prereq: browser validation failed — missing Chrome dependencies",
-			"error", msg,
-			"hint", "install Chrome deps: sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnspr4 libnss3 libxcomposite1 libxfixes3 libxshmfence1 libxkbcommon0")
-		return fmt.Errorf("missing Chrome shared libraries")
+
+	// Confirm a screenshot file actually got written. httpx emits a JSON
+	// record with screenshot_path even when the screenshot itself timed out,
+	// so we have to read the path back and stat the file rather than trust
+	// the JSON Result.
+	if shotPath := readFirstScreenshotPath(tmpPath); shotPath != "" {
+		if info, err := os.Stat(shotPath); err == nil && info.Size() > 0 {
+			slog.Info("prereq: browser validation complete", "screenshot", shotPath)
+			return nil
+		}
 	}
-	// Non-browser error (network timeout, DNS, etc.) — Chrome itself works.
-	slog.Info("prereq: browser validation complete (Chrome works, probe had non-fatal error)", "error", msg)
-	return nil
+
+	slog.Error("prereq: browser validation failed — screenshot was not written",
+		"hint", "Chrome may need more time on first launch (it downloads ~150MB); rerun, or pre-install Chrome via go-rod's manager")
+	return fmt.Errorf("screenshot not produced")
+}
+
+// readFirstScreenshotPath parses the warmup output file and returns the
+// screenshot_path of the first JSON Result line. Empty string if not found
+// or unreadable; warmupBrowser treats that as a validation failure.
+func readFirstScreenshotPath(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if shot := gjson.GetBytes(line, "screenshot_path").String(); shot != "" {
+			return shot
+		}
+	}
+	return ""
 }
 
 // check looks up a tool in PATH and optionally reads its version.

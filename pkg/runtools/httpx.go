@@ -22,6 +22,10 @@ type HttpxOptions struct {
 	Timeout time.Duration
 	// Screenshot enables headless Chrome screenshot capture per result.
 	Screenshot bool
+	// ScreenshotTimeout bounds each headless screenshot. Defaults to 10s
+	// (matches CLI default), but first-time runs need longer because Chrome
+	// itself has to download.
+	ScreenshotTimeout time.Duration
 }
 
 // RunHttpx probes every target and writes one JSON Result per line to
@@ -38,6 +42,9 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
 	}
+	if opts.ScreenshotTimeout <= 0 {
+		opts.ScreenshotTimeout = 10 * time.Second
+	}
 
 	var (
 		mu   sync.Mutex
@@ -52,6 +59,7 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 		Threads:            opts.Concurrency,
 		Timeout:            int(opts.Timeout.Seconds()),
 		Screenshot:         opts.Screenshot,
+		ScreenshotTimeout:  opts.ScreenshotTimeout,
 		StatusCode:         true,
 		FollowRedirects:    true,
 		MaxRedirects:       10,
