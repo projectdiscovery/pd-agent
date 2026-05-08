@@ -3,39 +3,52 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
+	"errors"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/projectdiscovery/gcache"
+	"go.uber.org/automaxprocs/maxprocs"
+
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
+	"github.com/nats-io/nkeys"
 	"github.com/projectdiscovery/goflags"
 	"github.com/projectdiscovery/gologger"
 	"github.com/projectdiscovery/gologger/levels"
+	httpxrunner "github.com/projectdiscovery/httpx/runner"
+	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
+	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 	"github.com/projectdiscovery/pd-agent/pkg"
+	"github.com/projectdiscovery/pd-agent/pkg/agentdb"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
+	"github.com/projectdiscovery/pd-agent/pkg/prereq"
+	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
+	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
-	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
-	syncutil "github.com/projectdiscovery/utils/sync"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,201 +57,59 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// getAllNucleiTemplates recursively finds all .yaml and .yml files in the nuclei template directory
-func getAllNucleiTemplates(templateDir string) ([]string, error) {
-	var templates []string
-	err := filepath.Walk(templateDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if !info.IsDir() {
-			ext := filepath.Ext(path)
-			if ext == ".yaml" || ext == ".yml" {
-				// Get relative path from template directory
-				relPath, err := filepath.Rel(templateDir, path)
-				if err == nil {
-					templates = append(templates, relPath)
-				}
-			}
-		}
-		return nil
-	})
-	return templates, err
+// ensureNucleiTemplates downloads nuclei templates if missing, or updates them
+// if the directory already exists. Stale templates cause "file not found" errors
+// when the cloud sends template paths that don't exist locally.
+func ensureNucleiTemplates() {
+	templateDir := pkg.GetNucleiDefaultTemplateDir()
+	if templateDir == "" {
+		slog.Warn("Could not determine nuclei template directory, skipping template download")
+		return
+	}
+
+	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
+		slog.Info("Nuclei templates directory exists, checking for updates...", "path", templateDir)
+	} else {
+		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
+	}
+
+	cmd := exec.Command("nuclei", "-update-templates")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		slog.Error("Failed to update nuclei templates", "error", err)
+	} else {
+		slog.Info("Nuclei templates are up to date", "path", templateDir)
+	}
 }
 
+// Version is set at build time via -ldflags "-X main.Version=v1.0.0"
+var Version = "dev"
+
 var (
-	PDCPApiKey                = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv                 = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	AgentTagsEnv              = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
-	PdcpApiServer             = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
-	ChunkParallelismEnv       = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "1")
-	ScanParallelismEnv        = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
-	EnumerationParallelismEnv = envutil.GetEnvOrDefault("PDCP_ENUMERATION_PARALLELISM", "1")
+	PDCPApiKey          = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
+	TeamIDEnv           = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
+	AgentTagsEnv        = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
+	PdcpApiServer       = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
+	ChunkParallelismEnv = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "")
+	ScanParallelismEnv  = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
+	AgentNetworkEnv     = envutil.GetEnvOrDefault("AGENT_NETWORK", "default")
 )
 
 // Options contains the configuration options for the agent
 type Options struct {
-	TeamID                 string
-	AgentId                string
-	AgentTags              goflags.StringSlice
-	AgentNetworks          goflags.StringSlice
-	AgentOutput            string
-	AgentName              string
-	Verbose                bool
-	PassiveDiscovery       bool // Enable passive discovery
-	ChunkParallelism       int  // Number of chunks to process in parallel
-	ScanParallelism        int  // Number of scans to process in parallel
-	EnumerationParallelism int  // Number of enumerations to process in parallel
-	KeepOutputFiles        bool // If true, don't delete output files after processing
+	TeamID           string
+	AgentId          string
+	AgentTags        goflags.StringSlice
+	AgentNetwork     string
+	AgentOutput      string
+	AgentName        string
+	Verbose          bool
+	PassiveDiscovery bool // Enable passive discovery
+	ChunkParallelism int  // Number of chunks to process in parallel
+	ScanParallelism  int  // Number of scans to process in parallel
+	KeepOutputFiles  bool // If true, don't delete output files after processing
 }
-
-// ScanCache represents cached scan execution information
-type ScanCache struct {
-	LastExecuted time.Time `json:"last_executed"`
-	ConfigHash   string    `json:"config_hash"`
-}
-
-// LocalCache manages local execution cache
-type LocalCache struct {
-	Scans        map[string]ScanCache `json:"scans"`
-	Enumerations map[string]ScanCache `json:"enumerations"`
-	mutex        sync.RWMutex
-}
-
-// NewLocalCache creates a new local cache instance
-func NewLocalCache() *LocalCache {
-	return &LocalCache{
-		Scans:        make(map[string]ScanCache),
-		Enumerations: make(map[string]ScanCache),
-	}
-}
-
-// Save saves the cache to disk
-func (c *LocalCache) Save() error {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	data, err := json.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("error marshaling cache: %v", err)
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("error getting home directory: %v", err)
-	}
-
-	cacheDir := filepath.Join(homeDir, ".pd-agent")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
-		return fmt.Errorf("error creating cache directory: %v", err)
-	}
-
-	cacheFile := filepath.Join(cacheDir, "execution-cache.json")
-	return os.WriteFile(cacheFile, data, 0644)
-}
-
-// Load loads the cache from disk
-func (c *LocalCache) Load() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("error getting home directory: %v", err)
-	}
-
-	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
-	data, err := os.ReadFile(cacheFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // No cache file yet, that's ok
-		}
-		return fmt.Errorf("error reading cache file: %v", err)
-	}
-
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	return json.Unmarshal(data, c)
-}
-
-// HasScanBeenExecuted checks if a scan has been executed with the same config
-func (c *LocalCache) HasScanBeenExecuted(id string, configHash string) bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	if cache, exists := c.Scans[id]; exists {
-		return cache.ConfigHash == configHash
-	}
-	return false
-}
-
-// HasEnumerationBeenExecuted checks if an enumeration has been executed with the same config
-func (c *LocalCache) HasEnumerationBeenExecuted(id string, configHash string) bool {
-	c.mutex.RLock()
-	defer c.mutex.RUnlock()
-
-	if cache, exists := c.Enumerations[id]; exists {
-		return cache.ConfigHash == configHash
-	}
-	return false
-}
-
-// MarkScanExecuted marks a scan as executed
-func (c *LocalCache) MarkScanExecuted(id string, configHash string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	c.Scans[id] = ScanCache{
-		LastExecuted: time.Now().UTC(),
-		ConfigHash:   configHash,
-	}
-	// Async save
-	go func() {
-		if err := c.Save(); err != nil {
-			slog.Warn("error saving cache", "error", err)
-		}
-	}()
-}
-
-// MarkEnumerationExecuted marks an enumeration as executed
-func (c *LocalCache) MarkEnumerationExecuted(id string, configHash string) {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-
-	c.Enumerations[id] = ScanCache{
-		LastExecuted: time.Now().UTC(),
-		ConfigHash:   configHash,
-	}
-	// Async save
-	go func() {
-		if err := c.Save(); err != nil {
-			slog.Warn("error saving cache", "error", err)
-		}
-	}()
-}
-
-// TaskChunk represents a chunk of scan data from the API
-type TaskChunk struct {
-	ScanID               string   `json:"scan_id"`
-	TemplateRequestCount int      `json:"template_request_count"`
-	Targets              []string `json:"targets"`
-	PublicTemplates      []string `json:"public_templates"`
-	PrivateTemplates     []string `json:"private_templates"`
-	UserID               int64    `json:"user_id"`
-	ChunkID              string   `json:"chunk_id"`
-	ScanConfiguration    string   `json:"scan_configuration"`
-	PublicWorkflows      []string `json:"public_workflows"`
-	PrivateWorkflows     []string `json:"private_workflows"`
-	WorkflowsURLs        []string `json:"workflows_urls"`
-	Status               string   `json:"status"`
-}
-
-// TaskChunkStatus represents the possible status values for a task chunk
-type TaskChunkStatus string
-
-const (
-	TaskChunkStatusAck        TaskChunkStatus = "ack"
-	TaskChunkStatusNack       TaskChunkStatus = "nack"
-	TaskChunkStatusInProgress TaskChunkStatus = "in_progress"
-)
 
 // Response represents a simplified HTTP response
 type Response struct {
@@ -350,240 +221,132 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 	}
 }
 
+// NATSCredentials contains connection metadata returned by the /in endpoint
+type NATSCredentials struct {
+	Credentials string `json:"credentials"`
+	NatsURL     string `json:"nats_url"`
+	Stream      string `json:"stream"`
+	GroupPrefix string `json:"group_prefix"`
+	Subjects    struct {
+		Broadcast string `json:"broadcast"`
+		Requests  string `json:"requests"`
+	} `json:"subjects"`
+	InboxPrefix          string    `json:"inbox_prefix"`
+	ExpiresAt            time.Time `json:"expires_at"`
+	DebugUploadURL       string    `json:"debug_upload_url,omitempty"`
+	DebugUploadExpiresAt time.Time `json:"debug_upload_expires_at,omitzero"`
+}
+
+// AgentInResponse represents the response from POST /v1/agents/in
+type AgentInResponse struct {
+	Message string           `json:"message"`
+	Nats    *NATSCredentials `json:"nats,omitempty"`
+}
+
 // Runner contains the internal logic of the agent
 type Runner struct {
 	options        *Options
-	localCache     *LocalCache
 	inRequestCount int       // Number of /in requests sent
 	agentStartTime time.Time // When the agent started
-	logBatcher     *batcher.Batcher[string]
+
+	natsCreds   *NATSCredentials
+	natsCredsMu sync.RWMutex
+
+	// Lifecycle context — cancelled on agent shutdown
+	ctx       context.Context
+	cancelCtx context.CancelFunc
+
+	// NATS RPC connection and subscriptions
+	natsConn    *nats.Conn
+	natsSubs    []*nats.Subscription
+	natsConnMu  sync.Mutex
+	natsStarted bool // true after first successful NATS connect
+
+	// JetStream work distribution
+	jsPool   atomic.Pointer[natsrpc.WorkerPool]
+	jsCancel atomic.Pointer[context.CancelFunc]
+
+	// Chunk parallelism semaphores. scanSem is fixed at NumCPU because nuclei
+	// is heavy and warms up slowly — letting the adaptive scaler ramp it up
+	// before nuclei reaches steady-state CPU/mem causes oversubscription.
+	// chunkSem (enumeration) keeps the adaptive scaler since discovery work
+	// is short and resource-light.
+	scanSem     atomic.Pointer[resourceprofile.ResizableSemaphore]
+	chunkSem    atomic.Pointer[resourceprofile.ResizableSemaphore]
+	chunkScaler atomic.Pointer[resourceprofile.Scaler]
+
+	// Group-level chunk backlog metrics (for autoscaling). Set when JetStream
+	// workers come up; cleared on resetForRestart.
+	groupMetrics atomic.Pointer[natsrpc.GroupMetricsCollector]
+
+	// Short cache for ActiveTasks to absorb bursty health-check/debug calls.
+	activeTasksCache atomic.Pointer[activeTasksCacheEntry]
+
+	// Local observability database (nil if open failed)
+	agentDB agentdb.Store
+
+	restartRequested atomic.Bool
 }
 
 var (
-	completedTasks = gcache.New[string, struct{}](1024).
-			LRU().
-			Expiration(time.Hour).
-			Build()
-	pendingTasks = mapsutil.NewSyncLockMap[string, struct{}]()
-	// passiveDiscoveredIPs *mapsutil.SyncLockMap[string, struct{}]
-
 	// K8s subnets cache
 	k8sSubnetsCache     []string
 	k8sSubnetsCacheOnce sync.Once
 )
 
-// shouldSkipTask checks if a task (scan or enumeration) should be skipped based on
-// agent assignment, tags, and networks. Logs each check in verbose mode.
-// Returns true if the task should be skipped (no matching conditions), false if it should continue.
-func (r *Runner) shouldSkipTask(taskType, id, name, taskAgentId string, agentTags, agentNetworks gjson.Result) bool {
-	r.logHelper("VERBOSE", fmt.Sprintf("checking %s (%s - %s)", taskType, id, name))
-
-	// Check if agent ID matches (case-insensitive)
-	isAssignedToAgent := strings.EqualFold(taskAgentId, r.options.AgentId)
-	result := "✗"
-	if isAssignedToAgent {
-		result = "✓"
-	}
-	if taskAgentId == "" {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking id: %s (task: <empty>, agent: %s)", result, r.options.AgentId))
-	} else {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking id: %s (task: %s, agent: %s)", result, taskAgentId, r.options.AgentId))
-	}
-
-	// Check if task's agent_tags match any of the runner's agent tags (case-insensitive)
-	var hasAgentTag bool
-	var taskAgentTags []string
-	if agentTags.Exists() {
-		agentTags.ForEach(func(key, value gjson.Result) bool {
-			tagValue := value.String()
-			taskAgentTags = append(taskAgentTags, tagValue)
-			// Case-insensitive comparison
-			for _, agentTag := range r.options.AgentTags {
-				if strings.EqualFold(tagValue, agentTag) {
-					hasAgentTag = true
-					return false // Stop iteration
-				}
-			}
-			return true
-		})
-	}
-	result = "✗"
-	if hasAgentTag {
-		result = "✓"
-	}
-	if len(taskAgentTags) > 0 {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking tags: %s (task agent_tags: %v, agent tags: %v)", result, taskAgentTags, r.options.AgentTags))
-	} else {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking tags: %s (task agent_tags: <none>, agent tags: %v)", result, r.options.AgentTags))
-	}
-
-	// Check if task's agent_networks match any of the runner's agent networks (case-insensitive)
-	var hasAgentNetwork bool
-	var taskAgentNetworks []string
-	if agentNetworks.Exists() {
-		agentNetworks.ForEach(func(key, value gjson.Result) bool {
-			networkValue := value.String()
-			taskAgentNetworks = append(taskAgentNetworks, networkValue)
-			// Case-insensitive comparison
-			for _, agentNetwork := range r.options.AgentNetworks {
-				if strings.EqualFold(networkValue, agentNetwork) {
-					hasAgentNetwork = true
-					return false // Stop iteration
-				}
-			}
-			return true
-		})
-	}
-	result = "✗"
-	if hasAgentNetwork {
-		result = "✓"
-	}
-	if len(taskAgentNetworks) > 0 {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: %v, agent networks: %v)", result, taskAgentNetworks, r.options.AgentNetworks))
-	} else {
-		r.logHelper("VERBOSE", fmt.Sprintf("  checking networks: %s (task agent_networks: <none>, agent networks: %v)", result, r.options.AgentNetworks))
-	}
-
-	// If any condition matches, don't skip
-	shouldContinue := isAssignedToAgent || hasAgentTag || hasAgentNetwork
-
-	if shouldContinue {
-		r.logHelper("VERBOSE", fmt.Sprintf("  %s (%s - %s) is being enqueued (matching conditions found)", taskType, id, name))
-		return false // Don't skip
-	}
-
-	r.logHelper("VERBOSE", fmt.Sprintf("  %s (%s - %s) is being skipped (no matching conditions)", taskType, id, name))
-	return true // Skip
+type activeTasksCacheEntry struct {
+	tasks     []agentdb.Task
+	expiresAt time.Time
 }
 
-// LogEntry represents a log entry structure
-type LogEntry struct {
-	Timestamp time.Time `json:"timestamp"`
-	Level     string    `json:"level"`
-	Message   string    `json:"message"`
+// getActiveTasksCached returns the active tasks list, caching for 2s so that
+// bursty health-check/debug RPCs don't hammer SQLite.
+func (r *Runner) getActiveTasksCached() []agentdb.Task {
+	if entry := r.activeTasksCache.Load(); entry != nil && time.Now().Before(entry.expiresAt) {
+		return entry.tasks
+	}
+	if r.agentDB == nil {
+		return nil
+	}
+	tasks, err := r.agentDB.ActiveTasks(context.Background())
+	if err != nil {
+		return nil
+	}
+	r.activeTasksCache.Store(&activeTasksCacheEntry{tasks: tasks, expiresAt: time.Now().Add(2 * time.Second)})
+	return tasks
 }
 
-// AgentLogUploadRequest represents the request payload for log upload
-type AgentLogUploadRequest struct {
-	OS             string   `json:"os,omitempty"`
-	Arch           string   `json:"arch,omitempty"`
-	ID             string   `json:"id,omitempty"`
-	Name           string   `json:"name,omitempty"`
-	Tags           []string `json:"tags,omitempty"`
-	Networks       []string `json:"networks,omitempty"`
-	NetworkSubnets []string `json:"network_subnets,omitempty"`
-	Type           string   `json:"type,omitempty"`
-	Logs           []string `json:"logs"`
-}
-
-// AgentLogUploadResponse represents the response from log upload endpoint
-type AgentLogUploadResponse struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
-// logHelper prints the log to console and appends JSON marshalled string to the batcher
+// logHelper delegates to the appropriate slog level.
+// The agentLogHandler tees output to console, ring buffer, and SQLite.
 func (r *Runner) logHelper(level, message string) {
-	entry := LogEntry{
-		Timestamp: time.Now().UTC(),
-		Level:     level,
-		Message:   message,
+	switch level {
+	case "WARNING":
+		slog.Warn(message)
+	case "ERROR", "FATAL":
+		slog.Error(message)
+	case "DEBUG", "VERBOSE":
+		slog.Debug(message)
+	default:
+		slog.Info(message)
 	}
-
-	// Print to console
-	fmt.Printf("[%s] %s: %s\n", entry.Timestamp.Format(time.RFC3339), entry.Level, entry.Message)
-
-	// Marshal to JSON
-	jsonData, err := json.Marshal(entry)
-	if err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error marshaling log entry: %v", err))
-		return
-	}
-
-	// Append to batcher
-	if r.logBatcher != nil {
-		r.logBatcher.Append(string(jsonData))
-	}
-}
-
-// uploadLogs sends batched logs to the /v1/agents/{id}/log endpoint
-func (r *Runner) uploadLogs(logs []string) {
-	if len(logs) == 0 {
-		return
-	}
-
-	// Get metadata same as /in endpoint
-	tagsToUse := r.options.AgentTags
-	networksToUse := r.options.AgentNetworks
-	networkSubnets := r.getAutoDiscoveredTargets()
-
-	// Build request payload
-	payload := AgentLogUploadRequest{
-		OS:             runtime.GOOS,
-		Arch:           runtime.GOARCH,
-		ID:             r.options.AgentId,
-		Name:           r.options.AgentName,
-		Tags:           tagsToUse,
-		Networks:       networksToUse,
-		NetworkSubnets: networkSubnets,
-		Type:           "agent",
-		Logs:           logs,
-	}
-
-	// Marshal payload to JSON
-	jsonPayload, err := json.Marshal(payload)
-	if err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error marshaling log upload payload: %v", err))
-		return
-	}
-
-	// Create request
-	apiURL := fmt.Sprintf("%s/v1/agents/%s/log", PdcpApiServer, r.options.AgentId)
-	headers := map[string]string{
-		"x-api-key":    PDCPApiKey,
-		"Content-Type": "application/json",
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	resp := r.makeRequest(ctx, http.MethodPost, apiURL, bytes.NewReader(jsonPayload), headers)
-	if resp.Error != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error uploading logs: %v", resp.Error))
-		return
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from log upload endpoint: %d, body: %s", resp.StatusCode, string(resp.Body)))
-		return
-	}
-
-	// Parse response
-	var uploadResp AgentLogUploadResponse
-	if err := json.Unmarshal(resp.Body, &uploadResp); err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error unmarshaling log upload response: %v", err))
-		return
-	}
-
-	r.logHelper("VERBOSE", fmt.Sprintf("uploaded %d log entries: %s", len(logs), uploadResp.Message))
 }
 
 // NewRunner creates a new runner instance
 func NewRunner(options *Options) (*Runner, error) {
 	r := &Runner{
 		options:        options,
-		localCache:     NewLocalCache(),
 		agentStartTime: time.Now(),
 	}
 
-	if err := r.localCache.Load(); err != nil {
-		r.logHelper("WARNING", fmt.Sprintf("error loading cache: %v", err))
-	}
-
-	// Generate a unique agent ID using xid (similar to tunnelx)
-	// This creates a globally unique ID like "c5s8v3k0h0ql5r2g0000"
+	// Generate or validate agent ID (xid format: 20 chars, base32-encoded).
 	if r.options.AgentId == "" {
 		r.options.AgentId = xid.New().String()
+	} else {
+		// Validate that a user-provided or self-update-injected ID is a valid xid.
+		if _, err := xid.FromString(r.options.AgentId); err != nil {
+			slog.Error("invalid agent ID (must be a valid xid)", "agent_id", r.options.AgentId, "error", err)
+			os.Exit(1)
+		}
 	}
 
 	// Initialize AgentName after AgentId is generated
@@ -597,15 +360,38 @@ func NewRunner(options *Options) (*Runner, error) {
 		}
 	}
 
-	// Initialize log batcher
-	r.logBatcher = batcher.New[string](
-		batcher.WithMaxCapacity[string](100),              // Max 100 logs per batch
-		batcher.WithFlushInterval[string](30*time.Second), // Flush every 30 seconds
-		batcher.WithFlushCallback[string](r.uploadLogs),   // Upload callback
-	)
-
-	// Start the batcher
-	go r.logBatcher.Run()
+	// Open local observability database.
+	// Default location: ~/.pd-agent (cross-platform via os.UserHomeDir).
+	// PDCP_AGENTDB_DIR overrides the default for users who want it elsewhere.
+	// Last-resort fallback: next to the binary, preserving prior behaviour
+	// when HOME isn't set (e.g. some service contexts).
+	// Non-fatal: if everything fails, the agent runs without local persistence.
+	dbDir := os.Getenv("PDCP_AGENTDB_DIR")
+	if dbDir == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			candidate := filepath.Join(home, ".pd-agent")
+			if err := os.MkdirAll(candidate, 0o755); err == nil {
+				dbDir = candidate
+			} else {
+				slog.Warn("agentdb: cannot create ~/.pd-agent, falling back to binary dir", "error", err)
+			}
+		}
+	}
+	if dbDir == "" {
+		if execPath, err := os.Executable(); err == nil {
+			dbDir = filepath.Dir(execPath)
+		}
+	}
+	if dbDir != "" {
+		dbPath := filepath.Join(dbDir, fmt.Sprintf("pd-agent-%s.db", r.options.AgentId))
+		slog.Info("agentdb: opening local DB", "path", dbPath)
+		if db, err := agentdb.Open(dbPath); err != nil {
+			slog.Warn("agentdb: failed to open, local observability disabled", "path", dbPath, "error", err)
+		} else {
+			r.agentDB = db
+			warnOrphanDBs(dbDir, r.options.AgentId)
+		}
+	}
 
 	// Start passive discovery if enabled
 	// if r.options.PassiveDiscovery {
@@ -615,60 +401,1205 @@ func NewRunner(options *Options) (*Runner, error) {
 	return r, nil
 }
 
+// GetNATSCredentials returns the current NATS credentials (thread-safe).
+// Returns nil if no credentials have been received yet.
+func (r *Runner) GetNATSCredentials() *NATSCredentials {
+	r.natsCredsMu.RLock()
+	defer r.natsCredsMu.RUnlock()
+	return r.natsCreds
+}
+
+// extractJWT parses the JWT from a NATS .creds formatted string.
+func extractJWT(credsContent string) (string, error) {
+	return nkeys.ParseDecoratedJWT([]byte(credsContent))
+}
+
+// signNonce parses the NKey seed from a NATS .creds formatted string
+// and signs the given nonce. The seed is wiped after signing.
+func signNonce(credsContent string, nonce []byte) ([]byte, error) {
+	kp, err := nkeys.ParseDecoratedNKey([]byte(credsContent))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse nkey seed: %w", err)
+	}
+	defer kp.Wipe()
+	return kp.Sign(nonce)
+}
+
+// startNATSRPC connects to NATS using the current credentials, sets up the
+// request/broadcast routers, and subscribes. It replaces any existing connection.
+func (r *Runner) startNATSRPC() error {
+	creds := r.GetNATSCredentials()
+	if creds == nil {
+		return fmt.Errorf("no NATS credentials available")
+	}
+
+	// Use JWT callbacks so credentials are read from memory on every
+	// connect/reconnect — no temp files, hot-swap on credential refresh.
+	opts := []nats.Option{
+		nats.UserJWT(
+			func() (string, error) {
+				c := r.GetNATSCredentials()
+				if c == nil {
+					return "", fmt.Errorf("no NATS credentials available")
+				}
+				return extractJWT(c.Credentials)
+			},
+			func(nonce []byte) ([]byte, error) {
+				c := r.GetNATSCredentials()
+				if c == nil {
+					return nil, fmt.Errorf("no NATS credentials available")
+				}
+				return signNonce(c.Credentials, nonce)
+			},
+		),
+		nats.Name(fmt.Sprintf("pd-agent-%s", r.options.AgentId)),
+		nats.MaxReconnects(-1),
+		nats.ReconnectWait(2 * time.Second),
+		nats.DisconnectErrHandler(func(nc *nats.Conn, err error) {
+			if err != nil {
+				r.logHelper("WARNING", fmt.Sprintf("NATS disconnected: %v", err))
+			}
+		}),
+		nats.ReconnectHandler(func(nc *nats.Conn) {
+			r.logHelper("INFO", fmt.Sprintf("NATS reconnected to %s", nc.ConnectedUrl()))
+		}),
+		nats.ClosedHandler(func(nc *nats.Conn) {
+			r.logHelper("INFO", "NATS connection closed")
+		}),
+	}
+
+	if creds.InboxPrefix != "" {
+		opts = append(opts, nats.CustomInboxPrefix(creds.InboxPrefix))
+	}
+
+	nc, err := nats.Connect(creds.NatsURL, opts...)
+	if err != nil {
+		return fmt.Errorf("failed to connect to NATS at %s: %w", creds.NatsURL, err)
+	}
+
+	// Build and subscribe routers — r.ctx propagates cancellation on shutdown
+	requestRouter := natsrpc.NewRouter(r.ctx)
+	requestRouter.Handle("httpx", r.handleHTTPX)
+	requestRouter.Handle("port-probe", r.handlePortProbe)
+	requestRouter.Handle("nuclei-retest", r.handleNucleiRetest)
+
+	broadcastRouter := natsrpc.NewRouter(r.ctx)
+	broadcastRouter.Handle("health-check", r.handleHealthCheck)
+
+	directRouter := natsrpc.NewRouter(r.ctx)
+	directRouter.Handle("health-check", r.handleHealthCheck)
+	directRouter.Handle("debug", r.handleDebug)
+	directRouter.Handle("stop", r.handleStop)
+	directRouter.Handle("restart", r.handleRestart)
+	directRouter.Handle("update", r.handleUpdate)
+	directRouter.Handle("logs", r.handleLogs)
+	directRouter.Handle("metrics", r.handleMetrics)
+	directRouter.Handle("group-metrics", r.handleGroupMetrics)
+
+	broadcastRouter.Handle("update", r.handleUpdate)
+
+	queueGroup := r.options.AgentNetwork
+
+	var subs []*nats.Subscription
+
+	reqSub, err := requestRouter.SubscribeRequests(nc, creds.Subjects.Requests, queueGroup)
+	if err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to requests on %s: %w", creds.Subjects.Requests, err)
+	}
+	subs = append(subs, reqSub)
+
+	bcastSub, err := broadcastRouter.SubscribeBroadcast(nc, creds.Subjects.Broadcast)
+	if err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to broadcast on %s: %w", creds.Subjects.Broadcast, err)
+	}
+	subs = append(subs, bcastSub)
+
+	directSubject := creds.GroupPrefix + ".direct." + r.options.AgentId
+	directSub, err := directRouter.SubscribeDirect(nc, directSubject)
+	if err != nil {
+		nc.Close()
+		return fmt.Errorf("failed to subscribe to direct on %s: %w", directSubject, err)
+	}
+	subs = append(subs, directSub)
+
+	// Swap in the new connection, unsubscribe and drain old one
+	r.natsConnMu.Lock()
+	old := r.natsConn
+	oldSubs := r.natsSubs
+	r.natsConn = nc
+	r.natsSubs = subs
+	r.natsStarted = true
+	r.natsConnMu.Unlock()
+
+	if old != nil {
+		for _, sub := range oldSubs {
+			_ = sub.Unsubscribe()
+		}
+		_ = old.Drain()
+	}
+
+	r.logHelper("INFO", "NATS RPC connected")
+	return nil
+}
+
+// stopNATSRPC gracefully drains and closes the NATS connection.
+func (r *Runner) stopNATSRPC() {
+	r.natsConnMu.Lock()
+	nc := r.natsConn
+	r.natsConn = nil
+	r.natsConnMu.Unlock()
+
+	if nc != nil {
+		r.logHelper("INFO", "draining NATS connection...")
+		if err := nc.Drain(); err != nil {
+			r.logHelper("WARNING", fmt.Sprintf("NATS drain error: %v", err))
+		}
+	}
+}
+
+// onNATSCredentialsReceived is called from inFunctionTickCallback when NATS
+// credentials arrive or change. It starts or reconnects the NATS RPC layer.
+func (r *Runner) onNATSCredentialsReceived(isNew bool) {
+	if isNew {
+		// First time — start NATS in background
+		go func() {
+			if err := r.startNATSRPC(); err != nil {
+				r.logHelper("ERROR", fmt.Sprintf("failed to start NATS RPC: %v", err))
+				return
+			}
+			if err := r.startJetStreamWorkers(); err != nil {
+				r.logHelper("FATAL", fmt.Sprintf("JetStream workers failed to start: %v", err))
+				os.Exit(1)
+			}
+		}()
+		return
+	}
+
+	// Credentials refreshed — force reconnect to pick up new JWT via callbacks
+	r.natsConnMu.Lock()
+	nc := r.natsConn
+	r.natsConnMu.Unlock()
+
+	if nc != nil {
+		r.logHelper("INFO", "NATS credentials refreshed, forcing reconnect...")
+		if err := nc.ForceReconnect(); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("failed to force NATS reconnect: %v", err))
+		}
+	}
+}
+
+// --- NATS RPC Handlers ---
+
+func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.HTTPXRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid httpx request: %w", err)
+	}
+	if req.Target == "" {
+		return nil, fmt.Errorf("httpx: target is required")
+	}
+
+	r.logHelper("DEBUG", "NATS RPC: httpx request received")
+
+	// Write target to temp file (httpx SDK uses InputFile)
+	f, err := os.CreateTemp("", "httpx-targets-*.txt")
+	if err != nil {
+		return nil, fmt.Errorf("httpx: create temp file: %w", err)
+	}
+	defer os.Remove(f.Name())
+	fmt.Fprintln(f, req.Target)
+	f.Close()
+
+	// Collect results via callback
+	var mu sync.Mutex
+	var results []httpxrunner.Result
+
+	opts := httpxrunner.Options{
+		Methods:         http.MethodGet,
+		InputFile:       f.Name(),
+		StatusCode:      true,
+		ExtractTitle:    true,
+		TechDetect:      true,
+		OutputIP:        true,
+		OutputCName:     true,
+		FollowRedirects: true,
+		Timeout:         10,
+		Retries:         2,
+		Threads:         25,
+		RateLimit:       150,
+		Silent:          true,
+		NoColor:         true,
+		OnResult: func(result httpxrunner.Result) {
+			if result.Err != nil {
+				return
+			}
+			mu.Lock()
+			results = append(results, result)
+			mu.Unlock()
+		},
+	}
+
+	if err := opts.ValidateOptions(); err != nil {
+		return nil, fmt.Errorf("httpx: validate options: %w", err)
+	}
+
+	httpxRunner, err := httpxrunner.New(&opts)
+	if err != nil {
+		return nil, fmt.Errorf("httpx: runner init: %w", err)
+	}
+	defer httpxRunner.Close()
+
+	// RunEnumeration is blocking — completes when all targets are processed
+	httpxRunner.RunEnumeration()
+
+	return results, nil
+}
+
+func (r *Runner) handlePortProbe(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.PortProbeRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid port-probe request: %w", err)
+	}
+	if req.Host == "" {
+		return nil, fmt.Errorf("port-probe: host is required")
+	}
+	if req.Port <= 0 || req.Port > 65535 {
+		return nil, fmt.Errorf("port-probe: invalid port %d", req.Port)
+	}
+
+	r.logHelper("DEBUG", "NATS RPC: port-probe request received")
+
+	target := net.JoinHostPort(req.Host, strconv.Itoa(req.Port))
+	conn, err := net.DialTimeout("tcp", target, 5*time.Second)
+
+	open := err == nil
+	if open {
+		conn.Close()
+	}
+
+	return map[string]any{
+		"host":      req.Host,
+		"port":      req.Port,
+		"protocol":  "tcp",
+		"open":      open,
+		"timestamp": time.Now().UTC(),
+	}, nil
+}
+
+func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.NucleiRetestRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid nuclei-retest request: %w", err)
+	}
+	if len(req.Targets) == 0 {
+		return nil, fmt.Errorf("nuclei-retest: no targets provided")
+	}
+	if req.TemplateID == "" && req.TemplateEncoded == "" && req.TemplateURL == "" {
+		return nil, fmt.Errorf("nuclei-retest: template_id, template_encoded, or template_url required")
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d", len(req.Targets)))
+
+	// Build SDK options — minimal config for fast execution
+	sdkOpts := []nuclei.NucleiSDKOptions{
+		nuclei.DisableUpdateCheck(),
+		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
+	}
+
+	// Handle template source — priority: encoded > url > id
+	switch {
+	case req.TemplateEncoded != "":
+		// base64 decode → temp file (SDK only accepts file paths)
+		decoded, err := base64.StdEncoding.DecodeString(req.TemplateEncoded)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: decode template: %w", err)
+		}
+		f, err := os.CreateTemp("", "nuclei-retest-*.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(decoded); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
+		}
+		f.Close()
+		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
+			Templates: []string{f.Name()},
+		}))
+
+	case req.TemplateURL != "":
+		// Download template from URL → temp file
+		resp, err := http.Get(req.TemplateURL)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: fetch template url: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("nuclei-retest: template url returned %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: read template url body: %w", err)
+		}
+		f, err := os.CreateTemp("", "nuclei-retest-*.yaml")
+		if err != nil {
+			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
+		}
+		defer os.Remove(f.Name())
+		if _, err := f.Write(body); err != nil {
+			f.Close()
+			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
+		}
+		f.Close()
+		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
+			Templates: []string{f.Name()},
+		}))
+
+	default:
+		// Load by template ID from installed nuclei-templates
+		sdkOpts = append(sdkOpts, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
+			IDs: []string{req.TemplateID},
+		}))
+	}
+
+	// Create engine with 5-minute timeout
+	execCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	ne, err := nuclei.NewNucleiEngineCtx(execCtx, sdkOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("nuclei-retest: engine init: %w", err)
+	}
+
+	// Load targets (no HTTP probing needed for retest)
+	ne.LoadTargets(req.Targets, false)
+
+	// Execute and collect results
+	var mu sync.Mutex
+	var results []*output.ResultEvent
+	err = ne.ExecuteCallbackWithCtx(execCtx, func(event *output.ResultEvent) {
+		mu.Lock()
+		results = append(results, event)
+		mu.Unlock()
+	})
+	if err != nil {
+		ne.Close()
+		return nil, fmt.Errorf("nuclei-retest: execution failed: %w", err)
+	}
+
+	// Close the engine BEFORE reading results. This triggers the interactsh
+	// cooldown period — the client sleeps for CooldownPeriod (5s), does a
+	// final poll, and processes any pending OOB interactions. The callback
+	// is still registered, so matches found during cooldown land in results.
+	ne.Close()
+
+	// Return single ResultEvent matching platform/retest format
+	var result *output.ResultEvent
+	if len(results) > 0 {
+		result = results[0]
+	} else {
+		// No match — return empty result with matcher_status=false
+		result = &output.ResultEvent{
+			MatcherStatus: false,
+		}
+	}
+
+	// Set template source fields like platform handler does
+	if req.TemplateEncoded != "" {
+		result.TemplateEncoded = req.TemplateEncoded
+	}
+
+	// Clear Interaction field — it may contain raw binary data from interactsh
+	// DNS responses that fails JSON marshalling with control character errors.
+	result.Interaction = nil
+
+	return result, nil
+}
+
+func (r *Runner) handleHealthCheck(ctx context.Context, method string, data []byte) (any, error) {
+	memTotal, _ := resourceprofile.ReadMemory()
+
+	hc := natsrpc.HealthCheckData{
+		AgentID:    r.options.AgentId,
+		AgentName:  r.options.AgentName,
+		Version:    Version,
+		Uptime:     time.Since(r.agentStartTime).String(),
+		NumCPU:     runtime.NumCPU(),
+		MemTotalMB: memTotal / (1024 * 1024),
+	}
+
+	// Active tasks from SQLite — source of truth (2s cached).
+	tasks := r.getActiveTasksCached()
+	for _, t := range tasks {
+		switch t.Type {
+		case "scan":
+			hc.ActiveScans = append(hc.ActiveScans, t.TaskID)
+		case "enumeration":
+			hc.ActiveEnums = append(hc.ActiveEnums, t.TaskID)
+		}
+	}
+	hc.TasksRunning = len(tasks)
+
+	// Report idle only when no work is happening at any level.
+	if hc.TasksRunning == 0 && time.Since(r.agentStartTime) > time.Minute {
+		hc.Idle = true
+		hc.IdleSince = r.agentStartTime.UTC().Format(time.RFC3339)
+		if pool := r.jsPool.Load(); pool != nil {
+			if idle := pool.IdleSince(); !idle.IsZero() {
+				hc.IdleSince = idle.UTC().Format(time.RFC3339)
+			}
+		}
+	}
+
+	return hc, nil
+}
+
+func (r *Runner) handleDebug(ctx context.Context, method string, data []byte) (any, error) {
+	uptime := time.Since(r.agentStartTime)
+	hostname, _ := os.Hostname()
+
+	// Go runtime memory stats — cross-platform, no syscall dependency
+	var mem runtime.MemStats
+	runtime.ReadMemStats(&mem)
+
+	var lastGC string
+	if mem.LastGC > 0 {
+		lastGC = time.Unix(0, int64(mem.LastGC)).UTC().Format(time.RFC3339)
+	}
+
+	dd := natsrpc.DebugData{
+		Agent: natsrpc.AgentInfo{
+			ID:            r.options.AgentId,
+			Name:          r.options.AgentName,
+			Version:       Version,
+			Uptime:        uptime.Round(time.Second).String(),
+			UptimeSeconds: uptime.Seconds(),
+			TasksRunning:  0, // populated below from SQLite active tasks
+		},
+		System: natsrpc.SystemInfo{
+			OS:       runtime.GOOS,
+			Arch:     runtime.GOARCH,
+			NumCPU:   runtime.NumCPU(),
+			Hostname: hostname,
+		},
+		Process: natsrpc.ProcessInfo{
+			PID:        os.Getpid(),
+			MemAllocMB: float64(mem.Sys) / (1024 * 1024),
+		},
+		Runtime: natsrpc.RuntimeInfo{
+			GoVersion:    runtime.Version(),
+			NumGoroutine: runtime.NumGoroutine(),
+			HeapAllocMB:  float64(mem.HeapAlloc) / (1024 * 1024),
+			HeapInuseMB:  float64(mem.HeapInuse) / (1024 * 1024),
+			StackInuseMB: float64(mem.StackInuse) / (1024 * 1024),
+			TotalAllocMB: float64(mem.TotalAlloc) / (1024 * 1024),
+			NumGC:        mem.NumGC,
+			LastGC:       lastGC,
+		},
+	}
+
+	tasks := r.getActiveTasksCached()
+	dd.Agent.TasksRunning = len(tasks)
+	for _, t := range tasks {
+		dd.ActiveTasks = append(dd.ActiveTasks, natsrpc.TaskInfo{
+			Type:      t.Type,
+			TaskID:    t.TaskID,
+			StartedAt: t.StartedAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	return dd, nil
+}
+
+func (r *Runner) handleStop(ctx context.Context, method string, data []byte) (any, error) {
+	r.logHelper("INFO", "NATS RPC: received stop command, shutting down...")
+	go func() {
+		// Small delay to allow the NATS response to be sent before shutdown
+		time.Sleep(500 * time.Millisecond)
+		p, _ := os.FindProcess(os.Getpid())
+		_ = p.Signal(os.Interrupt)
+	}()
+	return map[string]any{
+		"agent_id": r.options.AgentId,
+		"status":   "stopping",
+	}, nil
+}
+
+func (r *Runner) handleRestart(ctx context.Context, method string, data []byte) (any, error) {
+	r.logHelper("INFO", "NATS RPC: received restart command, restarting agent...")
+	if r.restartRequested.CompareAndSwap(false, true) {
+		go func() {
+			// Small delay to allow the NATS response to be sent before restart
+			time.Sleep(500 * time.Millisecond)
+			r.cancelCtx()
+		}()
+	}
+	return map[string]any{
+		"agent_id": r.options.AgentId,
+		"status":   "restarting",
+	}, nil
+}
+
+func (r *Runner) handleUpdate(ctx context.Context, method string, data []byte) (any, error) {
+	var req selfupdate.UpdateRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid update request: %w", err)
+	}
+
+	if req.Version == "" {
+		req.Version = "latest"
+	}
+
+	r.logHelper("INFO", fmt.Sprintf("NATS RPC: received update command (version=%s)", req.Version))
+
+	result := selfupdate.UpdateResult{
+		AgentID:        r.options.AgentId,
+		CurrentVersion: Version,
+		TargetVersion:  req.Version,
+	}
+
+	// Fail fast: container or same version — return immediately, no goroutine.
+	if selfupdate.IsContainer() {
+		result.Status = "skipped"
+		result.Message = "running in a container — update the image instead of self-updating"
+		return result, nil
+	}
+	if req.Version == Version {
+		result.Status = "skipped"
+		result.Message = fmt.Sprintf("already running %s", Version)
+		return result, nil
+	}
+
+	// Run update in background — we need to send the NATS response first.
+	// Download and verify BEFORE draining connections, so on failure the
+	// agent keeps running normally.
+	// Detached ctx: the NATS handler ctx is cancelled once the response is
+	// sent, so the download must not depend on it.
+	go func() {
+		// Small delay to let the NATS response go out.
+		time.Sleep(500 * time.Millisecond)
+
+		dlCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+
+		// Phase 1: Download and verify (agent still fully operational).
+		r.logHelper("INFO", "selfupdate: downloading and verifying new binary...")
+		newBinary, err := selfupdate.DownloadAndVerify(dlCtx, Version, req.Version)
+		if err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate failed: %v", err))
+			return // agent keeps running, NATS still connected
+		}
+
+		// Phase 1b: Preflight — run the new binary with the exact restart args
+		// to confirm it accepts them before we commit to swapping. Catches the
+		// "new binary doesn't recognize one of our flags" bricking failure.
+		if err := selfupdate.Prevalidate(newBinary, r.options.AgentId); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate aborted at preflight: %v", err))
+			_ = os.Remove(newBinary)
+			return // agent keeps running on the old binary
+		}
+
+		// Phase 2: Download succeeded and preflight passed — drain and replace.
+		r.logHelper("INFO", "selfupdate: binary verified, draining in-flight work...")
+
+		if cancel := r.jsCancel.Load(); cancel != nil {
+			(*cancel)()
+		}
+		if pool := r.jsPool.Load(); pool != nil {
+			pool.Stop()
+		}
+		r.stopNATSRPC()
+
+		r.logHelper("INFO", "selfupdate: applying update...")
+		if err := selfupdate.Apply(newBinary, Version, r.options.AgentId); err != nil {
+			r.logHelper("ERROR", fmt.Sprintf("selfupdate apply failed: %v", err))
+			// Binary replace failed. NATS is drained. Restart the process
+			// to reconnect — same binary, same version.
+			r.logHelper("INFO", "selfupdate: restarting agent to recover NATS connection...")
+			execPath, _ := os.Executable()
+			_ = syscall.Exec(execPath, os.Args, os.Environ())
+			return
+		}
+		// If Apply succeeded, syscall.Exec replaced this process.
+	}()
+
+	result.Status = "updating"
+	result.Message = fmt.Sprintf("downloading %s, will restart after in-flight work completes", req.Version)
+	return result, nil
+}
+
+func (r *Runner) handleLogs(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.LogsRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid logs request: %w", err)
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 100
+	}
+	if req.Limit > 500 {
+		req.Limit = 500
+	}
+	if req.Offset < 0 {
+		req.Offset = 0
+	}
+
+	// All logs are persisted to SQLite — no more in-memory ring buffer.
+	if r.agentDB == nil {
+		return nil, fmt.Errorf("local database not available")
+	}
+	filter := agentdb.LogFilter{
+		Offset: req.Offset,
+		Limit:  req.Limit,
+	}
+	if req.Since != "" {
+		t, err := time.Parse(time.RFC3339, req.Since)
+		if err != nil {
+			return nil, fmt.Errorf("invalid since: %w", err)
+		}
+		filter.Since = t
+	}
+	if req.Until != "" {
+		t, err := time.Parse(time.RFC3339, req.Until)
+		if err != nil {
+			return nil, fmt.Errorf("invalid until: %w", err)
+		}
+		filter.Until = t
+	}
+	dbEntries, err := r.agentDB.QueryLogs(context.Background(), filter)
+	if err != nil {
+		return nil, fmt.Errorf("query logs: %w", err)
+	}
+	lines := make([]string, len(dbEntries))
+	for i, e := range dbEntries {
+		lines[i] = e.Line
+	}
+	return natsrpc.LogsResponse{
+		Lines:  lines,
+		Total:  len(lines),
+		Offset: req.Offset,
+		Limit:  req.Limit,
+	}, nil
+}
+
+// handleMetrics returns time-series resource metrics for graph plotting.
+func (r *Runner) handleMetrics(ctx context.Context, method string, data []byte) (any, error) {
+	var req natsrpc.MetricsRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, fmt.Errorf("invalid metrics request: %w", err)
+	}
+
+	if r.agentDB == nil {
+		return nil, fmt.Errorf("local database not available")
+	}
+
+	// Resolve time range.
+	var since, until time.Time
+	now := time.Now().UTC()
+
+	presets := map[string]time.Duration{
+		"5m":  5 * time.Minute,
+		"15m": 15 * time.Minute,
+		"30m": 30 * time.Minute,
+		"1h":  1 * time.Hour,
+		"3h":  3 * time.Hour,
+		"6h":  6 * time.Hour,
+		"24h": 24 * time.Hour,
+	}
+
+	if req.Range == "custom" {
+		if req.Start == "" || req.End == "" {
+			return nil, fmt.Errorf("custom range requires start and end")
+		}
+		var err error
+		since, err = time.Parse(time.RFC3339, req.Start)
+		if err != nil {
+			return nil, fmt.Errorf("invalid start: %w", err)
+		}
+		until, err = time.Parse(time.RFC3339, req.End)
+		if err != nil {
+			return nil, fmt.Errorf("invalid end: %w", err)
+		}
+		if !until.After(since) {
+			return nil, fmt.Errorf("end must be after start")
+		}
+		if until.Sub(since) > 24*time.Hour {
+			return nil, fmt.Errorf("max custom range is 24h")
+		}
+	} else if d, ok := presets[req.Range]; ok {
+		since = now.Add(-d)
+		until = now
+	} else {
+		return nil, fmt.Errorf("invalid range %q: use 5m,15m,30m,1h,3h,6h,24h,custom", req.Range)
+	}
+
+	// Query all samples in range (no limit).
+	samples, err := r.agentDB.QueryMetrics(context.Background(), since, until, 0)
+	if err != nil {
+		return nil, fmt.Errorf("query metrics: %w", err)
+	}
+
+	total := len(samples)
+
+	// Downsample: target ~360 points max.
+	const maxPoints = 360
+	step := 1
+	if total > maxPoints {
+		step = total / maxPoints
+	}
+
+	points := make([]natsrpc.MetricPoint, 0, min(total, maxPoints+1))
+	for i := 0; i < total; i += step {
+		s := samples[i]
+		points = append(points, natsrpc.MetricPoint{
+			T:             s.Timestamp.UTC().Format(time.RFC3339),
+			CPU:           s.CPUPercent,
+			RSSMB:         s.RSSMB,
+			HeapMB:        s.HeapAllocMB,
+			FDUsed:        s.FDUsed,
+			FDLimit:       s.FDLimit,
+			MemTotalMB:    s.MemTotalMB,
+			MemAvailMB:    s.MemAvailMB,
+			Goroutines:    s.Goroutines,
+			ActiveWorkers: s.ActiveWorkers,
+			Capacity:      s.ChunkParallelism,
+		})
+	}
+
+	return natsrpc.MetricsResponse{
+		Range:        req.Range,
+		Since:        since.UTC().Format(time.RFC3339),
+		Until:        until.UTC().Format(time.RFC3339),
+		TotalSamples: total,
+		Returned:     len(points),
+		Points:       points,
+	}, nil
+}
+
+// handleGroupMetrics returns the group-level chunk backlog from JetStream
+// consumer state. All agents in the same group return identical numbers
+// because they share a stream — the operator (or a Prometheus HPA pipeline
+// scraping any one pod) can read this off any agent and decide whether to
+// scale the deployment up or down.
+//
+// Returns the GroupMetrics struct directly so the response Data field is
+// the metrics payload as JSON.
+func (r *Runner) handleGroupMetrics(ctx context.Context, method string, data []byte) (any, error) {
+	collector := r.groupMetrics.Load()
+	if collector == nil {
+		return nil, fmt.Errorf("group metrics not initialised (NATS not yet ready)")
+	}
+	return collector.Get(ctx), nil
+}
+
+// --- JetStream Work Distribution ---
+
+// startJetStreamWorkers initialises the JetStream worker pool that replaces
+// HTTP polling for scan/enumeration work distribution. It uses the group-level
+// stream (NATSCredentials.Stream) with a FilterSubject scoped to work
+// notifications (groupPrefix.work.>).
+func (r *Runner) startJetStreamWorkers() error {
+	creds := r.GetNATSCredentials()
+	if creds == nil || creds.Stream == "" {
+		return fmt.Errorf("NATS stream not provided by server")
+	}
+
+	r.natsConnMu.Lock()
+	nc := r.natsConn
+	r.natsConnMu.Unlock()
+	if nc == nil {
+		return fmt.Errorf("NATS connection not available")
+	}
+
+	// Auto-detect chunk parallelism if not explicitly overridden.
+	// 0 means auto-detect (neither env var nor CLI flag was set).
+	chunkParallelism := r.options.ChunkParallelism
+	source := "user-override"
+	if chunkParallelism == 0 {
+		result := resourceprofile.ComputeChunkParallelism(r.options.ScanParallelism)
+		chunkParallelism = result.ChunkParallelism
+		r.options.ChunkParallelism = chunkParallelism
+		source = "auto-detect"
+		resourceprofile.LogAutoDetectResult(result, source)
+	} else {
+		slog.Info("chunk parallelism override",
+			"chunk_parallelism", chunkParallelism,
+			"source", source,
+		)
+	}
+
+	// Enumeration semaphore: resizable + adaptive scaler.
+	chunkSem := resourceprofile.NewResizableSemaphore(chunkParallelism, resourceprofile.MaxParallelism)
+	chunkScaler := resourceprofile.NewScaler(chunkSem)
+	r.chunkSem.Store(chunkSem)
+	r.chunkScaler.Store(chunkScaler)
+
+	// Scan semaphore: pinned at NumCPU. Initial == max so Resize is a no-op.
+	scanChunkParallelism := max(runtime.GOMAXPROCS(0), 1)
+	r.scanSem.Store(resourceprofile.NewResizableSemaphore(scanChunkParallelism, scanChunkParallelism))
+
+	consumerName := fmt.Sprintf("work-%s", r.options.AgentId)
+	pool, err := natsrpc.NewWorkerPool(nc, creds.Stream, consumerName, creds.GroupPrefix, r.options.ScanParallelism, r.processWorkMessage)
+	if err != nil {
+		return fmt.Errorf("create worker pool: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.jsPool.Store(pool)
+	r.jsCancel.Store(&cancel)
+	pool.Run(ctx)
+
+	// Start adaptive scaler control loop in background.
+	go chunkScaler.Run(ctx)
+
+	// Initialise group metrics collector. JetStream handle, stream, and the
+	// local work consumer name are all known at this point.
+	r.groupMetrics.Store(natsrpc.NewGroupMetricsCollector(pool.JS(), creds.Stream, consumerName, 5*time.Second))
+
+	r.logHelper("INFO", fmt.Sprintf("JetStream workers started (scan_parallelism=%d, scan_chunk_parallelism=%d, enum_chunk_parallelism=%d, source=%s, stream=%s, consumer=%s, filter=%s.work.>)",
+		r.options.ScanParallelism, scanChunkParallelism, chunkParallelism, source, creds.Stream, consumerName, creds.GroupPrefix))
+
+	return nil
+}
+
+// processWorkMessage handles a single work message from the JetStream work
+// stream. It sets up the chunk consumer and dispatches to the appropriate
+// execution function (nuclei scan or enumeration).
+func (r *Runner) processWorkMessage(ctx context.Context, msg jetstream.Msg, work *natsrpc.WorkMessage) error {
+	switch work.Type {
+	case "scan":
+		return r.processJetStreamScan(ctx, work)
+	case "enumeration":
+		return r.processJetStreamEnumeration(ctx, work)
+	default:
+		// Bad message — terminate immediately so it's never redelivered.
+		slog.Error("jetstream: skipping work message with unknown type",
+			"type", work.Type,
+			"id", work.ScanID,
+			"chunk_subject", work.ChunkSubject,
+		)
+		_ = msg.Term()
+		return nil // return nil so the worker doesn't Nak on top of Term
+	}
+}
+
+func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMessage) error {
+	r.logHelper("INFO", fmt.Sprintf("JetStream: processing scan %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
+
+	if r.agentDB != nil {
+		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
+	}
+
+	err := func() error {
+		// Set up scan log batcher
+		var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
+		if scanlog.IsLogUploadEnabled() {
+			scanBatcher = scanlog.NewScanLogBatcher(work.ScanID, r.options.TeamID)
+			defer func() {
+				scanBatcher.Stop()
+				scanBatcher.WaitDone()
+			}()
+		}
+
+		// Consume chunks from the group stream, filtered by chunk subject
+		creds := r.GetNATSCredentials()
+		chunkConsumer := work.ChunkConsumer
+		if chunkConsumer == "" {
+			chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
+		}
+		pool := r.jsPool.Load()
+		if pool == nil {
+			return fmt.Errorf("jetstream pool not initialized")
+		}
+		scanSem := r.scanSem.Load()
+		if scanSem == nil {
+			return fmt.Errorf("scan semaphore not initialized")
+		}
+		// Nuclei runs on a fixed semaphore at NumCPU and intentionally has no
+		// scaler — the warmup window confuses the pressure-based scaler.
+		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, scanSem.Size(),
+			scanSem, nil,
+			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
+				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets, scanBatcher)
+				return nil
+			},
+		)
+	}()
+
+	if r.agentDB != nil {
+		status := "completed"
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				status = "canceled"
+			} else {
+				status = "failed"
+			}
+		}
+		_ = r.agentDB.FinishTask(context.Background(), work.ScanID, status)
+	}
+	return err
+}
+
+func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.WorkMessage) error {
+	r.logHelper("INFO", fmt.Sprintf("JetStream: processing enumeration %s (chunk_subject=%s)", work.ScanID, work.ChunkSubject))
+
+	if r.agentDB != nil {
+		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "enumeration", TaskID: work.ScanID})
+	}
+
+	err := func() error {
+		creds := r.GetNATSCredentials()
+		chunkConsumer := work.ChunkConsumer
+		if chunkConsumer == "" {
+			chunkConsumer = fmt.Sprintf("chunks-%s", work.ScanID)
+		}
+		pool := r.jsPool.Load()
+		if pool == nil {
+			return fmt.Errorf("jetstream pool not initialized")
+		}
+		// Convert typed-nil *Scaler to interface-nil so the nil-guard inside
+		// ConsumeChunks works correctly. A typed-nil pointer wrapped in an
+		// interface is non-nil and would panic on method call.
+		var scaler natsrpc.ChunkScaler
+		if s := r.chunkScaler.Load(); s != nil {
+			scaler = s
+		}
+		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, r.options.ChunkParallelism,
+			r.chunkSem.Load(), scaler,
+			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
+				// Steps can come from the work message or from the chunk's enrichment config.
+				// The server puts enrichment_steps in the chunk's EnumerationConfiguration JSON.
+				steps := work.Steps
+				if len(steps) == 0 && chunk.EnumConfig != "" {
+					enrichmentSteps := gjson.Get(chunk.EnumConfig, "enrichment_steps").String()
+					if enrichmentSteps != "" {
+						steps = strings.Split(enrichmentSteps, ",")
+					}
+				}
+				r.executeEnumeration(ctx, work.ScanID, chunk.ChunkID, steps, chunk.Targets)
+				return nil
+			},
+		)
+	}()
+
+	if r.agentDB != nil {
+		status := "completed"
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				status = "canceled"
+			} else {
+				status = "failed"
+			}
+		}
+		_ = r.agentDB.FinishTask(context.Background(), work.ScanID, status)
+	}
+	return err
+}
+
 // Run starts the agent
 func (r *Runner) Run(ctx context.Context) error {
-	// Recommend the time to use on platform dashboard to schedule the scans
-	r.logHelper("INFO", "platform dashboard uses UTC timezone")
-	now := time.Now().UTC()
-	recommendedTime := now.Add(5 * time.Minute)
-	r.logHelper("INFO", fmt.Sprintf("recommended time to schedule scans (UTC): %s", recommendedTime.Format("2006-01-02 03:04:05 PM MST")))
+	for {
+		var infoMessage strings.Builder
+		fmt.Fprintf(&infoMessage, "pd-agent %s — running in agent mode", Version)
+		if r.options.AgentId != "" {
+			fmt.Fprintf(&infoMessage, " with id %s", r.options.AgentId)
+		}
+		if len(r.options.AgentTags) > 0 {
+			fmt.Fprintf(&infoMessage, " (tags: [%s])", strings.Join(r.options.AgentTags, ", "))
+		} else {
+			infoMessage.WriteString(" (tags: [])")
+		}
+		if r.options.AgentNetwork != "" {
+			fmt.Fprintf(&infoMessage, " (network: %s)", r.options.AgentNetwork)
+		}
 
-	var infoMessage strings.Builder
-	infoMessage.WriteString("running in agent mode")
-	if r.options.AgentId != "" {
-		infoMessage.WriteString(fmt.Sprintf(" with id %s", r.options.AgentId))
-	}
-	if len(r.options.AgentTags) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (tags: [%s])", strings.Join(r.options.AgentTags, ", ")))
-	} else {
-		infoMessage.WriteString(" (tags: [])")
-	}
-	if len(r.options.AgentNetworks) > 0 {
-		infoMessage.WriteString(fmt.Sprintf(" (networks: [%s])", strings.Join(r.options.AgentNetworks, ", ")))
-	} else {
-		infoMessage.WriteString(" (networks: [])")
-	}
+		r.logHelper("INFO", infoMessage.String())
 
-	r.logHelper("INFO", infoMessage.String())
+		if err := r.agentMode(ctx); err != nil {
+			return err
+		}
 
-	return r.agentMode(ctx)
+		if !r.restartRequested.Load() {
+			return nil
+		}
+
+		r.logHelper("INFO", "restart: reinitializing agent...")
+		r.resetForRestart()
+	}
+}
+
+func (r *Runner) resetForRestart() {
+	r.restartRequested.Store(false)
+
+	// Clear NATS state so the next credential receipt triggers a fresh startNATSRPC
+	r.natsConnMu.Lock()
+	r.natsConn = nil
+	r.natsSubs = nil
+	r.natsStarted = false
+	r.natsConnMu.Unlock()
+
+	// Force isNew=true path in inFunctionTickCallback
+	r.natsCredsMu.Lock()
+	r.natsCreds = nil
+	r.natsCredsMu.Unlock()
+
+	r.ctx = nil
+	r.cancelCtx = nil
+	r.jsPool.Store(nil)
+	r.jsCancel.Store(nil)
+	r.scanSem.Store(nil)
+	r.chunkSem.Store(nil)
+	r.chunkScaler.Store(nil)
+	r.groupMetrics.Store(nil)
+
+	isRegistered = false
 }
 
 // agentMode runs the agent in monitoring mode
 func (r *Runner) agentMode(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
+	r.ctx = ctx
+	r.cancelCtx = cancel
+
+	var agentLogWriter *agentdb.LogWriter
+
+	// Optional Prometheus HTTP server for HPA scraping (off unless
+	// PDCP_METRICS_ADDR is set). Started early so /healthz is reachable
+	// before the JS workers come up.
+	promServer, err := r.startPrometheusServer(ctx)
+	if err != nil {
+		slog.Warn("prometheus: failed to start", "error", err)
+	}
+
 	defer func() {
 		cancel()
-		// Ensure batcher is stopped on shutdown
-		if r.logBatcher != nil {
-			r.logBatcher.Stop()
-			r.logBatcher.WaitDone()
+		// Stop JetStream workers first (finish in-progress scans)
+		if jsCancel := r.jsCancel.Load(); jsCancel != nil {
+			(*jsCancel)()
 		}
+		if pool := r.jsPool.Load(); pool != nil {
+			pool.Stop()
+		}
+		if promServer != nil {
+			shutCtx, shutCancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = promServer.Shutdown(shutCtx)
+			shutCancel()
+		}
+		// Drain NATS connection on shutdown
+		r.stopNATSRPC()
+		// Stop LogWriter so shutdown logs are flushed.
+		// StopLogWriter clears the writer first under mutex, then stops it,
+		// so late writers fall back to the synchronous store path.
+		if dbWriterInstance != nil {
+			dbWriterInstance.StopLogWriter()
+		}
+		agentLogWriter = nil
+		// DB is NOT closed here — it stays open across restarts and is closed
+		// in main() after Run() returns. This ensures panic recovery in main()
+		// can still write to the DB.
 	}()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	// Upsert agent info and start DB truncator.
+	if r.agentDB != nil {
+		hostname, _ := os.Hostname()
+		netInfo := agentdb.DetectNetInfo()
+		if err := r.agentDB.UpsertAgentInfo(ctx, &agentdb.AgentInfo{
+			AgentID:      r.options.AgentId,
+			AgentName:    r.options.AgentName,
+			AgentNetwork: r.options.AgentNetwork,
+			Version:      Version,
+			OS:           runtime.GOOS,
+			Arch:         runtime.GOARCH,
+			NumCPU:       runtime.NumCPU(),
+			Hostname:     hostname,
+			PID:          os.Getpid(),
+			NetworkInfo:  netInfo,
+			StartupArgs:  agentdb.MaskArgs(os.Args),
+			StartupEnv:   agentdb.MaskEnv(),
+			StartedAt:    r.agentStartTime,
+			UpdatedAt:    time.Now(),
+		}); err != nil {
+			slog.Warn("agentdb: failed to upsert agent info", "error", err)
+		}
 
+		caps, err := agentdb.LoadSizeCaps()
+		if err != nil {
+			slog.Warn("agentdb: invalid size cap env, using defaults", "error", err)
+		}
+		if sqlStore, ok := r.agentDB.(*agentdb.SQLiteStore); ok {
+			go agentdb.NewTruncator(sqlStore, caps.LogCapBytes, caps.MetricCapBytes).Run(ctx)
+
+			// Start async log writer. Runs independently of ctx so shutdown
+			// logs are captured. Stopped explicitly in the defer above.
+			agentLogWriter = agentdb.NewLogWriter(sqlStore)
+			go agentLogWriter.Run()
+			if dbWriterInstance != nil {
+				dbWriterInstance.SetStore(sqlStore)
+				dbWriterInstance.SetLogWriter(agentLogWriter)
+			}
+		}
+	}
+
+	// Start resource profiler — samples every 1m for calibration data.
+	// The activeWorkers function is initially a no-op; it gets wired to the
+	// WorkerPool once JetStream workers start (via onNATSCredentialsReceived).
+	resourceprofile.LogStartupResources()
+	profiler := resourceprofile.New(1*time.Minute, func() int32 {
+		// Report chunk-level concurrency (active scans + enrichments), not work-message count.
+		var n int32
+		if sem := r.scanSem.Load(); sem != nil {
+			n += int32(sem.InUse())
+		}
+		if sem := r.chunkSem.Load(); sem != nil {
+			n += int32(sem.InUse())
+		}
+		return n
+	}, resourceprofile.WithMetricsHook(func(snap resourceprofile.MetricSnapshot) {
+		if r.agentDB == nil {
+			return
+		}
+		_ = r.agentDB.InsertMetric(context.Background(), &agentdb.MetricSample{
+			Timestamp:        time.Now(),
+			CPUPercent:       snap.CPUPercent,
+			RSSMB:            snap.RSSMB,
+			HeapAllocMB:      snap.HeapAllocMB,
+			HeapSysMB:        snap.HeapSysMB,
+			FDUsed:           snap.FDUsed,
+			FDLimit:          snap.FDLimit,
+			MemTotalMB:       snap.MemTotalMB,
+			MemAvailMB:       snap.MemAvailMB,
+			Goroutines:       snap.Goroutines,
+			ActiveWorkers:    snap.ActiveWorkers,
+			ChunkParallelism: r.options.ChunkParallelism,
+		})
+	}))
+	go profiler.Run(ctx)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		if err := r.In(ctx); err != nil {
 			r.logHelper("FATAL", fmt.Sprintf("error registering agent: %v", err))
 			os.Exit(1)
 		}
-	}()
+	})
 
-	go r.monitorScans(ctx)
-	go r.monitorEnumerations(ctx)
+	// JetStream workers are started via onNATSCredentialsReceived
+	r.logHelper("INFO", "using JetStream for work distribution")
+
+	// After 60s of healthy uptime, drop the .old self-update backup. If the
+	// agent dies before this fires (panic, NATS unreachable, etc.) the backup
+	// stays so an operator can revert manually.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(60 * time.Second):
+			selfupdate.CleanupOldBinary()
+		}
+	}()
 
 	defer func() {
 		wg.Wait()
@@ -679,575 +1610,28 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	return nil
 }
 
-// monitorScans periodically monitors and processes scans
-func (r *Runner) monitorScans(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if err := r.getScans(ctx); err != nil {
-				r.logHelper("ERROR", fmt.Sprintf("Error getting scans: %v", err))
-			}
-			time.Sleep(time.Minute)
-		}
-	}
-}
-
-// monitorEnumerations periodically monitors and processes enumerations
-func (r *Runner) monitorEnumerations(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-			if err := r.getEnumerations(ctx); err != nil {
-				r.logHelper("ERROR", fmt.Sprintf("Error getting enumerations: %v", err))
-			}
-			time.Sleep(time.Minute)
-		}
-	}
-}
-
-// getScans fetches and processes scans from the API
-func (r *Runner) getScans(ctx context.Context) error {
-	r.logHelper("VERBOSE", "Retrieving scans...")
-	apiURL := fmt.Sprintf("%s/v1/scans", pkg.PCDPApiServer)
-
-	awg, err := syncutil.New(syncutil.WithSize(r.options.ScanParallelism))
-	if err != nil {
-		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
-		return err
-	}
-
-	limit := 100
-	offset := 0
-	totalPages := 1
-	currentPage := 1
-
-	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
-		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
-		if resp.Error != nil {
-			return resp.Error
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-		}
-
-		result := gjson.ParseBytes(resp.Body)
-
-		// Update totalPages on the first iteration
-		if currentPage == 1 {
-			totalPages = int(result.Get("total_pages").Int())
-			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
-		}
-
-		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
-
-		// Process scans in parallel
-		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			id := value.Get("scan_id").String()
-			if id == "" {
-				return true
-			}
-
-			// Skip scans in finished state
-			status := value.Get("status").String()
-			if strings.EqualFold(status, "finished") {
-				return true
-			}
-
-			// Capture all data from gjson.Result before passing to goroutine
-			scanName := value.Get("name").String()
-			agentId := value.Get("agent_id").String()
-			agentTags := value.Get("agent_tags")
-			agentNetworks := value.Get("agent_networks")
-			startTime := value.Get("start_time").String()
-			scheduleData := value.Get("schedule")
-
-			var templates []string
-			value.Get("public_templates").ForEach(func(key, value gjson.Result) bool {
-				templates = append(templates, value.String())
-				return true
-			})
-
-			// If no templates specified, use all default nuclei templates
-			if len(templates) == 0 {
-				defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-				if defaultTemplateDir != "" {
-					allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-					if err == nil && len(allTemplates) > 0 {
-						templates = allTemplates
-						slog.Info("No templates specified, using all default nuclei templates", "scan_id", id, "template_count", len(allTemplates), "template_dir", defaultTemplateDir)
-					} else if err != nil {
-						slog.Warn("Failed to get default nuclei templates", "scan_id", id, "template_dir", defaultTemplateDir, "error", err)
-					}
-				}
-			}
-
-			agentBehavior := value.Get("agent_behavior").String()
-
-			// Early skip checks that don't require API calls
-			if r.shouldSkipTask("scan", id, scanName, agentId, agentTags, agentNetworks) {
-				return true
-			}
-
-			// Add to wait group and process in parallel
-			awg.Add()
-			go func(scanID, name, agentID string, tags, networks gjson.Result, startTimeStr string, schedule gjson.Result, tmpls []string, behavior string) {
-				defer awg.Done()
-
-				// Parse schedule and start time
-				var targetExecutionTime time.Time
-				if startTimeStr != "" {
-					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
-					if err != nil {
-						r.logHelper("ERROR", fmt.Sprintf("Error parsing start time: %v", err))
-						return
-					}
-					targetExecutionTime = parsedStartTime
-				}
-
-				if schedule.Exists() {
-					nextRun := schedule.Get("schedule_next_run").String()
-					if nextRun != "" {
-						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-						if err != nil {
-							r.logHelper("ERROR", fmt.Sprintf("Error parsing next run time: %v", err))
-							return
-						}
-						if !targetExecutionTime.IsZero() {
-							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-						} else {
-							targetExecutionTime = nextRunTime
-						}
-					}
-
-					now := time.Now().UTC()
-
-					// Skip if the combined execution time is in the future
-					// we accept up to 10 minutes before/after the scheduled time
-					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-					if !targetExecutionTime.IsZero() && !isInRange {
-						r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
-						return
-					}
-				}
-
-				metaId := fmt.Sprintf("%s-%s", scanID, targetExecutionTime)
-
-				// First check completed and pending tasks
-				if completedTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already completed recently\n", name))
-					return
-				}
-
-				if pendingTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping scan \"%s\" as it's already in progress\n", name))
-					return
-				}
-
-				// Fetch minimal config first to compute hash
-				scanConfig, err := r.fetchScanConfig(scanID)
-				if err != nil {
-					r.logHelper("ERROR", fmt.Sprintf("Error fetching scan config for ID %s: %v", scanID, err))
-					return
-				}
-
-				// Continue with full config processing
-				scanConfigIds := make(map[string]string)
-				gjson.Parse(scanConfig).Get("scan_config_ids").ForEach(func(key, value gjson.Result) bool {
-					id := value.Get("id").String()
-					if id != "" {
-						scanConfigIds[id] = ""
-					}
-					return true
-				})
-
-				for id := range scanConfigIds {
-					scanConfig, err := r.fetchSingleConfig(id)
-					if err != nil {
-						r.logHelper("ERROR", fmt.Sprintf("Error fetching scan config for ID %s: %v", id, err))
-					}
-					scanConfigIds[id] = scanConfig
-				}
-
-				// Merge all configs into one
-				var finalConfig string
-				if len(scanConfigIds) > 0 {
-					var mergedConfig strings.Builder
-					for _, scanConfig := range scanConfigIds {
-						// Parse the JSON to get the config field
-						configValue := gjson.Get(scanConfig, "config").String()
-						if configValue != "" {
-							// Decode base64
-							decoded, err := base64.StdEncoding.DecodeString(configValue)
-							if err != nil {
-								r.logHelper("ERROR", fmt.Sprintf("Error decoding base64 config: %v", err))
-								continue
-							}
-							mergedConfig.Write(decoded)
-							mergedConfig.WriteString("\n")
-						}
-					}
-					finalConfig = mergedConfig.String()
-				}
-
-				// Fetch assets if enumeration ID is defined
-				var enumerationIDs []string
-				gjson.Parse(scanConfig).Get("enumeration_ids").ForEach(func(key, value gjson.Result) bool {
-					id := value.Get("id").String()
-					if id != "" {
-						enumerationIDs = append(enumerationIDs, id)
-					}
-					return true
-				})
-
-				// Get assets from enumeration id
-				var assets []string
-				for _, enumerationID := range enumerationIDs {
-					asset, err := r.fetchAssets(enumerationID)
-					if err != nil {
-						r.logHelper("ERROR", fmt.Sprintf("Error fetching assets for enumeration ID %s: %v", enumerationID, err))
-					}
-					assets = append(assets, strings.Split(string(asset), "\n")...)
-				}
-
-				// Get assets from scan config
-				gjson.Parse(scanConfig).Get("targets").ForEach(func(key, value gjson.Result) bool {
-					assets = append(assets, value.String())
-					return true
-				})
-
-				isDistributed := behavior == "distribute"
-
-				// Compute hash of the entire configuration
-				configHash := computeScanConfigHash(finalConfig, tmpls, assets)
-
-				// Skip if this exact configuration was already executed
-				if r.localCache.HasScanBeenExecuted(scanID, configHash) && !schedule.Exists() {
-					slog.Debug("skipping scan as it was already executed with same configuration", "name", name)
-					return
-				}
-
-				slog.Info("scan enqueued", "scan_name", name, "scan_id", scanID)
-
-				// DEBUG: Print scan configuration and naabu results, then exit
-				fmt.Println("=== DEBUG: Scan Configuration ===")
-				fmt.Printf("Scan ID: %s\n", scanID)
-				fmt.Printf("Scan Name: %s\n", name)
-				fmt.Printf("\nTargets (%d):\n", len(assets))
-				for i, target := range assets {
-					fmt.Printf("  [%d] %s\n", i+1, target)
-				}
-
-				// If no templates specified, get all default nuclei templates
-				templatesToUse := tmpls
-				if len(tmpls) == 0 {
-					fmt.Printf("\nTemplates: NONE SPECIFIED - Using all default nuclei templates\n")
-					// Get all templates from nuclei template directory
-					defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-					if defaultTemplateDir != "" {
-						allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-						if err == nil {
-							templatesToUse = allTemplates
-							fmt.Printf("Found %d default templates in %s\n", len(allTemplates), defaultTemplateDir)
-						} else {
-							fmt.Printf("Error getting default templates: %v\n", err)
-						}
-					} else {
-						fmt.Printf("Warning: Could not determine nuclei template directory\n")
-					}
-				} else {
-					fmt.Printf("\nTemplates (%d):\n", len(tmpls))
-					for i, tmpl := range tmpls {
-						fmt.Printf("  [%d] %s\n", i+1, tmpl)
-					}
-				}
-
-				// Perform naabu scan for debugging
-				if len(assets) > 0 && len(templatesToUse) > 0 {
-					tmpInputFile, err := fileutil.GetTempFileName()
-					if err == nil {
-						defer func() {
-							_ = os.RemoveAll(tmpInputFile)
-						}()
-						targetsContent := strings.Join(assets, "\n")
-						_ = os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm)
-
-						tmpTemplatesFile, err := fileutil.GetTempFileName()
-						if err == nil {
-							defer func() {
-								_ = os.RemoveAll(tmpTemplatesFile)
-							}()
-							templatesContent := strings.Join(templatesToUse, "\n")
-							_ = os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm)
-
-							filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "debug")
-							fmt.Println("\n=== DEBUG: Naabu Results ===")
-							if err != nil {
-								fmt.Printf("Error: %v\n", err)
-							} else {
-								fmt.Printf("Extracted Ports: %v\n", extractedPorts)
-								fmt.Printf("\nTargets with Open Ports (%d):\n", len(filteredTargets))
-								for i, target := range filteredTargets {
-									fmt.Printf("  [%d] %s\n", i+1, target)
-								}
-								fmt.Printf("\nTargets without Open Ports (%d):\n", len(assets)-len(filteredTargets))
-								targetsWithPorts := make(map[string]struct{})
-								for _, t := range filteredTargets {
-									targetsWithPorts[t] = struct{}{}
-								}
-								count := 0
-								for _, target := range assets {
-									if _, has := targetsWithPorts[target]; !has {
-										count++
-										fmt.Printf("  [%d] %s\n", count, target)
-									}
-								}
-							}
-						}
-					}
-				} else {
-					fmt.Println("\n=== DEBUG: Skipping naabu scan (no targets or templates) ===")
-				}
-				fmt.Println("\n=== DEBUG: Scan analysis complete, continuing with normal processing ===")
-				// END DEBUG CODE
-
-				_ = pendingTasks.Set(metaId, struct{}{})
-
-				if isDistributed {
-					// Process distributed scan chunks
-					r.elaborateScanChunks(ctx, scanID, metaId, finalConfig, tmpls, assets)
-				} else {
-					// Process non-distributed scan
-					r.elaborateScan(ctx, scanID, metaId, finalConfig, tmpls, assets)
-				}
-
-				// After queueing the task, mark it as executed
-				r.localCache.MarkScanExecuted(scanID, configHash)
-			}(id, scanName, agentId, agentTags, agentNetworks, startTime, scheduleData, templates, agentBehavior)
-
-			return true
-		})
-
-		currentPage++
-		offset += limit
-	}
-
-	// Wait for all scans to complete
-	r.logHelper("VERBOSE", "Waiting for all scans to complete...")
-	awg.Wait()
-
-	return nil
-}
-
-// getEnumerations fetches and processes enumerations from the API
-func (r *Runner) getEnumerations(ctx context.Context) error {
-	r.logHelper("VERBOSE", "Retrieving enumerations...")
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate", pkg.PCDPApiServer)
-
-	awg, err := syncutil.New(syncutil.WithSize(r.options.EnumerationParallelism))
-	if err != nil {
-		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
-		return err
-	}
-
-	limit := 100
-	offset := 0
-	totalPages := 1
-	currentPage := 1
-
-	for currentPage <= totalPages {
-		paginatedURL := fmt.Sprintf("%s?limit=%d&offset=%d&is_internal=true", apiURL, limit, offset)
-		resp := r.makeRequest(ctx, http.MethodGet, paginatedURL, nil, nil)
-		if resp.Error != nil {
-			return resp.Error
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-		}
-
-		result := gjson.ParseBytes(resp.Body)
-
-		// Update totalPages on the first iteration
-		if currentPage == 1 {
-			totalPages = int(result.Get("total_pages").Int())
-			r.logHelper("VERBOSE", fmt.Sprintf("Total pages: %d", totalPages))
-		}
-
-		r.logHelper("VERBOSE", fmt.Sprintf("Processing page %d of %d\n", currentPage, totalPages))
-
-		// Process enumerations in parallel
-		result.Get("data").ForEach(func(key, value gjson.Result) bool {
-			id := value.Get("id").String()
-			if id == "" {
-				return true
-			}
-
-			// Skip enumerations in finished state
-			status := value.Get("status").String()
-			if strings.EqualFold(status, "finished") {
-				return true
-			}
-
-			// Capture all data from gjson.Result before passing to goroutine
-			enumName := value.Get("name").String()
-			agentId := value.Get("agent_id").String()
-			agentTags := value.Get("agent_tags")
-			agentNetworks := value.Get("agent_networks")
-			startTime := value.Get("start_time").String()
-			scheduleData := value.Get("schedule")
-			agentBehavior := value.Get("agent_behavior").String()
-
-			// Early skip checks that don't require API calls
-			if r.shouldSkipTask("enumeration", id, enumName, agentId, agentTags, agentNetworks) {
-				return true
-			}
-
-			// Add to wait group and process in parallel
-			awg.Add()
-			go func(enumID, name, agentID string, tags, networks gjson.Result, startTimeStr string, schedule gjson.Result, behavior string) {
-				defer awg.Done()
-
-				// Parse schedule and start time
-				var targetExecutionTime time.Time
-				if startTimeStr != "" {
-					parsedStartTime, err := time.Parse(time.RFC3339, startTimeStr)
-					if err != nil {
-						r.logHelper("ERROR", fmt.Sprintf("Error parsing start time: %v", err))
-						return
-					}
-					targetExecutionTime = parsedStartTime
-				}
-
-				if schedule.Exists() {
-					nextRun := schedule.Get("schedule_next_run").String()
-					if nextRun != "" {
-						nextRunTime, err := time.Parse(time.RFC3339, nextRun)
-						if err != nil {
-							r.logHelper("ERROR", fmt.Sprintf("Error parsing next run time: %v", err))
-							return
-						}
-						if !targetExecutionTime.IsZero() {
-							targetExecutionTime = targetExecutionTime.Add(nextRunTime.Sub(nextRunTime.Truncate(24 * time.Hour)))
-						} else {
-							targetExecutionTime = nextRunTime
-						}
-					}
-
-					now := time.Now().UTC()
-
-					// Skip if the combined execution time is in the future
-					// we accept up to 10 minutes before/after the scheduled time
-					isInRange := targetExecutionTime.After(now.Add(-10*time.Minute)) && targetExecutionTime.Before(now.Add(10*time.Minute))
-
-					if !targetExecutionTime.IsZero() && !isInRange {
-						r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's scheduled for %s (current time: %s)\n", name, targetExecutionTime, now))
-						return
-					}
-				}
-
-				metaId := fmt.Sprintf("%s-%s", enumID, targetExecutionTime)
-
-				// First check completed and pending tasks
-				if completedTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already completed recently\n", name))
-					return
-				}
-
-				if pendingTasks.Has(metaId) {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it's already in progress\n", name))
-					return
-				}
-
-				// Fetch minimal config first
-				enumerationConfig, err := r.fetchEnumerationConfig(enumID)
-				if err != nil {
-					r.logHelper("ERROR", fmt.Sprintf("Error fetching enumeration config for ID %s: %v", enumID, err))
-					return
-				}
-
-				r.logHelper("VERBOSE", fmt.Sprintf("Before sanitization: %s", enumerationConfig))
-
-				// Sanitize enumeration config (remove unsupported steps)
-				enumerationConfig = r.sanitizeEnumerationConfig(enumerationConfig, name)
-
-				// Get basic info needed for hash
-				var assets []string
-				gjson.Parse(enumerationConfig).Get("enrichment_inputs").ForEach(func(key, value gjson.Result) bool {
-					assets = append(assets, value.String())
-					return true
-				})
-				gjson.Parse(enumerationConfig).Get("root_domains").ForEach(func(key, value gjson.Result) bool {
-					assets = append(assets, value.String())
-					return true
-				})
-
-				var steps []string
-				gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
-					steps = append(steps, value.String())
-					return true
-				})
-
-				configHash := computeEnumerationConfigHash(steps, assets)
-
-				// Check cache before proceeding
-				if r.localCache.HasEnumerationBeenExecuted(enumID, configHash) && !schedule.Exists() {
-					r.logHelper("VERBOSE", fmt.Sprintf("skipping enumeration \"%s\" as it was already executed with same configuration\n", name))
-					return
-				}
-
-				r.logHelper("INFO", fmt.Sprintf("enumeration \"%s\" enqueued...\n", name))
-
-				isDistributed := behavior == "distribute"
-
-				// Check if passive discovery is enabled for this enumeration
-				// hasPassiveDiscovery := value.Get("worker_passive_discover").Bool()
-				// if hasPassiveDiscovery && r.options.PassiveDiscovery {
-				// 	discoveredIPs := PopAllPassiveDiscoveredIPs()
-				// 	if len(discoveredIPs) > 0 {
-				// 		slog.Info("Adding %d passively discovered IPs to enumeration %s: %s", len(discoveredIPs), scanName, strings.Join(discoveredIPs, ","))
-				// 		assets = append(assets, discoveredIPs...)
-				// 	}
-				// }
-
-				_ = pendingTasks.Set(metaId, struct{}{})
-
-				if isDistributed {
-					// Process distributed enumeration chunks
-					r.elaborateEnumerationChunks(ctx, enumID, metaId, steps, assets)
-				} else {
-					// Process non-distributed enumeration
-					r.elaborateEnumeration(ctx, enumID, metaId, steps, assets)
-				}
-
-				// After queueing the task, mark it as executed
-				r.localCache.MarkEnumerationExecuted(enumID, configHash)
-			}(id, enumName, agentId, agentTags, agentNetworks, startTime, scheduleData, agentBehavior)
-
-			return true
-		})
-
-		currentPage++
-		offset += limit
-	}
-
-	// Wait for all enumerations to complete
-	r.logHelper("VERBOSE", "Waiting for all enumerations to complete...")
-	awg.Wait()
-
-	return nil
-}
-
 // executeNucleiScan is the shared implementation for executing nuclei scans
-// using the same logic as pd-agent
-// If scanBatcher is nil, a new batcher will be created for this scan
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+// using the same logic as pd-agent.
+// privateTemplates maps name -> base64-encoded YAML; entries are decoded and
+// written to a per-chunk temp dir, with their paths appended to the templates
+// list passed to nuclei. The temp dir is cleaned up before the function returns.
+// If scanBatcher is nil, a new batcher will be created for this scan.
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates []string, privateTemplates map[string]string, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+	// Resource profiling: snapshot before scan
+	var activeWorkers int32
+	if pool := r.jsPool.Load(); pool != nil {
+		activeWorkers = pool.ActiveWorkers()
+	}
+	startSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "start", activeWorkers)
+	defer func() {
+		var aw int32
+		if pool := r.jsPool.Load(); pool != nil {
+			aw = pool.ActiveWorkers()
+		}
+		endSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "end", aw)
+		resourceprofile.LogScanDelta(startSnap, endSnap)
+	}()
+
 	// Create batcher for this scan if not provided (if log upload is enabled)
 	if scanBatcher == nil && scanlog.IsLogUploadEnabled() {
 		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
@@ -1261,21 +1645,35 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 		}()
 	}
 
-	// If templates are empty, use all default nuclei templates
-	templatesToUse := templates
-	if len(templates) == 0 {
-		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-		if defaultTemplateDir != "" {
-			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-			if err == nil && len(allTemplates) > 0 {
-				templatesToUse = allTemplates
-				slog.Info("No templates specified, using all default nuclei templates",
-					"scan_id", scanID,
-					"chunk_id", metaID,
-					"template_count", len(allTemplates))
-			}
+	// Build the template list from whatever the chunk supplied. We never fall
+	// back to "scan with all default templates" - a chunk that arrives with
+	// no templates of either kind is a server-side bug, not a default-scan
+	// signal, so we error out instead of silently scanning thousands of
+	// templates the platform never asked for.
+	templatesToUse := append([]string(nil), templates...)
+
+	// Materialize private templates to a per-chunk temp dir so the nuclei
+	// binary can load them by path. Cleaned up when the scan returns.
+	if len(privateTemplates) > 0 {
+		paths, cleanup, err := materializePrivateTemplates(scanID, metaID, privateTemplates)
+		if err != nil {
+			slog.Error("Failed to materialize private templates, continuing without them",
+				"scan_id", scanID, "chunk_id", metaID, "error", err)
+		} else {
+			defer cleanup()
+			templatesToUse = append(templatesToUse, paths...)
+			slog.Info("Materialized private templates",
+				"scan_id", scanID, "chunk_id", metaID, "count", len(paths))
 		}
 	}
+
+	if len(templatesToUse) == 0 {
+		slog.Error("Refusing to run nuclei: chunk has no public or private templates",
+			"scan_id", scanID, "chunk_id", metaID,
+			"public_count", len(templates), "private_count", len(privateTemplates))
+		return
+	}
+
 	// Set output directory if agent output is specified
 	var outputDir string
 	if r.options.AgentOutput != "" {
@@ -1347,10 +1745,34 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	// Execute using the same pkg.Run logic as pd-agent
-	r.logHelper("INFO", fmt.Sprintf("Starting nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
-	taskResult, outputFiles, err := pkg.Run(ctx, task)
+	slog.Info("Starting nuclei scan",
+		"scan_id", scanID,
+		"chunk_id", metaID,
+		"targets", len(filteredTargets),
+		"templates", len(templatesToUse),
+		"extracted_ports", extractedPorts,
+	)
+
+	// Hard cap: 20 minutes per chunk. If nuclei hangs or targets are slow,
+	// we abort so the chunk gets nak'd and doesn't block the semaphore forever.
+	scanCtx, scanCancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer scanCancel()
+
+	taskResult, outputFiles, err := pkg.Run(scanCtx, task)
 	if err != nil {
-		r.logHelper("ERROR", fmt.Sprintf("Nuclei scan execution failed: %v", err))
+		if scanCtx.Err() == context.DeadlineExceeded {
+			slog.Error("Nuclei scan timed out (20m hard cap)",
+				"scan_id", scanID,
+				"chunk_id", metaID,
+				"targets", len(filteredTargets),
+			)
+			return
+		}
+		slog.Error("Nuclei scan execution failed",
+			"scan_id", scanID,
+			"chunk_id", metaID,
+			"error", err,
+		)
 		return
 	}
 
@@ -1359,6 +1781,12 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	if len(outputFiles) > 0 {
 		outputFile = outputFiles[0]
 	}
+
+	slog.Info("Nuclei scan completed",
+		"scan_id", scanID,
+		"chunk_id", metaID,
+		"output_files", len(outputFiles),
+	)
 
 	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
 	if scanBatcher != nil && taskResult != nil && outputFile != "" {
@@ -1395,275 +1823,10 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s\nStdout: %s\nStderr: %s", scanID, metaID, taskResult.Stdout, taskResult.Stderr))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	} else {
 		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
 	}
-}
-
-// processChunks is a generic chunk processing method that handles the common logic
-// for pulling chunks, updating status, and executing them
-func (r *Runner) processChunks(ctx context.Context, taskID, taskType string, executeChunk func(ctx context.Context, chunk *TaskChunk) error) {
-	r.logHelper("INFO", fmt.Sprintf("Starting distributed %s processing for %s ID: %s", taskType, taskType, taskID))
-
-	awg, err := syncutil.New(syncutil.WithSize(r.options.ChunkParallelism))
-	if err != nil {
-		r.logHelper("ERROR", fmt.Sprintf("Error creating syncutil: %v", err))
-		return
-	}
-
-	chunkCount := 0
-	for {
-		chunkCount++
-		r.logHelper("INFO", fmt.Sprintf("Fetching chunk #%d for %s ID: %s", chunkCount, taskType, taskID))
-
-		var chunk *TaskChunk
-		var err error
-		maxRetries := 5
-		retryCount := 0
-		lastErr := ""
-
-		// Retry logic for getting chunks
-		for retryCount < maxRetries {
-			chunk, err = r.getTaskChunk(ctx, taskID, false)
-			if err == nil {
-				break
-			}
-			currentErr := err.Error()
-			if currentErr == lastErr {
-				// If we get the same error multiple times, likely the task is complete
-				r.logHelper("INFO", fmt.Sprintf("%s ID %s completed successfully", taskType, taskID))
-				goto Complete
-			}
-			lastErr = currentErr
-			retryCount++
-			if retryCount < maxRetries {
-				time.Sleep(time.Second * 3)
-			}
-		}
-
-		if err != nil {
-			r.logHelper("ERROR", fmt.Sprintf("Failed to get chunk after %d retries: %v", maxRetries, err))
-			break
-		}
-
-		if chunk == nil {
-			r.logHelper("INFO", fmt.Sprintf("No more chunks available for %s ID: %s", taskType, taskID))
-			break
-		}
-
-		currentChunkCount := chunkCount
-		currentChunk := chunk
-
-		// Add chunk to wait group and process in parallel
-		awg.Add()
-		go func(chunkNum int, chunk *TaskChunk) {
-			defer awg.Done()
-
-			r.logHelper("INFO", fmt.Sprintf("Processing chunk #%d (ID: %s) with %d targets",
-				chunkNum,
-				chunk.ChunkID,
-				len(chunk.Targets)))
-
-			// Set initial status to in_progress
-			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, TaskChunkStatusInProgress); err != nil {
-				r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status: %v", taskType, err))
-			} else {
-				r.logHelper("INFO", fmt.Sprintf("Updated chunk %s status to in_progress", chunk.ChunkID))
-			}
-
-			// Start a goroutine to periodically update status (heartbeat)
-			timerCtx, timerCtxCancel := context.WithCancel(context.TODO())
-			go func(ctx context.Context, taskID, chunkID string) {
-				ticker := time.NewTicker(10 * time.Second)
-				defer ticker.Stop()
-
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if err := r.UpdateTaskChunkStatus(ctx, taskID, chunkID, TaskChunkStatusInProgress); err != nil {
-							r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status: %v", taskType, err))
-						} else {
-							r.logHelper("DEBUG", fmt.Sprintf("Updated chunk %s status to in_progress (heartbeat)", chunkID))
-						}
-					}
-				}
-			}(timerCtx, taskID, chunk.ChunkID)
-
-			// Execute the chunk using the provided callback
-			executionErr := executeChunk(ctx, chunk)
-			if executionErr != nil {
-				r.logHelper("ERROR", fmt.Sprintf("Error executing %s chunk: %v", taskType, err))
-			}
-
-			// Stop the heartbeat timer
-			timerCtxCancel()
-			r.logHelper("DEBUG", fmt.Sprintf("Stopped status update timer for chunk %s", chunk.ChunkID))
-
-			// Wait 1 second before marking as complete
-			time.Sleep(time.Second)
-
-			status := TaskChunkStatusAck
-			if executionErr != nil {
-				status = TaskChunkStatusNack
-			}
-
-			// Mark the chunk as completed with ACK
-			if err := r.UpdateTaskChunkStatus(ctx, taskID, chunk.ChunkID, status); err != nil {
-				r.logHelper("ERROR", fmt.Sprintf("Error updating %s chunk status to %s: %v", taskType, status, err))
-			} else {
-				r.logHelper("INFO", fmt.Sprintf("Successfully completed chunk #%d (ID: %s)", chunkNum, chunk.ChunkID))
-			}
-		}(currentChunkCount, currentChunk)
-	}
-
-Complete:
-	// Wait for all chunks to complete
-	r.logHelper("INFO", fmt.Sprintf("Waiting for all chunks to complete for %s ID: %s", taskType, taskID))
-	awg.Wait()
-	r.logHelper("INFO", fmt.Sprintf("Completed processing all chunks for %s ID: %s (total chunks: %d)", taskType, taskID, chunkCount))
-
-	// Mark the task as done
-	_, _ = r.getTaskChunk(ctx, taskID, true)
-}
-
-// elaborateScanChunks processes distributed scan chunks with optimized port scanning
-// Uses the scan configuration (templates and assets) to perform a single port scan upfront,
-// then processes chunks normally, filtering targets based on port scan results
-func (r *Runner) elaborateScanChunks(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	slog.Info("Starting distributed scan processing",
-		"scan_id", scanID,
-		"meta_id", metaID)
-
-	// Create batcher for this scan (if log upload is enabled)
-	var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
-	if scanlog.IsLogUploadEnabled() {
-		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
-		// Defer batcher stop when scan completes
-		defer func() {
-			if scanBatcher != nil {
-				scanBatcher.Stop()
-				scanBatcher.WaitDone() // Wait for any pending uploads
-				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
-			}
-		}()
-	}
-
-	// Step 1: Perform single port scan on all targets from scan configuration
-	targetsWithOpenPorts := make(map[string]struct{})
-	// If templates are empty, try to get all default nuclei templates
-	templatesToUse := templates
-	if len(templates) == 0 {
-		defaultTemplateDir := pkg.GetNucleiDefaultTemplateDir()
-		if defaultTemplateDir != "" {
-			allTemplates, err := getAllNucleiTemplates(defaultTemplateDir)
-			if err == nil && len(allTemplates) > 0 {
-				templatesToUse = allTemplates
-				slog.Info("No templates specified, using all default nuclei templates for port scan",
-					slog.String("scan_id", scanID),
-					slog.Int("template_count", len(allTemplates)))
-			}
-		}
-	}
-	if len(assets) > 0 && len(templatesToUse) > 0 {
-		// Create temporary files for port filtering
-		tmpInputFile, err := fileutil.GetTempFileName()
-		if err != nil {
-			slog.Error("Failed to create temp file for targets",
-				slog.String("scan_id", scanID),
-				slog.Any("error", err))
-			return
-		}
-		defer func() {
-			_ = os.RemoveAll(tmpInputFile)
-		}()
-
-		targetsContent := strings.Join(assets, "\n")
-		if err := os.WriteFile(tmpInputFile, []byte(targetsContent), os.ModePerm); err != nil {
-			slog.Error("Failed to write targets to temp file",
-				slog.String("scan_id", scanID),
-				slog.Any("error", err))
-			return
-		}
-
-		tmpTemplatesFile, err := fileutil.GetTempFileName()
-		if err != nil {
-			slog.Error("Failed to create temp file for templates",
-				slog.String("scan_id", scanID),
-				slog.Any("error", err))
-			return
-		}
-		defer func() {
-			_ = os.RemoveAll(tmpTemplatesFile)
-		}()
-
-		templatesContent := strings.Join(templatesToUse, "\n")
-		if err := os.WriteFile(tmpTemplatesFile, []byte(templatesContent), os.ModePerm); err != nil {
-			slog.Error("Failed to write templates to temp file",
-				slog.String("scan_id", scanID),
-				slog.Any("error", err))
-			return
-		}
-
-		// Perform port scan on all targets
-		filteredTargets, _, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, "pre-scan")
-		if err != nil {
-			slog.Warn("Error filtering targets by template ports, proceeding with all targets", "scan_id", scanID, "error", err)
-			// If port scan fails, proceed with all targets
-			for _, target := range assets {
-				targetsWithOpenPorts[target] = struct{}{}
-			}
-		} else {
-			// Create map of targets with open ports
-			for _, target := range filteredTargets {
-				targetsWithOpenPorts[target] = struct{}{}
-			}
-		}
-	} else {
-		// No targets or templates, all targets will be skipped
-		if len(assets) == 0 {
-			slog.Info("No targets found", "scan_id", scanID)
-		} else if len(templatesToUse) == 0 {
-			slog.Info("No templates found (including default templates)", "scan_id", scanID)
-		}
-	}
-
-	slog.Info("Port scan completed", "scan_id", scanID, "targets_with_open_ports", len(targetsWithOpenPorts), "total_targets", len(assets))
-
-	// Step 2: Use processChunks with a custom executeChunk callback that filters targets
-	// Note: We need to capture targetsWithOpenPorts and config in the closure
-	r.processChunks(ctx, scanID, "scan", func(ctx context.Context, chunk *TaskChunk) error {
-		// Filter chunk targets to only include those with open ports
-		filteredChunkTargets := []string{}
-		for _, target := range chunk.Targets {
-			if _, hasOpenPorts := targetsWithOpenPorts[target]; hasOpenPorts {
-				filteredChunkTargets = append(filteredChunkTargets, target)
-			}
-		}
-
-		// If no targets have open ports, skip nuclei execution
-		// Note: processChunks will have already set status to in_progress, so we'll ACK it
-		if len(filteredChunkTargets) == 0 {
-			slog.Info("Skipping chunk - all targets are unresponsive (no open ports)", "scan_id", scanID, "chunk_id", chunk.ChunkID, "original_target_count", len(chunk.Targets))
-			// Return nil to indicate success (chunk is skipped, not failed)
-			// processChunks will mark it as ACK
-			return nil
-		}
-
-		slog.Info("Processing chunk with filtered targets", "scan_id", scanID, "chunk_id", chunk.ChunkID, "filtered_target_count", len(filteredChunkTargets), "original_target_count", len(chunk.Targets))
-
-		// Execute nuclei scan with filtered targets and shared batcher
-		r.executeNucleiScan(ctx, scanID, chunk.ChunkID, config, chunk.PublicTemplates, filteredChunkTargets, scanBatcher)
-		return nil
-	})
-}
-
-// elaborateScan processes a non-distributed scan using the same logic as pd-agent
-func (r *Runner) elaborateScan(ctx context.Context, scanID, metaID, config string, templates, assets []string) {
-	r.logHelper("INFO", fmt.Sprintf("elaborateScan: scanID=%s, metaID=%s, templates=%d, assets=%d", scanID, metaID, len(templates), len(assets)))
-	r.executeNucleiScan(ctx, scanID, metaID, config, templates, assets, nil)
 }
 
 // executeEnumeration is the shared implementation for executing enumerations
@@ -1724,184 +1887,15 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s\nStdout: %s\nStderr: %s", enumID, metaID, taskResult.Stdout, taskResult.Stderr))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
 	} else {
 		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
 	}
 }
 
-// elaborateEnumerationChunks processes distributed enumeration chunks using the same logic as pd-agent
-func (r *Runner) elaborateEnumerationChunks(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	r.processChunks(ctx, enumID, "enumeration", func(ctx context.Context, chunk *TaskChunk) error {
-		// Execute the chunk using the shared enumeration execution logic
-		r.executeEnumeration(ctx, enumID, chunk.ChunkID, steps, chunk.Targets)
-		return nil
-	})
-}
-
-// elaborateEnumeration processes a non-distributed enumeration
-func (r *Runner) elaborateEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	r.logHelper("INFO", fmt.Sprintf("elaborateEnumeration: enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
-	r.executeEnumeration(ctx, enumID, metaID, steps, assets)
-}
-
-// fetchScanConfig fetches scan configuration
-func (r *Runner) fetchScanConfig(scanID string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/config", pkg.PCDPApiServer, scanID)
-	resp := r.makeRequest(context.Background(), http.MethodGet, apiURL, nil, nil)
-	if resp.Error != nil {
-		return "", resp.Error
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-	}
-
-	return string(resp.Body), nil
-}
-
-// fetchSingleConfig fetches a single scan configuration
-func (r *Runner) fetchSingleConfig(scanConfigId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/scans/config/%s", pkg.PCDPApiServer, scanConfigId)
-	resp := r.makeRequest(context.Background(), http.MethodGet, apiURL, nil, nil)
-	if resp.Error != nil {
-		return "", resp.Error
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-	}
-
-	return string(resp.Body), nil
-}
-
-// fetchAssets fetches assets for an enumeration
-func (r *Runner) fetchAssets(enumerationID string) ([]byte, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/export", pkg.PCDPApiServer, enumerationID)
-	resp := r.makeRequest(context.Background(), http.MethodGet, apiURL, nil, nil)
-	if resp.Error != nil {
-		return nil, resp.Error
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-	}
-
-	return resp.Body, nil
-}
-
-// fetchEnumerationConfig fetches enumeration configuration
-func (r *Runner) fetchEnumerationConfig(enumerationId string) (string, error) {
-	apiURL := fmt.Sprintf("%s/v1/asset/enumerate/%s/config", pkg.PCDPApiServer, enumerationId)
-	resp := r.makeRequest(context.Background(), http.MethodGet, apiURL, nil, nil)
-	if resp.Error != nil {
-		return "", resp.Error
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(resp.Body))
-	}
-
-	return string(resp.Body), nil
-}
-
-// UpdateTaskChunkStatus updates the status of a task chunk (ACK, NACK, or in_progress)
-func (r *Runner) UpdateTaskChunkStatus(ctx context.Context, taskID, chunkID string, status TaskChunkStatus) error {
-	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk/%s", pkg.PCDPApiServer, taskID, chunkID)
-
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
-	if err != nil {
-		return fmt.Errorf("error creating authenticated client: %v", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
-
-	// Add status query parameter
-	q := req.URL.Query()
-	q.Add("status", string(status))
-	req.URL.RawQuery = q.Encode()
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("error sending request: %v", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading response: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	// Parse response to check if ok is true
-	var response struct {
-		OK bool `json:"ok"`
-	}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("error unmarshaling response: %v", err)
-	}
-
-	if !response.OK {
-		return fmt.Errorf("server returned ok=false")
-	}
-
-	return nil
-}
-
-// getTaskChunk fetches a task chunk from the API
-func (r *Runner) getTaskChunk(ctx context.Context, taskID string, done bool) (*TaskChunk, error) {
-	apiURL := fmt.Sprintf("%s/v1/tasks/%s/chunk", pkg.PCDPApiServer, taskID)
-
-	client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
-	if err != nil {
-		return nil, fmt.Errorf("error creating authenticated client: %v", err)
-	}
-
-	if done {
-		apiURL = fmt.Sprintf("%s?done=true", apiURL)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error creating request: %v", err)
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("error sending request: %v", err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("error reading response: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
-	}
-
-	var taskChunk TaskChunk
-	if err := json.Unmarshal(body, &taskChunk); err != nil {
-		return nil, fmt.Errorf("error unmarshaling response: %v", err)
-	}
-
-	return &taskChunk, nil
-}
-
 // In handles agent registration with the punch-hole server
 func (r *Runner) In(ctx context.Context) error {
-	ticker := time.NewTicker(time.Minute)
+	ticker := time.NewTicker(5 * time.Minute)
 	defer func() {
 		ticker.Stop()
 		if err := r.Out(context.TODO()); err != nil {
@@ -1911,18 +1905,20 @@ func (r *Runner) In(ctx context.Context) error {
 		}
 	}()
 
-	// Run first time to register
+	// First call: register the agent. This one is fatal — we need NATS creds.
 	if err := r.inFunctionTickCallback(ctx); err != nil {
 		return err
 	}
 
+	// Subsequent calls are heartbeats. Failures are logged but not fatal —
+	// the agent keeps scanning via NATS even if the HTTP heartbeat is down.
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
 			if err := r.inFunctionTickCallback(ctx); err != nil {
-				return err
+				r.logHelper("WARNING", fmt.Sprintf("/in heartbeat failed (will retry in 5m): %v", err))
 			}
 		}
 	}
@@ -1945,7 +1941,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	// Default to local tags and networks
 	tagsToUse := r.options.AgentTags
-	networksToUse := r.options.AgentNetworks
+	networksToUse := []string{r.options.AgentNetwork}
 	var lastUpdate time.Time
 	if resp.Error == nil && resp.StatusCode == http.StatusOK {
 		var response struct {
@@ -1969,20 +1965,26 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
 				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse))
 				networksToUse = agentInfo.Networks
-				r.options.AgentNetworks = agentInfo.Networks // Overwrite local networks with remote
+				if len(agentInfo.Networks) > 0 {
+					r.options.AgentNetwork = agentInfo.Networks[0] // Use first network from remote
+				}
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
 				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName))
 				r.options.AgentName = agentInfo.Name
 			}
-			r.logHelper("INFO", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
+			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
 		}
 	}
 
-	// Build /in endpoint with query parameters
+	// Build /in endpoint with query parameters.
+	// Use a 30s timeout — heartbeat should be fast, don't hold up the agent.
+	inCtx, inCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer inCancel()
+
 	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, inURL, nil)
+	req, err := http.NewRequestWithContext(inCtx, http.MethodPost, inURL, nil)
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to create /in request: %v", err))
 		return err
@@ -1994,6 +1996,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
+	q.Add("agent_network", r.options.AgentNetwork)
 
 	// Only add tags if not empty
 	if len(tagsToUse) > 0 {
@@ -2016,7 +2019,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	// we simply send an empty string
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
-		r.logHelper("INFO", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
+		r.logHelper("DEBUG", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
 		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
 		r.logHelper("INFO", "No network subnets discovered")
@@ -2024,15 +2027,39 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	req.URL.RawQuery = q.Encode()
 
-	inResp := r.makeRequest(ctx, http.MethodPost, req.URL.String(), nil, headers)
+	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, headers)
 	if inResp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /in endpoint: %v", inResp.Error))
 		return inResp.Error
 	}
 
 	if inResp.StatusCode != http.StatusOK {
-		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d, body: %s", inResp.StatusCode, string(inResp.Body)))
-		return fmt.Errorf("unexpected status code from /in endpoint: %v, body: %s", inResp.StatusCode, string(inResp.Body))
+		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d", inResp.StatusCode))
+		return fmt.Errorf("unexpected status code from /in endpoint: %d", inResp.StatusCode)
+	}
+
+	// Parse the /in response to extract NATS credentials (if present)
+	var agentInResp AgentInResponse
+	if err := json.Unmarshal(inResp.Body, &agentInResp); err != nil {
+		r.logHelper("WARNING", fmt.Sprintf("failed to parse /in response body: %v", err))
+	} else if agentInResp.Nats == nil && r.natsCreds == nil {
+		return fmt.Errorf("/in response did not include NATS credentials; agent cannot start without JetStream connectivity")
+	}
+	if agentInResp.Nats != nil {
+		r.natsCredsMu.Lock()
+		prev := r.natsCreds
+		r.natsCreds = agentInResp.Nats
+		r.natsCredsMu.Unlock()
+
+		if prev == nil {
+			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.onNATSCredentialsReceived(true)
+		} else if !prev.ExpiresAt.Equal(agentInResp.Nats.ExpiresAt) {
+			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.onNATSCredentialsReceived(false)
+		}
 	}
 
 	if !isRegistered {
@@ -2040,7 +2067,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		isRegistered = true
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339)))
+	r.logHelper("DEBUG", fmt.Sprintf("/in requests sent: %d, agent up since: %s", r.inRequestCount, r.agentStartTime.Format(time.RFC3339)))
 	return nil
 }
 
@@ -2138,8 +2165,7 @@ func (r *Runner) getAutoDiscoveredTargets() []string {
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("Error reading hosts file: %v", err))
 	} else {
-		lines := strings.Split(string(content), "\n")
-		for _, line := range lines {
+		for line := range strings.SplitSeq(string(content), "\n") {
 			// Skip comments and empty lines
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "#") {
@@ -2196,7 +2222,7 @@ func getCachedK8sSubnets() []string {
 	k8sSubnetsCacheOnce.Do(func() {
 		k8sSubnetsCache = getK8sSubnets()
 		if len(k8sSubnetsCache) > 0 {
-			fmt.Printf("[INFO] Cached %d Kubernetes subnets for reuse\n", len(k8sSubnetsCache))
+			slog.Debug("cached Kubernetes subnets for reuse", "count", len(k8sSubnetsCache))
 		}
 	})
 	return k8sSubnetsCache
@@ -2248,7 +2274,7 @@ func getK8sSubnets() []string {
 	}
 
 	if len(serviceCidrs) > 0 {
-		slog.Info("Found service CIDRs", "count", len(serviceCidrs), "cidrs", serviceCidrs)
+		slog.Debug("Found service CIDRs", "count", len(serviceCidrs))
 		assets = append(assets, serviceCidrs...)
 	}
 
@@ -2308,13 +2334,13 @@ func getK8sSubnets() []string {
 	// Calculate supernets for node IPs and pod CIDRs
 	if len(nodeIPs) > 0 {
 		nodeSupernets := supernetMultiple(nodeIPs)
-		slog.Info("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets), "supernets", nodeSupernets)
+		slog.Debug("Aggregated node IPs into supernets", "node_count", len(nodeIPs), "supernet_count", len(nodeSupernets))
 		assets = append(assets, nodeSupernets...)
 	}
 
 	if len(podCidrs) > 0 {
 		podSupernets := supernetMultiple(podCidrs)
-		slog.Info("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets), "supernets", podSupernets)
+		slog.Debug("Aggregated pod CIDRs into supernets", "pod_count", len(podCidrs), "supernet_count", len(podSupernets))
 		assets = append(assets, podSupernets...)
 	}
 
@@ -2412,7 +2438,7 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 
 	// XOR to find differing bits
 	var diff uint32
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		diff = (diff << 8) | uint32(minIP[i]^maxIP[i])
 	}
 
@@ -2430,132 +2456,6 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 	return fmt.Sprintf("%s/%d", network, prefixLen)
 }
 
-// startPassiveDiscovery starts passive discovery on all network interfaces using libpcap/gopacket
-// func (r *Runner) startPassiveDiscovery() {
-// 	passiveDiscoveredIPs = mapsutil.NewSyncLockMap[string, struct{}]()
-// 	ifs, err := pcap.FindAllDevs()
-// 	if err != nil {
-// 		slog.Error("Could not list interfaces for passive discovery: %v", err)
-// 		return
-// 	}
-// 	for _, iface := range ifs {
-// 		go func(iface pcap.Interface) {
-// 			handle, err := pcap.OpenLive(iface.Name, 65536, true, pcap.BlockForever)
-// 			if err != nil {
-// 				slog.Error("Could not open interface %s: %v", iface.Name, err)
-// 				return
-// 			}
-// 			defer handle.Close()
-// 			packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-// 			for packet := range packetSource.Packets() {
-// 				if netLayer := packet.NetworkLayer(); netLayer != nil {
-// 					src, dst := netLayer.NetworkFlow().Endpoints()
-// 					for _, ep := range []gopacket.Endpoint{src, dst} {
-// 						ip := net.ParseIP(ep.String())
-// 						if ip != nil && ip.IsPrivate() {
-// 							_ = passiveDiscoveredIPs.Set(ip.String(), struct{}{})
-// 						}
-// 					}
-// 				}
-// 			}
-// 		}(iface)
-// 	}
-// 	slog.Info("Started passive discovery on all interfaces")
-// }
-
-// PopAllPassiveDiscoveredIPs retrieves all passively discovered IPs and clears the map
-// func PopAllPassiveDiscoveredIPs() []string {
-// 	if passiveDiscoveredIPs == nil {
-// 		return nil
-// 	}
-// 	var ips []string
-// 	_ = passiveDiscoveredIPs.Iterate(func(k string, v struct{}) error {
-// 		ips = append(ips, k)
-// 		return nil
-// 	})
-// 	for _, k := range ips {
-// 		passiveDiscoveredIPs.Delete(k)
-// 	}
-// 	return ips
-// }
-
-// computeScanConfigHash computes a hash of the scan configuration
-func computeScanConfigHash(scanConfig string, templates []string, assets []string) string {
-	h := sha256.New()
-
-	// Sort arrays to ensure consistent hashing
-	sort.Strings(templates)
-	sort.Strings(assets)
-
-	h.Write([]byte(scanConfig))
-	h.Write([]byte(strings.Join(templates, ",")))
-	h.Write([]byte(strings.Join(assets, ",")))
-
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// sanitizeEnumerationConfig removes unsupported steps from the enumeration config.
-// Steps "uncover_assets", "dns_passive", "dns_bruteforce", and "dns_permute" are not supported for internal scans and will be removed.
-// Returns the sanitized configuration as a JSON string.
-func (r *Runner) sanitizeEnumerationConfig(enumerationConfig string, enumerationName string) string {
-	var unsupportedSteps []string
-	var supportedSteps []string
-
-	// Extract all steps from the enumeration config
-	gjson.Parse(enumerationConfig).Get("steps").ForEach(func(key, value gjson.Result) bool {
-		step := value.String()
-		if step == "uncover_assets" || step == "dns_passive" || step == "dns_bruteforce" || step == "dns_permute" {
-			unsupportedSteps = append(unsupportedSteps, step)
-		} else {
-			supportedSteps = append(supportedSteps, step)
-		}
-		return true
-	})
-
-	// If no unsupported steps found, return the original config
-	if len(unsupportedSteps) == 0 {
-		return enumerationConfig
-	}
-
-	// Log info about removed steps
-	r.logHelper("INFO", fmt.Sprintf("Removing unsupported steps from enumeration \"%s\": %s", enumerationName, strings.Join(unsupportedSteps, ", ")))
-
-	// Parse the entire config as JSON to properly reconstruct it
-	var configMap map[string]interface{}
-	if err := json.Unmarshal([]byte(enumerationConfig), &configMap); err != nil {
-		// If parsing fails, return original config
-		r.logHelper("WARNING", fmt.Sprintf("Failed to parse enumeration config for sanitization: %v", err))
-		return enumerationConfig
-	}
-
-	// Update the steps array with only supported steps
-	configMap["steps"] = supportedSteps
-
-	// Reconstruct the JSON
-	sanitizedConfig, err := json.Marshal(configMap)
-	if err != nil {
-		// If marshaling fails, return original config
-		r.logHelper("WARNING", fmt.Sprintf("Failed to marshal sanitized enumeration config: %v", err))
-		return enumerationConfig
-	}
-
-	return string(sanitizedConfig)
-}
-
-// computeEnumerationConfigHash computes a hash of the enumeration configuration
-func computeEnumerationConfigHash(steps []string, assets []string) string {
-	h := sha256.New()
-
-	// Sort arrays to ensure consistent hashing
-	sort.Strings(steps)
-	sort.Strings(assets)
-
-	h.Write([]byte(strings.Join(steps, ",")))
-	h.Write([]byte(strings.Join(assets, ",")))
-
-	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
 // parseOptions parses command line options (simplified for agent mode only)
 func parseOptions() *Options {
 	options := &Options{
@@ -2567,11 +2467,9 @@ func parseOptions() *Options {
 
 	agentTags := strings.Split(AgentTagsEnv, ",")
 
-	// Parse default parallelism values from environment
-	defaultChunkParallelism := runtime.NumCPU()
-	if defaultChunkParallelism <= 0 {
-		defaultChunkParallelism = 1
-	}
+	// Parse default parallelism values from environment.
+	// 0 means auto-detect at startup (based on available resources).
+	defaultChunkParallelism := 0
 	if val, err := strconv.Atoi(ChunkParallelismEnv); err == nil && val > 0 {
 		defaultChunkParallelism = val
 	}
@@ -2581,22 +2479,17 @@ func parseOptions() *Options {
 		defaultScanParallelism = val
 	}
 
-	defaultEnumerationParallelism := 1
-	if val, err := strconv.Atoi(EnumerationParallelismEnv); err == nil && val > 0 {
-		defaultEnumerationParallelism = val
-	}
-
 	flagSet.CreateGroup("agent", "Agent",
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
-		flagSet.StringSliceVarP(&options.AgentNetworks, "agent-networks", "an", nil, "specify the networks for the agent", goflags.CommaSeparatedStringSliceOptions),
+		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", AgentNetworkEnv, "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
+		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the agent ID (auto-generated if empty, persisted across self-updates)"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
-		flagSet.IntVarP(&options.EnumerationParallelism, "enumeration-parallelism", "e", defaultEnumerationParallelism, "number of enumerations to process in parallel"),
 	)
 
 	if err := flagSet.Parse(); err != nil {
@@ -2607,14 +2500,17 @@ func parseOptions() *Options {
 	if agentTags := os.Getenv("PDCP_AGENT_TAGS"); agentTags != "" && len(options.AgentTags) == 0 {
 		options.AgentTags = goflags.StringSlice(strings.Split(agentTags, ","))
 	}
-	if agentNetworks := os.Getenv("PDCP_AGENT_NETWORKS"); agentNetworks != "" && len(options.AgentNetworks) == 0 {
-		options.AgentNetworks = goflags.StringSlice(strings.Split(agentNetworks, ","))
+	if agentNetwork := os.Getenv("PDCP_AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+		options.AgentNetwork = agentNetwork
 	}
 	if agentOutput := os.Getenv("PDCP_AGENT_OUTPUT"); agentOutput != "" && options.AgentOutput == "" {
 		options.AgentOutput = agentOutput
 	}
 	if agentName := os.Getenv("PDCP_AGENT_NAME"); agentName != "" && options.AgentName == "" {
 		options.AgentName = agentName
+	}
+	if agentNetwork := os.Getenv("AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+		options.AgentNetwork = agentNetwork
 	}
 	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
 		options.Verbose = true
@@ -2634,67 +2530,82 @@ func parseOptions() *Options {
 		options.PassiveDiscovery = true
 	}
 
-	// Ensure parallelism values are at least 1
-	if options.ChunkParallelism < 1 {
-		options.ChunkParallelism = 1
+	// Ensure agent network has a default value
+	if options.AgentNetwork == "" {
+		options.AgentNetwork = "default"
+	}
+
+	// Ensure parallelism values are valid (0 = auto-detect for chunks).
+	if options.ChunkParallelism < 0 {
+		options.ChunkParallelism = 0
 	}
 	if options.ScanParallelism < 1 {
 		options.ScanParallelism = 1
-	}
-	if options.EnumerationParallelism < 1 {
-		options.EnumerationParallelism = 1
 	}
 
 	return options
 }
 
 func configureLogging(options *Options) {
+	initLogging(options.Verbose)
 	if options.Verbose {
 		gologger.DefaultLogger.SetMaxLevel(levels.LevelVerbose)
 	}
 }
 
-// deleteCacheFileForTesting deletes the execution cache file on startup.
-// This is FOR TESTING PURPOSES ONLY to ensure scans and enumerations are not skipped
-// due to cached execution history.
-// func deleteCacheFileForTesting() {
-// 	homeDir, err := os.UserHomeDir()
-// 	if err != nil {
-// 		slog.Warn("Could not get home directory to delete cache file: %v", err)
-// 		return
-// 	}
-
-// 	cacheFile := filepath.Join(homeDir, ".pd-agent", "execution-cache.json")
-// 	if err := os.Remove(cacheFile); err != nil {
-// 		if !os.IsNotExist(err) {
-// 			slog.Warn("Could not delete cache file (this is ok if it doesn't exist): %v", err)
-// 		}
-// 	} else {
-// 		slog.Info("Deleted execution cache file (FOR TESTING PURPOSES ONLY)")
-// 	}
-// }
-
 func main() {
-	// FOR TESTING PURPOSES ONLY: Delete the cache file containing executed scans and enumerations
-	// This ensures that scans/enumerations are not skipped due to cached execution history during testing
-	// deleteCacheFileForTesting()
+	// Capture panics into slog (and therefore SQLite) before the process dies.
+	var pdcpRunner *Runner
+	defer func() {
+		if r := recover(); r != nil {
+			msg := fmt.Sprintf("panic: %v\n%s", r, debug.Stack())
+			slog.Error(msg)
+			// Synchronous direct insert — async channel won't flush in time.
+			if dbWriterInstance != nil && pdcpRunner != nil && pdcpRunner.agentDB != nil {
+				dbWriterInstance.DirectWrite(pdcpRunner.agentDB, msg)
+			}
+			if dbWriterInstance != nil {
+				dbWriterInstance.StopLogWriter()
+			}
+			os.Exit(2)
+		}
+	}()
 
-	options := parseOptions()
-
-	// Check prerequisites before starting the agent
-	prerequisites := pkg.CheckAllPrerequisites()
-	var missingTools []string
-	for toolName, result := range prerequisites {
-		if !result.Found {
-			missingTools = append(missingTools, toolName)
+	// Handle -version flag before anything else.
+	for _, arg := range os.Args[1:] {
+		if arg == "-version" || arg == "--version" {
+			fmt.Println(Version)
+			os.Exit(0)
 		}
 	}
 
-	if len(missingTools) > 0 {
-		slog.Error("Missing required prerequisites", "tools", strings.Join(missingTools, ", "))
+	// Set GOMAXPROCS from cgroup CPU quota (containers). No-op on bare metal.
+	_, _ = maxprocs.Set(maxprocs.Logger(func(format string, args ...any) {
+		slog.Info(fmt.Sprintf(format, args...))
+	}))
+
+	options := parseOptions()
+
+	// Self-update preflight: a parent process is probing this binary with the
+	// exact restart args before swapping. Exit 0 cleanly here so the parent
+	// knows the binary accepts these args. Stay above any code that touches
+	// shared state (DB, NATS) to avoid conflicting with the still-running agent.
+	if os.Getenv(selfupdate.PreflightEnvVar) == "1" {
+		fmt.Println("preflight ok")
+		os.Exit(0)
 	}
 
-	pdcpRunner, err := NewRunner(options)
+	// Check prerequisites — auto-install missing tools (idempotent: fast on restart)
+	if _, failed := prereq.EnsureAll(); len(failed) > 0 {
+		slog.Error("Could not install required tools", "tools", strings.Join(failed, ", "))
+		os.Exit(1)
+	}
+
+	// Ensure nuclei templates are downloaded or updated before starting the agent
+	ensureNucleiTemplates()
+
+	var err error
+	pdcpRunner, err = NewRunner(options)
 	if err != nil {
 		slog.Error("Could not create runner", "error", err)
 	}
@@ -2705,16 +2616,143 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup close handler
+	// Graceful shutdown: on SIGTERM/SIGINT, cancel contexts and let
+	// agentMode's defer handle the blocking wait and cleanup.
+	// k8s sends SIGTERM once, then SIGKILL after terminationGracePeriodSeconds.
 	go func() {
 		<-c
-		fmt.Println("\r- Ctrl+C pressed in Terminal, Exiting...")
+		slog.Info("shutdown signal received, draining in-flight work...")
+		if jsCancel := pdcpRunner.jsCancel.Load(); jsCancel != nil {
+			(*jsCancel)()
+		}
+		// Cancel the main context — agentMode's defer will call jsPool.Stop()
+		// and wait for in-flight work before cleaning up NATS/batchers.
 		cancel()
 	}()
 
 	err = pdcpRunner.Run(ctx)
+
+	// Upload debug DB to GCS (best-effort), then close.
+	// All writers are stopped (agentMode defer ran), so WAL checkpoint is safe.
+	if pdcpRunner.agentDB != nil {
+		pdcpRunner.uploadDebugDB()
+		pdcpRunner.agentDB.Close()
+		pdcpRunner.agentDB = nil
+	}
+
 	if err != nil {
-		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s\n", err))
+		pdcpRunner.logHelper("FATAL", fmt.Sprintf("Could not run pd-agent: %s", err))
 		os.Exit(1)
+	}
+}
+
+// uploadDebugDB uploads the local SQLite DB to GCS using the pre-generated
+// presigned URL from the last /in response. Best-effort: logs errors but
+// never blocks shutdown. Must be called after all DB writers have stopped.
+//
+// Set PDCP_DISABLE_DIAGNOSTIC_UPLOAD=1 (or true) to opt out.
+func (r *Runner) uploadDebugDB() {
+	if v := os.Getenv("PDCP_DISABLE_DIAGNOSTIC_UPLOAD"); v == "1" || v == "true" {
+		slog.Info("agentdb: diagnostic upload disabled via PDCP_DISABLE_DIAGNOSTIC_UPLOAD")
+		return
+	}
+
+	r.natsCredsMu.RLock()
+	creds := r.natsCreds
+	r.natsCredsMu.RUnlock()
+
+	if creds == nil || creds.DebugUploadURL == "" {
+		slog.Debug("agentdb: no debug upload URL, skipping DB upload")
+		return
+	}
+	if time.Now().After(creds.DebugUploadExpiresAt) {
+		slog.Warn("agentdb: debug upload URL expired, skipping",
+			"expired_at", creds.DebugUploadExpiresAt.Format(time.RFC3339))
+		return
+	}
+
+	sqlStore, ok := r.agentDB.(*agentdb.SQLiteStore)
+	if !ok {
+		return
+	}
+
+	if err := sqlStore.CheckpointWAL(); err != nil {
+		slog.Warn("agentdb: WAL checkpoint failed, skipping upload", "error", err)
+		return
+	}
+
+	f, err := os.Open(sqlStore.DBPath())
+	if err != nil {
+		slog.Warn("agentdb: failed to open DB for upload", "error", err)
+		return
+	}
+	defer f.Close()
+
+	fi, err := f.Stat()
+	if err != nil {
+		slog.Warn("agentdb: failed to stat DB", "error", err)
+		return
+	}
+
+	uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, creds.DebugUploadURL, f)
+	if err != nil {
+		slog.Warn("agentdb: failed to create upload request", "error", err)
+		return
+	}
+	req.ContentLength = fi.Size()
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Goog-Content-Length-Range", "0,52428800")
+
+	slog.Info("agentdb: uploading debug DB", "size_bytes", fi.Size())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		slog.Warn("agentdb: debug DB upload failed", "error", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		slog.Warn("agentdb: debug DB upload non-200",
+			"status", resp.StatusCode, "body", string(body))
+		return
+	}
+
+	slog.Info("agentdb: debug DB uploaded successfully", "size_bytes", fi.Size())
+}
+
+// warnOrphanDBs logs a warning if other pd-agent DB files exist in the directory
+// and deletes orphan DBs (plus WAL/SHM sidecars) older than 7 days.
+func warnOrphanDBs(dir, myAgentID string) {
+	matches, err := filepath.Glob(filepath.Join(dir, "pd-agent-*.db"))
+	if err != nil {
+		return
+	}
+	myFile := fmt.Sprintf("pd-agent-%s.db", myAgentID)
+	var orphans []string
+	for _, m := range matches {
+		base := filepath.Base(m)
+		if base == myFile {
+			continue
+		}
+		orphans = append(orphans, base)
+
+		fi, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if time.Since(fi.ModTime()) > 7*24*time.Hour {
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				os.Remove(m + suffix)
+			}
+			slog.Info("agentdb: deleted orphan DB", "file", base,
+				"age", time.Since(fi.ModTime()).Round(time.Hour))
+		}
+	}
+	if len(orphans) > 0 {
+		slog.Warn("agentdb: found other agent DB files", "count", len(orphans), "files", orphans)
 	}
 }

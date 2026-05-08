@@ -44,6 +44,11 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 		_ = targetsF.Close()
 	}()
 
+	// Strategy: extract host from each input line, run naabu against
+	// host x (template-extracted ports + any port hint from input), then emit
+	// host:port for every (host, openPort) pair naabu reports. nuclei is
+	// invoked once per host:port, so it scans every reachable port on the
+	// host even if the input only mentioned one.
 	var hosts []string
 	var ports []string
 
@@ -54,17 +59,26 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			continue
 		}
 
-		// Try to split host:port using net.SplitHostPort
-		host, port, err := net.SplitHostPort(line)
+		// Strip URL scheme (e.g. "https://host:port" → "host:port")
+		stripped := line
+		if idx := strings.Index(stripped, "://"); idx != -1 {
+			stripped = stripped[idx+3:]
+		}
+		// Remove trailing path (e.g. "host:port/path" → "host:port")
+		if idx := strings.Index(stripped, "/"); idx != -1 {
+			stripped = stripped[:idx]
+		}
+
+		// Try to split host:port using net.SplitHostPort. Either way, we
+		// keep just the host - naabu does the per-port reachability check.
+		host, port, err := net.SplitHostPort(stripped)
 		if err == nil {
-			// Successfully split, we have both host and port
 			hosts = append(hosts, host)
 			if port != "" {
 				ports = append(ports, port)
 			}
 		} else {
-			// No port, just host
-			hosts = append(hosts, line)
+			hosts = append(hosts, stripped)
 		}
 	}
 
@@ -97,35 +111,52 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 	hosts = sliceutil.Dedupe(hosts)
 	mergedPorts = sliceutil.Dedupe(mergedPorts)
 
-	// Perform naabu scan and filter hosts with open ports
+	// Run naabu against (host x ports). Returns map[host][]openPort. We then
+	// expand to host:port lines so nuclei probes every reachable port on
+	// every host.
+	var hostPorts map[string][]string
 	if len(hosts) > 0 && len(mergedPorts) > 0 {
-		openHosts, err := runNaabuScan(ctx, hosts, mergedPorts, scanID, chunkID)
+		hostPorts, err = runNaabuScan(ctx, hosts, mergedPorts, scanID, chunkID)
 		if err != nil {
 			slog.Warn("Naabu scan failed",
 				"scan_id", scanID,
 				"chunk_id", chunkID,
 				"error", err)
-		} else {
-			hosts = openHosts
 		}
 	}
 
-	return hosts, mergedPorts, nil
+	out := make([]string, 0)
+	for host, openPorts := range hostPorts {
+		for _, p := range openPorts {
+			out = append(out, net.JoinHostPort(host, p))
+		}
+	}
+	out = sliceutil.Dedupe(out)
+
+	return out, mergedPorts, nil
 }
 
 // runNaabuScan runs naabu scan with specified targets and ports using the SDK
-// Uses -no-probe (skip host discovery) for fast scanning
-// Returns list of hosts with open ports
-func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID, chunkID string) ([]string, error) {
+// Uses -no-probe (skip host discovery) for fast scanning.
+// Returns a map of host -> []openPort for every host with at least one
+// reachable port.
+func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID, chunkID string) (map[string][]string, error) {
 	if len(targets) == 0 || len(ports) == 0 {
-		return targets, nil
+		slog.Info("naabu prefilter: skipped (no targets or ports)",
+			"scan_id", scanID, "chunk_id", chunkID,
+			"targets", len(targets), "ports", len(ports))
+		return nil, nil
 	}
 
 	// Convert ports to comma-separated string for naabu
 	portStr := strings.Join(ports, ",")
 
-	// Collect hosts with open ports
-	openHostsSet := mapsutil.NewSyncLockMap[string, struct{}]()
+	slog.Info("naabu prefilter: running",
+		"scan_id", scanID, "chunk_id", chunkID,
+		"targets", targets, "ports", portStr)
+
+	var mu sync.Mutex
+	hostPorts := make(map[string][]string)
 
 	// Configure naabu options
 	options := &runner.Options{
@@ -134,8 +165,13 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 		SkipHostDiscovery: true, // Skip host discovery (equivalent to nmap -Pn)
 		Silent:            true, // Silent mode
 		OnResult: func(hr *result.HostResult) {
-			if hr.Host != "" && len(hr.Ports) > 0 {
-				_ = openHostsSet.Set(hr.Host, struct{}{})
+			if hr.Host == "" || len(hr.Ports) == 0 {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, p := range hr.Ports {
+				hostPorts[hr.Host] = append(hostPorts[hr.Host], strconv.Itoa(p.Port))
 			}
 		},
 	}
@@ -159,14 +195,17 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 			"status", err)
 	}
 
-	// Convert set to slice
-	openHosts := make([]string, 0)
-	allHosts := openHostsSet.GetAll()
-	for host := range allHosts {
-		openHosts = append(openHosts, host)
+	mu.Lock()
+	for h := range hostPorts {
+		hostPorts[h] = sliceutil.Dedupe(hostPorts[h])
 	}
+	mu.Unlock()
 
-	return openHosts, nil
+	slog.Info("naabu prefilter: completed",
+		"scan_id", scanID, "chunk_id", chunkID,
+		"input_hosts", len(targets), "host_ports", hostPorts)
+
+	return hostPorts, nil
 }
 
 // extractPortsFromTemplatesFile reads the templates file (one template path per line)

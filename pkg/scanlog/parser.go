@@ -2,7 +2,7 @@ package scanlog
 
 import (
 	"bufio"
-	"encoding/json"
+	json "github.com/json-iterator/go"
 	"fmt"
 	"os"
 	"strings"
