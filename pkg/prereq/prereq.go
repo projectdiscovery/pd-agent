@@ -71,14 +71,10 @@ type PkgSpec struct {
 // Dockerfile runtime stage. Order matters — tools are checked/installed in
 // this order.
 var tools = []Tool{
-	{
-		Name:       "nuclei",
-		Priority:   Critical,
-		GoInstall:  "github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
-		GitHubRepo: "projectdiscovery/nuclei",
-		VersionArg: "-version",
-	},
-	// naabu, httpx, dnsx, and tlsx are embedded via pkg/runtools — no install needed.
+	// nuclei, naabu, httpx, dnsx, and tlsx are all embedded via pkg/runtools.
+	// The only tool we still install on the host is nmap (system package),
+	// invoked indirectly through naabu's -nmap-cli pass-through when the
+	// scan asks for service detection.
 	{
 		Name:     "nmap",
 		Priority: Important,
