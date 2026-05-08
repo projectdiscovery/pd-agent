@@ -26,6 +26,13 @@ type HttpxOptions struct {
 	// (matches CLI default), but first-time runs need longer because Chrome
 	// itself has to download.
 	ScreenshotTimeout time.Duration
+	// DisableStdout suppresses httpx's per-result stdout writes. Output still
+	// lands in OutputFile; callers that don't want JSON spilling into the
+	// agent log should set this.
+	DisableStdout bool
+	// StoreResponseDir overrides where stored responses + screenshots land.
+	// Empty falls through to httpx's default ("output" in cwd).
+	StoreResponseDir string
 }
 
 // RunHttpx probes every target and writes one JSON Result per line to
@@ -60,6 +67,8 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 		Timeout:            int(opts.Timeout.Seconds()),
 		Screenshot:         opts.Screenshot,
 		ScreenshotTimeout:  opts.ScreenshotTimeout,
+		DisableStdout:      opts.DisableStdout,
+		StoreResponseDir:   opts.StoreResponseDir,
 		StatusCode:         true,
 		FollowRedirects:    true,
 		MaxRedirects:       10,

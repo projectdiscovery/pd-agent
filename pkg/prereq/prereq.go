@@ -188,6 +188,12 @@ func warmupBrowser() error {
 	tmp.Close()
 	defer os.Remove(tmpPath)
 
+	storeDir, err := os.MkdirTemp("", "httpx-warmup-store-*")
+	if err != nil {
+		return fmt.Errorf("warmup store dir: %w", err)
+	}
+	defer os.RemoveAll(storeDir)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
@@ -196,6 +202,8 @@ func warmupBrowser() error {
 		Screenshot:        true,
 		Timeout:           20 * time.Second,
 		ScreenshotTimeout: 90 * time.Second,
+		DisableStdout:     true,
+		StoreResponseDir:  storeDir,
 	})
 	if runErr != nil {
 		msg := runErr.Error()
