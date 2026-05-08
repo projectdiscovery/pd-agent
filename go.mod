@@ -14,9 +14,9 @@ require (
 	github.com/projectdiscovery/gologger v1.1.68
 	github.com/projectdiscovery/httpx v1.8.1
 	github.com/projectdiscovery/mapcidr v1.1.97
-	github.com/projectdiscovery/naabu/v2 v2.3.7
+	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260505151841-377c8d5a4d70
 	github.com/projectdiscovery/nuclei/v3 v3.5.1
-	github.com/projectdiscovery/utils v0.9.0
+	github.com/projectdiscovery/utils v0.10.1
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
@@ -148,7 +148,7 @@ require (
 	github.com/free5gc/util v1.0.5-0.20230511064842-2e120956883b // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.8 // indirect
-	github.com/gaissmai/bart v0.26.0 // indirect
+	github.com/gaissmai/bart v0.26.1 // indirect
 	github.com/geoffgarside/ber v1.1.0 // indirect
 	github.com/getkin/kin-openapi v0.132.0 // indirect
 	github.com/gin-contrib/sse v0.1.0 // indirect
@@ -196,7 +196,6 @@ require (
 	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gopacket/gopacket v1.2.0 // indirect
 	github.com/gorilla/css v1.0.1 // indirect
 	github.com/gosimple/slug v1.15.0 // indirect
 	github.com/gosimple/unidecode v1.0.1 // indirect
@@ -292,11 +291,11 @@ require (
 	github.com/projectdiscovery/asnmap v1.1.1 // indirect
 	github.com/projectdiscovery/awesome-search-queries v0.0.0-20260104120501-961ef30f7193 // indirect
 	github.com/projectdiscovery/blackrock v0.0.1 // indirect
-	github.com/projectdiscovery/cdncheck v1.2.25 // indirect
-	github.com/projectdiscovery/clistats v0.1.1 // indirect
-	github.com/projectdiscovery/dnsx v1.2.2 // indirect
+	github.com/projectdiscovery/cdncheck v1.2.34 // indirect
+	github.com/projectdiscovery/clistats v0.1.2 // indirect
+	github.com/projectdiscovery/dnsx v1.2.3 // indirect
 	github.com/projectdiscovery/dsl v0.8.13 // indirect
-	github.com/projectdiscovery/fastdialer v0.5.4 // indirect
+	github.com/projectdiscovery/fastdialer v0.5.6 // indirect
 	github.com/projectdiscovery/fasttemplate v0.0.2 // indirect
 	github.com/projectdiscovery/fdmax v0.0.4 // indirect
 	github.com/projectdiscovery/freeport v0.0.7 // indirect
@@ -311,12 +310,12 @@ require (
 	github.com/projectdiscovery/ldapserver v1.0.2-0.20240219154113-dcc758ebc0cb // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20250715113114-c77eb3567582 // indirect
 	github.com/projectdiscovery/n3iwf v0.0.0-20230523120440-b8cd232ff1f5 // indirect
-	github.com/projectdiscovery/networkpolicy v0.1.34 // indirect
-	github.com/projectdiscovery/ratelimit v0.0.83 // indirect
+	github.com/projectdiscovery/networkpolicy v0.1.37 // indirect
+	github.com/projectdiscovery/ratelimit v0.0.86 // indirect
 	github.com/projectdiscovery/rawhttp v0.1.90 // indirect
 	github.com/projectdiscovery/rdap v0.9.0 // indirect
-	github.com/projectdiscovery/retryabledns v1.0.113 // indirect
-	github.com/projectdiscovery/retryablehttp-go v1.3.6 // indirect
+	github.com/projectdiscovery/retryabledns v1.0.114 // indirect
+	github.com/projectdiscovery/retryablehttp-go v1.3.10 // indirect
 	github.com/projectdiscovery/sarif v0.0.1 // indirect
 	github.com/projectdiscovery/tlsx v1.2.2 // indirect
 	github.com/projectdiscovery/uncover v1.2.0 // indirect
@@ -334,7 +333,7 @@ require (
 	github.com/seh-msft/burpxml v1.0.1 // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/shirou/gopsutil v3.21.11+incompatible // indirect
-	github.com/shoenig/go-m1cpu v0.1.6 // indirect
+	github.com/shirou/gopsutil/v4 v4.26.3 // indirect
 	github.com/shurcooL/graphql v0.0.0-20230722043721-ed46e5a46466 // indirect
 	github.com/sijms/go-ora/v2 v2.9.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
@@ -353,8 +352,8 @@ require (
 	github.com/tidwall/rtred v0.1.2 // indirect
 	github.com/tidwall/tinyqueue v0.1.1 // indirect
 	github.com/tim-ywliu/nested-logrus-formatter v1.3.2 // indirect
-	github.com/tklauser/go-sysconf v0.3.15 // indirect
-	github.com/tklauser/numcpus v0.10.0 // indirect
+	github.com/tklauser/go-sysconf v0.3.16 // indirect
+	github.com/tklauser/numcpus v0.11.0 // indirect
 	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
 	github.com/trivago/tgo v1.0.7 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
