@@ -14,7 +14,7 @@ require (
 	github.com/projectdiscovery/gologger v1.1.68
 	github.com/projectdiscovery/httpx v1.8.1
 	github.com/projectdiscovery/mapcidr v1.1.97
-	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260505151841-377c8d5a4d70
+	github.com/projectdiscovery/naabu/v2 v2.6.0
 	github.com/projectdiscovery/nuclei/v3 v3.5.1
 	github.com/projectdiscovery/utils v0.10.1
 	github.com/rs/xid v1.6.0
