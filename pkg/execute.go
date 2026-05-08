@@ -130,12 +130,14 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			if len(hostnames) == 0 {
 				slog.Info("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
 			} else {
-				of, err := runEnumTool(ctx, task, "dnsx", hostnames, nil, &manualAssetId, &outputFiles)
+				_, err := runEmbeddedTool(ctx, task, "dnsx", func(ctx context.Context, outputFile string) error {
+					_, err := runtools.RunDnsx(ctx, hostnames, runtools.DnsxOptions{OutputFile: outputFile})
+					return err
+				}, &manualAssetId, &outputFiles)
 				if err != nil {
 					return nil, nil, err
 				}
 				// dnsx doesn't change the host list for subsequent tools
-				_ = of
 			}
 		}
 
