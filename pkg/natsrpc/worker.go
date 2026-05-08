@@ -369,9 +369,11 @@ func ConsumeChunks(
 			// would idle-loop until the last 10 finish — defeating the purpose of
 			// distributed chunk processing.
 			//
-			// Crash safety: if an agent crashes mid-chunk, AckWait expires and the
-			// chunk becomes pending again (NumPending > 0). Agents still on this
-			// scan will pick it up on their next fetch.
+			// Crash handling: with MaxDeliver=1, if an agent crashes mid-chunk,
+			// AckWait expires and the chunk is terminated (not redelivered).
+			// The chunk is picked up in the next scan run instead. This matches
+			// once-only delivery semantics; it is not crash-safe within a single
+			// scan run.
 			info, err := consumer.Info(ctx)
 			if err != nil {
 				if ctx.Err() != nil {

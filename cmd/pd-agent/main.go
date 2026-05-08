@@ -818,7 +818,7 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 	// is still registered, so matches found during cooldown land in results.
 	ne.Close()
 
-	// Return single ResultEvent matching aurora/retest format
+	// Return single ResultEvent matching platform/retest format
 	var result *output.ResultEvent
 	if len(results) > 0 {
 		result = results[0]
@@ -829,7 +829,7 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		}
 	}
 
-	// Set template source fields like aurora handler does
+	// Set template source fields like platform handler does
 	if req.TemplateEncoded != "" {
 		result.TemplateEncoded = req.TemplateEncoded
 	}

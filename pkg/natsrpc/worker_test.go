@@ -2,8 +2,8 @@ package natsrpc
 
 import (
 	"context"
-	json "github.com/json-iterator/go"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -101,7 +101,7 @@ func publishChunk(t *testing.T, js jetstream.JetStream, subject string, req *age
 
 // --- Tests ---
 
-// All tests use a single group stream (like Aurora) with subject-filtered consumers.
+// All tests use a single group stream (like the platform) with subject-filtered consumers.
 const (
 	testGroupPrefix = "ws-test.scanners"
 	testStreamName  = "GRP-test"
@@ -343,7 +343,7 @@ func TestMaxAckPending_LimitsConcurrentWork(t *testing.T) {
 
 	for i := 1; i <= 5; i++ {
 		publishJSON(t, js, "limit.work.scan", WorkMessage{
-			Type: "scan",
+			Type:   "scan",
 			ScanID: fmt.Sprintf("scan-%d", i),
 		})
 	}
@@ -405,7 +405,7 @@ func TestFilterSubject_WorkerOnlySeesWorkMessages(t *testing.T) {
 
 	// Publish one work message
 	publishJSON(t, js, testGroupPrefix+".work.scan", WorkMessage{
-		Type: "scan",
+		Type:   "scan",
 		ScanID: "only-work",
 	})
 
