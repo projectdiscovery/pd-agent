@@ -15,8 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: projectdiscovery/actions/setup/go@v1
-      - name: Install libpcap-dev
-        run: sudo apt install libpcap-dev
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v5
@@ -36,9 +34,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: projectdiscovery/actions/setup/go@v1
-      - name: Install libpcap-dev
-        if: runner.os == 'Linux'
-        run: sudo apt install libpcap-dev
       - run: go build .
         working-directory: cmd/pd-agent/
 

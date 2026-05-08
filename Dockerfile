@@ -1,6 +1,8 @@
 FROM --platform=linux/amd64 golang:1.25 AS builder
 
-RUN apt-get update && apt-get install -y git libpcap-dev
+RUN apt-get update && apt-get install -y git
+
+ENV CGO_ENABLED=0
 
 # Tools dependencies
 # dnsx
@@ -21,18 +23,20 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# Build pd-agent binary
-# CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
+# Build pd-agent binary. Mzack9999/gopacket dlopens libpcap at runtime via
+# purego, so no cgo or libpcap headers are needed at build time. Features
+# that need libpcap warn-and-skip at runtime if the lib is missing.
+RUN GOOS=linux go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
 
 FROM --platform=linux/amd64 ubuntu:latest
-# install dependencies
-# required: libpcap-dev, chrome
+# Runtime dependencies: chrome (nuclei headless), nmap (naabu service detection),
+# bind9-dnsutils (dnsx). libpcap is intentionally not installed; syn-scan and
+# IGMP discovery warn-and-skip when it's missing. Users who need those features
+# can extend this image with `apt install libpcap0.8`.
 RUN apt update && apt install -y \
     bind9-dnsutils \
     ca-certificates \
     nmap \
-    libpcap-dev \
     wget \
     gnupg \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \

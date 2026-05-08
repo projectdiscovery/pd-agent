@@ -10,7 +10,7 @@ builds:
       - -s -w
     binary: pd-agent
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     main: ./cmd/pd-agent
     goos:
       - darwin
