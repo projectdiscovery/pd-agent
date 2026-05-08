@@ -16,6 +16,7 @@ require (
 	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.6.0
 	github.com/projectdiscovery/nuclei/v3 v3.5.1
+	github.com/projectdiscovery/tlsx v1.2.2
 	github.com/projectdiscovery/utils v0.10.1
 	github.com/rs/xid v1.6.0
 	github.com/shirou/gopsutil/v3 v3.24.5
@@ -317,7 +318,6 @@ require (
 	github.com/projectdiscovery/retryabledns v1.0.114 // indirect
 	github.com/projectdiscovery/retryablehttp-go v1.3.10 // indirect
 	github.com/projectdiscovery/sarif v0.0.1 // indirect
-	github.com/projectdiscovery/tlsx v1.2.2 // indirect
 	github.com/projectdiscovery/uncover v1.2.0 // indirect
 	github.com/projectdiscovery/useragent v0.0.107 // indirect
 	github.com/projectdiscovery/wappalyzergo v0.2.70 // indirect

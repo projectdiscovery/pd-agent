@@ -15,6 +15,7 @@ import (
 	"log/slog"
 
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/utils/conversion"
 	envutil "github.com/projectdiscovery/utils/env"
@@ -214,7 +215,10 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 
 		// --- Step 5: TLS scan (on open ports only) ---
 		if sliceutil.Contains(steps, "tls_scan") {
-			_, err := runEnumTool(ctx, task, "tlsx", hostsWithOpenPorts, nil, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "tlsx", func(ctx context.Context, outputFile string) error {
+				_, err := runtools.RunTlsx(ctx, hostsWithOpenPorts, runtools.TlsxOptions{OutputFile: outputFile})
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -224,6 +228,60 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 	}
 
 	return nil, nil, nil
+}
+
+// runEmbeddedTool runs a tool whose execution lives in pd-agent's own process
+// (via pkg/runtools) instead of a CLI subprocess. It owns the same output-file
+// and dashboard-upload orchestration as runEnumTool but skips the args/env/exec
+// machinery: the caller passes a runFn that takes the resolved output path and
+// performs the scan. Returns the output file path on success.
+func runEmbeddedTool(
+	ctx context.Context,
+	task *types.Task,
+	toolName string,
+	runFn func(ctx context.Context, outputFile string) error,
+	manualAssetId *string,
+	outputFiles *[]string,
+) (string, error) {
+	var outputFile string
+	if task.Options.Output != "" {
+		_ = fileutil.CreateFolder(task.Options.Output)
+		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", toolName))
+	} else {
+		tmp, err := fileutil.GetTempFileName()
+		if err != nil {
+			return "", fmt.Errorf("create temp output file for %s: %w", toolName, err)
+		}
+		outputFile = tmp
+	}
+
+	slog.Info("running embedded tool", "tool", toolName, "output", outputFile)
+	if err := runFn(ctx, outputFile); err != nil {
+		return outputFile, err
+	}
+
+	*outputFiles = append(*outputFiles, outputFile)
+
+	// Embedded tools never delegate dashboard upload; we always handle it
+	// here when the task is dashboard-bound and the file is non-empty.
+	if task.Options.EnumerationID == "" && task.Options.TeamID == "" {
+		return outputFile, nil
+	}
+	info, err := os.Stat(outputFile)
+	if err != nil || info.Size() == 0 {
+		return outputFile, nil
+	}
+	assetId, err := uploadToCloudWithId(ctx, task, outputFile, *manualAssetId)
+	if err == nil {
+		*manualAssetId = assetId
+		return outputFile, nil
+	}
+	assetId, err = uploadToCloud(ctx, task, outputFile)
+	if err != nil {
+		return outputFile, err
+	}
+	*manualAssetId = assetId
+	return outputFile, nil
 }
 
 // runEnumTool executes a single enumeration tool and handles output file, dashboard

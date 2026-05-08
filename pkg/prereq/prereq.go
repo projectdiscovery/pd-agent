@@ -96,13 +96,7 @@ var tools = []Tool{
 		GitHubRepo: "projectdiscovery/dnsx",
 		VersionArg: "-version",
 	},
-	{
-		Name:       "tlsx",
-		Priority:   Important,
-		GoInstall:  "github.com/projectdiscovery/tlsx/cmd/tlsx@latest",
-		GitHubRepo: "projectdiscovery/tlsx",
-		VersionArg: "-version",
-	},
+	// tlsx is embedded via pkg/runtools — no install needed.
 	{
 		Name:     "nmap",
 		Priority: Important,
