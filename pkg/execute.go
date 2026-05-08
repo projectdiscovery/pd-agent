@@ -145,11 +145,24 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		var hostsWithOpenPorts []string
 		if sliceutil.Contains(steps, "port_scan") {
 			// Full port scan via naabu
-			var naabuArgs []string
+			var nmapCLI string
 			if sliceutil.Contains(steps, "ports_service_scan") {
-				naabuArgs = []string{"-nmap-cli", "nmap -sV -Pn"}
+				nmapCLI = "nmap -sV -Pn"
 			}
-			of, err := runEnumTool(ctx, task, "naabu", hosts, naabuArgs, &manualAssetId, &outputFiles)
+			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
+				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
+					OutputFile:        outputFile,
+					NmapCLI:           nmapCLI,
+					SkipHostDiscovery: true,
+				})
+				// naabu returns an error when no ports are found; that's not
+				// a pipeline failure — downstream steps short-circuit on an
+				// empty hostsWithOpenPorts list.
+				if err != nil {
+					slog.Warn("naabu enumeration finished with error", "error", err)
+				}
+				return nil
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -285,96 +298,6 @@ func runEmbeddedTool(
 		return outputFile, err
 	}
 	*manualAssetId = assetId
-	return outputFile, nil
-}
-
-// runEnumTool executes a single enumeration tool and handles output file, dashboard
-// upload, and asset ID tracking. Returns the output file path (if any).
-func runEnumTool(
-	ctx context.Context,
-	task *types.Task,
-	toolName string,
-	hosts []string,
-	extraArgs []string,
-	manualAssetId *string,
-	outputFiles *[]string,
-) (string, error) {
-	if err := verifyToolInPath(toolName); err != nil {
-		return "", err
-	}
-
-	currentTask := *task
-	currentTask.Options.Hosts = hosts
-
-	envs, args, outputFile, removeFunc, err := parseGenericArgs(&currentTask)
-	if err != nil {
-		return "", err
-	}
-	defer removeFunc()
-	args[0] = toolName
-
-	// Output file
-	if task.Options.Output != "" {
-		_ = fileutil.CreateFolder(task.Options.Output)
-		suffix := toolName
-		if sliceutil.Contains(extraArgs, "-screenshot") {
-			suffix = toolName + "-screenshot"
-		}
-		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", suffix))
-		args = append(args, "-o", outputFile)
-	}
-
-	// httpx/naabu always need an output file so we can read results for the next step.
-	if outputFile == "" && (toolName == "httpx" || toolName == "naabu") {
-		tmpOut, err := fileutil.GetTempFileName()
-		if err != nil {
-			return "", fmt.Errorf("create temp output file for %s: %w", toolName, err)
-		}
-		outputFile = tmpOut
-		args = append(args, "-o", outputFile)
-	}
-
-	// Dashboard upload flags for tools that support it.
-	hasDashboardUpload := stringsutil.EqualFoldAny(toolName, "httpx", "naabu", "tlsx")
-	if hasDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
-		args = append(args,
-			"-team-id", os.Getenv("PDCP_TEAM_ID"),
-			"-dashboard",
-			"-asset-id", *manualAssetId,
-		)
-	}
-
-	// Extra tool-specific args
-	args = append(args, extraArgs...)
-
-	slog.Info("running enumeration tool", "tool", toolName, "hosts", len(hosts), "args_count", len(args))
-
-	if _, err := runCommand(ctx, envs, args); err != nil {
-		return "", err
-	}
-
-	if outputFile != "" {
-		*outputFiles = append(*outputFiles, outputFile)
-	}
-
-	// Manual upload: only if we didn't pass -dashboard to the tool,
-	// and only if the output file is non-empty.
-	if !sliceutil.Contains(args, "-dashboard") && outputFile != "" {
-		info, err := os.Stat(outputFile)
-		if err == nil && info.Size() > 0 {
-			assetId, err := uploadToCloudWithId(ctx, task, outputFile, task.Options.EnumerationID)
-			if err == nil {
-				*manualAssetId = assetId
-			} else {
-				assetId, err = uploadToCloud(ctx, task, outputFile)
-				if err != nil {
-					return outputFile, err
-				}
-				*manualAssetId = assetId
-			}
-		}
-	}
-
 	return outputFile, nil
 }
 
@@ -752,23 +675,4 @@ func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, er
 	slog.Debug("tool execution completed", "cmd", args[0])
 
 	return taskResult, nil
-}
-
-func parseGenericArgs(task *types.Task) (envs, args []string, outputFile string, removeFunc func(), err error) {
-	envs = getEnvs()
-
-	args = append(args, task.Tool.String())
-
-	tmpFile, _, removeFunc, err := prepareInput(task)
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	args = append(args,
-		"-silent",
-		"-l", tmpFile,
-		// "-verbose",
-	)
-
-	return envs, args, outputFile, removeFunc, nil
 }

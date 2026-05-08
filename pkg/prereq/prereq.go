@@ -77,14 +77,7 @@ var tools = []Tool{
 		GitHubRepo: "projectdiscovery/nuclei",
 		VersionArg: "-version",
 	},
-	{
-		Name:       "naabu",
-		Priority:   Critical,
-		GoInstall:  "github.com/projectdiscovery/naabu/v2/cmd/naabu@latest",
-		GitHubRepo: "projectdiscovery/naabu",
-		VersionArg: "-version",
-	},
-	// httpx, dnsx, and tlsx are embedded via pkg/runtools — no install needed.
+	// naabu, httpx, dnsx, and tlsx are embedded via pkg/runtools — no install needed.
 	{
 		Name:     "nmap",
 		Priority: Important,
