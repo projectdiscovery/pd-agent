@@ -5,8 +5,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/layers"
+	"github.com/Mzack9999/gopacket"
+	"github.com/Mzack9999/gopacket/layers"
 )
 
 // parseIGMPPacket parses an IGMP packet and extracts peer information
@@ -27,20 +27,30 @@ func parseIGMPPacket(packet gopacket.Packet, iface *net.Interface) (*Peer, error
 		return nil, fmt.Errorf("packet is not IGMP (protocol: %d)", ip.Protocol)
 	}
 
-	// Get IGMP layer
+	// Get IGMP layer. gopacket dispatches V1/V2 frames to *layers.IGMPv1or2
+	// and V3 to *layers.IGMP, so handle both. Fall back to manual parsing if
+	// the layer was not produced (e.g. truncated frame).
 	igmpLayer := packet.Layer(layers.LayerTypeIGMP)
 	if igmpLayer == nil {
-		// Try to parse IGMP manually if layer is not available
 		return parseIGMPManually(packet, ip)
 	}
 
-	igmp, ok := igmpLayer.(*layers.IGMP)
-	if !ok {
-		return nil, fmt.Errorf("failed to cast to IGMP layer")
+	var (
+		igmpType     uint8
+		groupAddress net.IP
+	)
+	switch v := igmpLayer.(type) {
+	case *layers.IGMP:
+		igmpType = uint8(v.Type)
+		groupAddress = v.GroupAddress
+	case *layers.IGMPv1or2:
+		igmpType = uint8(v.Type)
+		groupAddress = v.GroupAddress
+	default:
+		return nil, fmt.Errorf("unexpected IGMP layer type %T", igmpLayer)
 	}
 
 	// Only process membership reports
-	igmpType := uint8(igmp.Type)
 	if !IsMembershipReport(igmpType) {
 		return nil, fmt.Errorf("not a membership report (type: 0x%02x)", igmpType)
 	}
@@ -54,8 +64,8 @@ func parseIGMPPacket(packet gopacket.Packet, iface *net.Interface) (*Peer, error
 	}
 
 	// Extract multicast group
-	if igmp.GroupAddress != nil && !igmp.GroupAddress.IsUnspecified() {
-		peer.MulticastGroups = append(peer.MulticastGroups, igmp.GroupAddress.String())
+	if groupAddress != nil && !groupAddress.IsUnspecified() {
+		peer.MulticastGroups = append(peer.MulticastGroups, groupAddress.String())
 	}
 
 	// Try to extract MAC address from Ethernet layer

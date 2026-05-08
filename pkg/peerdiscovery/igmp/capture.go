@@ -4,8 +4,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/google/gopacket"
-	"github.com/google/gopacket/pcap"
+	"github.com/Mzack9999/gopacket"
+	"github.com/Mzack9999/gopacket/pcap"
 )
 
 const (
@@ -17,15 +17,11 @@ const (
 	DefaultTimeout = 100 * time.Millisecond
 )
 
-// createCaptureHandle creates a pcap handle for packet capture on the given interface
+// createCaptureHandle creates a pcap handle for packet capture on the given interface.
+// Callers must ensure libpcap is loadable (see DiscoverPeers' upfront loadPcap check);
+// otherwise pcap.OpenLive returns an error.
 func createCaptureHandle(iface *net.Interface, config *Config) (*pcap.Handle, error) {
-	// Open live capture with timeout for responsive context cancellation
-	handle, err := pcap.OpenLive(iface.Name, DefaultSnapLen, DefaultPromisc, DefaultTimeout)
-	if err != nil {
-		return nil, err
-	}
-
-	return handle, nil
+	return pcap.OpenLive(iface.Name, DefaultSnapLen, DefaultPromisc, DefaultTimeout)
 }
 
 // packetSource wraps pcap packet source

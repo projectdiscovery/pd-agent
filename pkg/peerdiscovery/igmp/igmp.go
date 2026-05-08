@@ -3,6 +3,7 @@ package igmp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sync"
 	"time"
@@ -12,10 +13,10 @@ import (
 type Peer struct {
 	IP              net.IP
 	MAC             net.HardwareAddr // Optional, may be nil
-	MulticastGroups []string          // List of multicast groups the host belongs to
-	LastSeen        time.Time         // When the host was last detected
-	ResponseTime    time.Duration     // Time to receive IGMP response
-	IGMPVersion     int               // IGMP version detected (1, 2, or 3)
+	MulticastGroups []string         // List of multicast groups the host belongs to
+	LastSeen        time.Time        // When the host was last detected
+	ResponseTime    time.Duration    // Time to receive IGMP response
+	IGMPVersion     int              // IGMP version detected (1, 2, or 3)
 }
 
 // Config holds configuration for IGMP discovery
@@ -31,7 +32,7 @@ type Config struct {
 
 	// Discovery settings
 	QueryInterval time.Duration // Interval between membership queries (default: 125s for IGMPv2)
-	EnableQueries bool         // Enable periodic membership queries (default: true)
+	EnableQueries bool          // Enable periodic membership queries (default: true)
 
 	// Channel buffer size for discovered peers
 	ChannelBuffer int // Default: 100
@@ -43,13 +44,13 @@ type Config struct {
 // DefaultConfig returns a Config with sensible defaults
 func DefaultConfig() *Config {
 	return &Config{
-		Version:        2,
+		Version:         2,
 		MulticastGroups: CommonMulticastGroups,
-		Interface:      nil, // All interfaces
-		QueryInterval:  125 * time.Second,
-		EnableQueries:  true,
-		ChannelBuffer:  100,
-		EnableBPF:      true,
+		Interface:       nil, // All interfaces
+		QueryInterval:   125 * time.Second,
+		EnableQueries:   true,
+		ChannelBuffer:   100,
+		EnableBPF:       true,
 	}
 }
 
@@ -64,6 +65,17 @@ func DiscoverPeers(ctx context.Context, config *Config) (<-chan Peer, error) {
 
 	// Create buffered channel for discovered peers
 	peerChan := make(chan Peer, config.ChannelBuffer)
+
+	// Single upfront libpcap check. If missing, IGMP peer discovery is
+	// non-functional even if the query path (raw sockets) still works,
+	// because we can't capture replies. Warn once and shut down cleanly
+	// rather than spamming the network with unanswerable queries.
+	if err := loadPcap(); err != nil {
+		slog.Warn("IGMP peer discovery unavailable: libpcap not found on host; install libpcap to enable",
+			"err", err)
+		close(peerChan)
+		return peerChan, nil
+	}
 
 	// Get network interfaces to monitor
 	var interfaces []*net.Interface
@@ -256,4 +268,3 @@ func sendQueriesToInterfaces(ctx context.Context, interfaces []*net.Interface, c
 		}
 	}
 }
-

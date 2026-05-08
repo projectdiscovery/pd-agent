@@ -3,8 +3,8 @@ module github.com/projectdiscovery/pd-agent
 go 1.25.0
 
 require (
+	github.com/Mzack9999/gopacket v0.0.0-20260327212258-d211b432c22b
 	github.com/dustin/go-humanize v1.0.1
-	github.com/google/gopacket v1.1.19
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.18.4
 	github.com/nats-io/nats-server/v2 v2.10.29
@@ -137,6 +137,7 @@ require (
 	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/dsnet/compress v0.0.2-0.20230904184137-39efe44ab707 // indirect
+	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
 	github.com/ericlagergren/decimal v0.0.0-20240411145413-00de7ca16731 // indirect
