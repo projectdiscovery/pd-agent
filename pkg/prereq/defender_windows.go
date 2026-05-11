@@ -13,22 +13,17 @@ import (
 // defenderTools lists process names that must be in Microsoft Defender's
 // exclusion list. Without exclusions, real-time scanning quarantines them
 // mid-scan and the agent silently produces partial/empty results.
+//
+// After the SDK-embed migration, all PD scanners (nuclei/naabu/httpx/dnsx/
+// tlsx) live inside pd-agent.exe — they no longer exist as standalone
+// processes. The only externally-spawned binary still in scope is leakless,
+// which go-rod extracts to a per-launch temp dir to supervise Chrome.
 // Keep this list in sync with prereq-windows.ps1.
 var defenderTools = []string{
 	"pd-agent.exe",
 	"pd-agent-windows-amd64.exe",
 	"pd-agent-windows-arm64.exe",
-	"naabu.exe",
-	"nuclei.exe",
-	"httpx.exe",
-	"dnsx.exe",
-	"subfinder.exe",
-	"katana.exe",
 	"leakless.exe",
-	"mapcidr.exe",
-	"asnmap.exe",
-	"tlsx.exe",
-	"cdncheck.exe",
 }
 
 // CheckDefenderExclusions verifies pd-agent's bundled tools are excluded from

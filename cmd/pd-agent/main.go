@@ -2594,7 +2594,7 @@ func main() {
 	}
 
 	// Check prerequisites — auto-install missing tools (idempotent: fast on restart)
-	if _, failed := prereq.EnsureAll(); len(failed) > 0 {
+	if failed := prereq.EnsureAll(); len(failed) > 0 {
 		slog.Error("Could not install required tools", "tools", strings.Join(failed, ", "))
 		os.Exit(1)
 	}
