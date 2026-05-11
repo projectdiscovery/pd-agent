@@ -23,12 +23,16 @@ type NaabuOptions struct {
 	// Ports is a comma-separated list (e.g. "80,443,8443"). Empty means
 	// naabu's default top-1000.
 	Ports string
-	// NmapCLI is forwarded as `-nmap-cli "..."` for service detection.
-	// Empty means no nmap pass-through.
-	NmapCLI string
 	// SkipHostDiscovery is the equivalent of nmap -Pn: don't try to ping the
 	// host first, just probe the ports.
 	SkipHostDiscovery bool
+	// ServiceVersion enables naabu's native service-version detection
+	// (equivalent of the CLI's -sV). Uses nmap-service-probes natively,
+	// no external nmap binary needed.
+	ServiceVersion bool
+	// ServiceDiscovery enables naabu's port-number-to-service mapping
+	// (CLI -sD). Cheaper than ServiceVersion.
+	ServiceDiscovery bool
 }
 
 // RunNaabu scans every target in `hosts` and writes one "host:port" line per
@@ -51,8 +55,9 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	naabuOpts := &runner.Options{
 		Host:              goflags.StringSlice(hosts),
 		Ports:             opts.Ports,
-		NmapCLI:           opts.NmapCLI,
 		SkipHostDiscovery: opts.SkipHostDiscovery,
+		ServiceVersion:    opts.ServiceVersion,
+		ServiceDiscovery:  opts.ServiceDiscovery,
 		Silent:            true,
 		OnResult: func(hr *result.HostResult) {
 			if hr == nil || hr.Host == "" || len(hr.Ports) == 0 {

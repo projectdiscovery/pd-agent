@@ -18,11 +18,11 @@ RUN GOOS=linux go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main
 
 FROM --platform=linux/amd64 ubuntu:latest
 # Runtime dependencies: Chrome for nuclei/httpx headless screenshots, plus
-# ca-certificates for outbound TLS. nmap was dropped — naabu's service
-# detection is moving to native fingerprinting (naabu PR #1667). libpcap is
-# intentionally not installed: syn-scan and IGMP discovery warn-and-skip when
-# it's missing. Users who want either can extend this image with
-# `apt install nmap libpcap0.8`.
+# ca-certificates for outbound TLS. naabu does service-version detection
+# natively (nmap-service-probes parsed in-process), so no nmap binary is
+# required. libpcap is intentionally not installed: syn-scan and IGMP
+# discovery warn-and-skip when it's missing. Users who want libpcap-backed
+# features can extend this image with `apt install libpcap0.8`.
 RUN apt update && apt install -y \
     ca-certificates \
     wget \

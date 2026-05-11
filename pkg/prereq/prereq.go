@@ -1,11 +1,10 @@
 // Package prereq runs pd-agent's startup preflight: warm up the embedded
-// headless browser, surface a friendly warning when nmap isn't on PATH (only
-// used by naabu's deprecated -nmap-cli pass-through), and warn on Windows if
-// Defender exclusions aren't set.
+// headless browser and warn on Windows if Defender exclusions aren't set.
 //
 // All ProjectDiscovery scanners (nuclei, naabu, httpx, dnsx, tlsx) are linked
-// into the pd-agent binary via pkg/runtools, so this package no longer
-// installs anything: it just observes and warns.
+// into the pd-agent binary via pkg/runtools. Service-version detection is
+// handled natively by naabu's nmap-service-probes parser, so there are no
+// external tool dependencies left to manage.
 package prereq
 
 import (
@@ -14,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -22,14 +20,12 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// EnsureAll runs the agent's startup preflight: warm up the headless browser,
-// log a soft warning if nmap is missing, and (on Windows) check Defender
-// exclusions. Returns a list of components the agent couldn't validate —
-// non-empty means the caller should exit. Today only browser warmup can land
-// in that list; nmap and Defender checks are warn-only.
+// EnsureAll runs the agent's startup preflight: warm up the headless browser
+// and (on Windows) check Defender exclusions. Returns a list of components
+// the agent couldn't validate — non-empty means the caller should exit.
+// Today only browser warmup can land in that list; the Defender check is
+// warn-only.
 func EnsureAll() (failed []string) {
-	checkNmap()
-
 	if err := warmupBrowser(); err != nil {
 		failed = append(failed, "browser (Chrome)")
 	}
@@ -37,20 +33,6 @@ func EnsureAll() (failed []string) {
 	CheckDefenderExclusions()
 
 	return failed
-}
-
-// checkNmap logs whether nmap is reachable on PATH. naabu still uses it for
-// service detection via the deprecated -nmap-cli pass-through; once naabu's
-// native fingerprinting (PR #1667, -sV/-sD) lands in a tagged release, this
-// check can go away entirely.
-func checkNmap() {
-	path, err := exec.LookPath("nmap")
-	if err != nil {
-		slog.Warn("prereq: nmap not found on PATH — naabu's service-detection (-nmap-cli) pass-through will be unavailable",
-			"hint", "install via apt/brew if you need ports_service_scan, otherwise ignore")
-		return
-	}
-	slog.Info("prereq: found", "tool", "nmap", "path", path)
 }
 
 // warmupBrowser runs an embedded httpx screenshot probe against a known host

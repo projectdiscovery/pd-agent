@@ -64,16 +64,15 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		// --- Step 2: Port scan (always — use step's naabu or quick filter) ---
 		var hostsWithOpenPorts []string
 		if sliceutil.Contains(steps, "port_scan") {
-			// Full port scan via naabu
-			var nmapCLI string
-			if sliceutil.Contains(steps, "ports_service_scan") {
-				nmapCLI = "nmap -sV -Pn"
-			}
+			// Full port scan via naabu. ServiceVersion turns on naabu's
+			// native fingerprinting (nmap-service-probes parsed in-process,
+			// no external binary).
+			serviceVersion := sliceutil.Contains(steps, "ports_service_scan")
 			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
 				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
 					OutputFile:        outputFile,
-					NmapCLI:           nmapCLI,
 					SkipHostDiscovery: true,
+					ServiceVersion:    serviceVersion,
 				})
 				// naabu returns an error when no ports are found; that's not
 				// a pipeline failure — downstream steps short-circuit on an
