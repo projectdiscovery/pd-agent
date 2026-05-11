@@ -271,12 +271,22 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 
 	// Reporting config (nuclei -rc / -report-config): tracker credentials for
 	// auto-creating Jira/Linear/GitHub/etc. issues on matched findings.
-	// Resolution order:
-	//   1. task.Options.ReportConfig — base64 YAML the platform shipped in
-	//      the work message. Preferred path.
-	//   2. PDCP_REPORTING_CONFIG env — path to a local YAML file.
-	//      Operator-controlled override / fallback.
-	if task.Options.ReportConfig != "" {
+	// Resolution order — operator override wins:
+	//   1. PDCP_REPORTING_CONFIG env — path to a local YAML on the agent.
+	//      Lets customers keep tracker creds off the platform and out of the
+	//      work message entirely. If set, takes precedence even if the work
+	//      message also carries ReportConfig.
+	//   2. task.Options.ReportConfig — base64 YAML the platform shipped.
+	if path := os.Getenv("PDCP_REPORTING_CONFIG"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			opts.ReportingConfigYAML = data
+			slog.Info("nuclei scan: loaded reporting config from env (overriding work message)",
+				"scan_id", task.Options.ScanID, "path", path, "bytes", len(data))
+		} else {
+			slog.Warn("nuclei scan: PDCP_REPORTING_CONFIG read failed",
+				"path", path, "error", err)
+		}
+	} else if task.Options.ReportConfig != "" {
 		decoded, err := base64.StdEncoding.DecodeString(task.Options.ReportConfig)
 		if err != nil {
 			slog.Warn("nuclei scan: failed to base64-decode task.Options.ReportConfig; reporting disabled for this scan",
@@ -285,15 +295,6 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 			opts.ReportingConfigYAML = decoded
 			slog.Info("nuclei scan: loaded reporting config from work message",
 				"scan_id", task.Options.ScanID, "bytes", len(decoded))
-		}
-	} else if path := os.Getenv("PDCP_REPORTING_CONFIG"); path != "" {
-		if data, err := os.ReadFile(path); err == nil {
-			opts.ReportingConfigYAML = data
-			slog.Info("nuclei scan: loaded reporting config from env",
-				"scan_id", task.Options.ScanID, "path", path, "bytes", len(data))
-		} else {
-			slog.Warn("nuclei scan: PDCP_REPORTING_CONFIG read failed",
-				"path", path, "error", err)
 		}
 	}
 
