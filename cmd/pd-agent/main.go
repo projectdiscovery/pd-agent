@@ -26,6 +26,12 @@ import (
 
 	"go.uber.org/automaxprocs/maxprocs"
 
+	// autofdmax raises RLIMIT_NOFILE at process startup to the platform max.
+	// Each embedded nuclei engine can open thousands of template files; with
+	// many chunks in flight we hit "too many open files" otherwise. This is
+	// the same package the nuclei CLI uses.
+	_ "github.com/projectdiscovery/fdmax/autofdmax"
+
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/nats-io/nkeys"
