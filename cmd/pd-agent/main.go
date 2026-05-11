@@ -1327,7 +1327,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, scanSem.Size(),
 			scanSem, nil,
 			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
-				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets, scanBatcher)
+				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, work.ReportConfig, work.HistoryID, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets, scanBatcher)
 				return nil
 			},
 		)
@@ -1620,7 +1620,7 @@ func (r *Runner) agentMode(ctx context.Context) error {
 // written to a per-chunk temp dir, with their paths appended to the templates
 // list passed to nuclei. The temp dir is cleaned up before the function returns.
 // If scanBatcher is nil, a new batcher will be created for this scan.
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config string, templates []string, privateTemplates map[string]string, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, reportConfig, historyID string, templates []string, privateTemplates map[string]string, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
 	// Resource profiling: snapshot before scan
 	var activeWorkers int32
 	if pool := r.jsPool.Load(); pool != nil {
@@ -1737,13 +1737,15 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 	task := &types.Task{
 		Tool: types.Nuclei,
 		Options: types.Options{
-			Hosts:     filteredTargets,
-			Templates: templatesToUse,
-			Silent:    true,
-			ScanID:    scanID,
-			Config:    config,
-			TeamID:    r.options.TeamID,
-			Output:    outputDir,
+			Hosts:        filteredTargets,
+			Templates:    templatesToUse,
+			Silent:       true,
+			ScanID:       scanID,
+			Config:       config,
+			ReportConfig: reportConfig,
+			HistoryID:    historyID,
+			TeamID:       r.options.TeamID,
+			Output:       outputDir,
 		},
 		Id: metaID,
 	}
@@ -1794,8 +1796,9 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config s
 
 	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
 	if scanBatcher != nil && taskResult != nil && outputFile != "" {
-		// Pass output file path to ExtractLogEntries
-		logEntries, err := scanlog.ExtractLogEntries(taskResult, scanID, outputFile)
+		// Pass output file path + historyID to ExtractLogEntries so log
+		// entries land on the right history record on the platform.
+		logEntries, err := scanlog.ExtractLogEntries(taskResult, scanID, historyID, outputFile)
 		if err != nil {
 			slog.Warn("Failed to parse log entries", "scan_id", scanID, "error", err)
 		} else {

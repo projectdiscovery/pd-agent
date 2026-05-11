@@ -154,13 +154,15 @@ type RuntimeInfo struct {
 // chunks, etc.) live in a single group-level stream; consumers use FilterSubject
 // to scope what they read.
 type WorkMessage struct {
-	Type          string   `json:"type"`                  // "scan" or "enumeration"
-	ScanID        string   `json:"scan_id"`               // scan_id or enumeration_id
-	ChunkSubject  string   `json:"chunk_subject"`         // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
-	ChunkConsumer string   `json:"chunk_consumer"`        // shared consumer name (typically agent-network)
-	ChunkCount    int      `json:"chunk_count,omitempty"` // number of chunks in the stream
-	Config        string   `json:"config,omitempty"`      // base64 scan configuration
-	Steps         []string `json:"steps,omitempty"`       // enumeration steps (enumerations)
+	Type          string   `json:"type"`                    // "scan" or "enumeration"
+	ScanID        string   `json:"scan_id"`                 // scan_id or enumeration_id
+	ChunkSubject  string   `json:"chunk_subject"`           // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
+	ChunkConsumer string   `json:"chunk_consumer"`          // shared consumer name (typically agent-network)
+	ChunkCount    int      `json:"chunk_count,omitempty"`   // number of chunks in the stream
+	Config        string   `json:"config,omitempty"`        // base64 scan configuration
+	ReportConfig  string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration; tracker creds for issue creation on matches
+	HistoryID     string   `json:"history_id,omitempty"`    // scan history record id; threaded into pkg/scanlog uploads so per-chunk log entries land on the right history row
+	Steps         []string `json:"steps,omitempty"`         // enumeration steps (enumerations)
 }
 
 // ChunkMessage is a single unit of work decoded from the group stream.

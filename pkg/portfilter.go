@@ -46,11 +46,17 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 
 	// Strategy: extract host from each input line, run naabu against
 	// host x (template-extracted ports + any port hint from input), then emit
-	// host:port for every (host, openPort) pair naabu reports. nuclei is
-	// invoked once per host:port, so it scans every reachable port on the
-	// host even if the input only mentioned one.
+	// scheme://host:port for every (host, openPort) pair naabu reports. nuclei
+	// is invoked once per URL, so it scans every reachable port on the host
+	// even if the input only mentioned one. The scheme is preserved from the
+	// input when present — nuclei's SDK doesn't auto-probe scheme for bare
+	// host:port targets the way the CLI does, so templates with {{BaseURL}}
+	// would never run otherwise.
 	var hosts []string
 	var ports []string
+	// hostSchemes maps host (without port) → scheme from the original input.
+	// Used to reconstruct the URL when emitting results.
+	hostSchemes := make(map[string]string)
 
 	scanner := bufio.NewScanner(targetsF)
 	for scanner.Scan() {
@@ -59,9 +65,12 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			continue
 		}
 
-		// Strip URL scheme (e.g. "https://host:port" → "host:port")
+		// Strip URL scheme (e.g. "https://host:port" → "host:port") and
+		// remember it for reconstruction.
 		stripped := line
+		scheme := ""
 		if idx := strings.Index(stripped, "://"); idx != -1 {
+			scheme = stripped[:idx]
 			stripped = stripped[idx+3:]
 		}
 		// Remove trailing path (e.g. "host:port/path" → "host:port")
@@ -77,8 +86,14 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			if port != "" {
 				ports = append(ports, port)
 			}
+			if scheme != "" {
+				hostSchemes[host] = scheme
+			}
 		} else {
 			hosts = append(hosts, stripped)
+			if scheme != "" {
+				hostSchemes[stripped] = scheme
+			}
 		}
 	}
 
@@ -127,8 +142,14 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 
 	out := make([]string, 0)
 	for host, openPorts := range hostPorts {
+		scheme := hostSchemes[host]
 		for _, p := range openPorts {
-			out = append(out, net.JoinHostPort(host, p))
+			hostport := net.JoinHostPort(host, p)
+			if scheme != "" {
+				out = append(out, scheme+"://"+hostport)
+			} else {
+				out = append(out, hostport)
+			}
 		}
 	}
 	out = sliceutil.Dedupe(out)

@@ -515,6 +515,17 @@ func processChunkMsg(
 	}
 	if len(chunk.PublicTemplates) > 0 {
 		logAttrs = append(logAttrs, "templates", len(chunk.PublicTemplates))
+		// Sample of the actual template paths the cloud sent. Helps catch
+		// "I selected one template but the chunker shipped 6k" scheduler
+		// surprises. Cap the sample so very large chunks don't flood logs.
+		if len(chunk.PublicTemplates) <= 5 {
+			logAttrs = append(logAttrs, "template_list", chunk.PublicTemplates)
+		} else {
+			logAttrs = append(logAttrs, "first_templates", chunk.PublicTemplates[:5])
+		}
+	}
+	if len(chunk.PrivateTemplates) > 0 {
+		logAttrs = append(logAttrs, "private_templates", len(chunk.PrivateTemplates))
 	}
 	if chunk.EnrichmentType != "" {
 		logAttrs = append(logAttrs, "enrichment_type", chunk.EnrichmentType)

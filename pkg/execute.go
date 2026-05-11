@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
@@ -241,14 +242,6 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		outputFile = tmp
 	}
 
-	if task.Options.Config != "" {
-		// pd-agent's task config is a YAML file with default flag values for
-		// nuclei CLI. The SDK doesn't expose the same goflags-based config
-		// merge, so we log and proceed with the explicit options below.
-		// Most pd-agent scans don't use this; revisit if it becomes load-bearing.
-		slog.Warn("nuclei scan: task.Options.Config is set but ignored under embedded SDK; flags applied explicitly", "scan_id", task.Options.ScanID)
-	}
-
 	opts := runtools.NucleiOptions{
 		OutputFile:           outputFile,
 		Targets:              task.Options.Hosts,
@@ -261,6 +254,49 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		Headless:             hasMoreThan8GBRAM() && isAMD64(),
 	}
 
+	// task.Options.Config is the work message's `config` field — base64 of
+	// a nuclei -config-style YAML. Decode and hand the bytes to the SDK's
+	// WithConfigBytes (same path the CLI uses for -config <file>). nuclei's
+	// SDK also picks up an inline `report-config: <path>` reference from the
+	// config and loads the reporting YAML implicitly.
+	if task.Options.Config != "" {
+		decoded, err := base64.StdEncoding.DecodeString(task.Options.Config)
+		if err != nil {
+			slog.Warn("nuclei scan: failed to base64-decode task.Options.Config; running without overrides",
+				"scan_id", task.Options.ScanID, "error", err)
+		} else {
+			opts.ConfigYAML = decoded
+		}
+	}
+
+	// Reporting config (nuclei -rc / -report-config): tracker credentials for
+	// auto-creating Jira/Linear/GitHub/etc. issues on matched findings.
+	// Resolution order:
+	//   1. task.Options.ReportConfig — base64 YAML the platform shipped in
+	//      the work message. Preferred path.
+	//   2. PDCP_REPORTING_CONFIG env — path to a local YAML file.
+	//      Operator-controlled override / fallback.
+	if task.Options.ReportConfig != "" {
+		decoded, err := base64.StdEncoding.DecodeString(task.Options.ReportConfig)
+		if err != nil {
+			slog.Warn("nuclei scan: failed to base64-decode task.Options.ReportConfig; reporting disabled for this scan",
+				"scan_id", task.Options.ScanID, "error", err)
+		} else {
+			opts.ReportingConfigYAML = decoded
+			slog.Info("nuclei scan: loaded reporting config from work message",
+				"scan_id", task.Options.ScanID, "bytes", len(decoded))
+		}
+	} else if path := os.Getenv("PDCP_REPORTING_CONFIG"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			opts.ReportingConfigYAML = data
+			slog.Info("nuclei scan: loaded reporting config from env",
+				"scan_id", task.Options.ScanID, "path", path, "bytes", len(data))
+		} else {
+			slog.Warn("nuclei scan: PDCP_REPORTING_CONFIG read failed",
+				"path", path, "error", err)
+		}
+	}
+
 	slog.Info("running embedded nuclei",
 		"scan_id", task.Options.ScanID,
 		"targets", len(opts.Targets),
@@ -268,32 +304,22 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"output", outputFile,
 		"code", opts.EnableCodeTemplates,
 		"headless", opts.Headless,
+		"config_bytes", len(opts.ConfigYAML),
 	)
 
+	// Dashboard upload is now handled by the nuclei SDK itself
+	// (WithPDCPUpload, wired in pkg/runtools/nuclei.go). The SDK wraps the
+	// engine's output writer with pdcp.UploadWriter — same path the CLI takes
+	// with -dashboard -scan-id, including the matched-only filter.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
 		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
-	}
-
-	outputFiles := []string{outputFile}
-
-	// Dashboard upload: nuclei's CLI does this via -dashboard, the SDK does
-	// not. Match the same upload semantics as the embedded enum tools.
-	if task.Options.ScanID != "" || task.Options.TeamID != "" {
-		if info, err := os.Stat(outputFile); err == nil && info.Size() > 0 {
-			scanID := task.Options.ScanID
-			if _, err := uploadToCloudWithId(ctx, task, outputFile, scanID); err != nil {
-				if _, err := uploadToCloud(ctx, task, outputFile); err != nil {
-					slog.Warn("nuclei scan: dashboard upload failed", "error", err)
-				}
-			}
-		}
 	}
 
 	// Empty TaskResult: the embedded path doesn't capture stdout/stderr the
 	// way the subprocess did. ExtractUnresponsiveHosts loses its input here;
 	// that diagnostic stops working under the embedded path until we hook
 	// nuclei's logger to surface skip events.
-	return &types.TaskResult{}, outputFiles, nil
+	return &types.TaskResult{}, []string{outputFile}, nil
 }
 
 // splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.

@@ -62,9 +62,11 @@ type Options struct {
 	Output string
 
 	// - Nuclei
-	ScanID    string
-	Templates []string
-	Config    string
+	ScanID       string
+	Templates    []string
+	Config       string
+	ReportConfig string // base64 nuclei reporting (-rc) config (Jira/Linear/GitHub/etc. tracker)
+	HistoryID    string // scan history record id; carried through for per-chunk scan_log uploads
 
 	// - Enumeration
 	EnumerationID string

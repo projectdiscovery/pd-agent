@@ -53,6 +53,17 @@ type NucleiOptions struct {
 	// ProbeNonHttp passes through to LoadTargets — when true, nuclei probes
 	// non-HTTP services via tcp/dns/etc. Defaults to false (HTTP-only).
 	ProbeNonHttp bool
+	// ConfigYAML is the raw -config style YAML the cloud sent in the work
+	// message (already base64-decoded by the caller). When non-empty it's
+	// merged into engine options via the SDK's WithConfigBytes — same path
+	// the CLI uses for `-config <path>`.
+	ConfigYAML []byte
+	// ReportingConfigYAML is the raw -report-config style YAML (Jira/Linear/
+	// etc. tracker config). When non-empty it's merged via the SDK's
+	// WithReportingConfigBytes. nuclei also resolves `report-config: <path>`
+	// references inside ConfigYAML implicitly, so most callers won't need
+	// this field unless the reporting YAML is sent inline.
+	ReportingConfigYAML []byte
 }
 
 // RunNuclei runs nuclei via the embedded SDK and writes one JSON ResultEvent
@@ -105,6 +116,19 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 	}
 	if opts.Headless {
 		sdkOpts = append(sdkOpts, nuclei.EnableHeadlessWithOpts(nil))
+	}
+	if len(opts.ConfigYAML) > 0 {
+		sdkOpts = append(sdkOpts, nuclei.WithConfigBytes(opts.ConfigYAML))
+	}
+	if len(opts.ReportingConfigYAML) > 0 {
+		sdkOpts = append(sdkOpts, nuclei.WithReportingConfigBytes(opts.ReportingConfigYAML))
+	}
+	// PDCP cloud upload: matches CLI -dashboard -scan-id -team-id. The SDK
+	// wraps the engine's output writer with pdcp.UploadWriter, which filters
+	// to matched results only (its inner StandardWriter defaults
+	// matcherStatus=false), exactly as the CLI does today.
+	if opts.ScanID != "" {
+		sdkOpts = append(sdkOpts, nuclei.WithPDCPUpload(opts.ScanID, opts.TeamID))
 	}
 
 	ne, err := nuclei.NewNucleiEngineCtx(ctx, sdkOpts...)

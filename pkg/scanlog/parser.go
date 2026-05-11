@@ -2,8 +2,8 @@ package scanlog
 
 import (
 	"bufio"
-	json "github.com/json-iterator/go"
 	"fmt"
+	json "github.com/json-iterator/go"
 	"os"
 	"strings"
 
@@ -41,7 +41,7 @@ func ParseNucleiOutput(output string) ([]types.ScanLogUploadEntry, error) {
 		}
 
 		// Create a default scan context (will be overridden by caller if needed)
-		scanContext := NewScanContext("")
+		scanContext := NewScanContext("", "")
 		entry, err := BuildLogEntry(event, scanContext)
 		if err != nil {
 			// Log but continue processing other entries
@@ -80,11 +80,11 @@ func ParseOutputFile(outputFilePath, scanID string) ([]types.ScanLogUploadEntry,
 }
 
 // ExtractLogEntries extracts log entries from output file ONLY (no fallback to stdout/stderr for log upload)
-func ExtractLogEntries(taskResult *types.TaskResult, scanID string, outputFilePath string) ([]types.ScanLogUploadEntry, error) {
+func ExtractLogEntries(taskResult *types.TaskResult, scanID, historyID string, outputFilePath string) ([]types.ScanLogUploadEntry, error) {
 	var allEntries []types.ScanLogUploadEntry
 
 	// Create scan context
-	scanContext := NewScanContext(scanID)
+	scanContext := NewScanContext(scanID, historyID)
 
 	// Parse output file ONLY (no fallback to stdout/stderr for log upload)
 	if outputFilePath != "" {

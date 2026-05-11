@@ -40,9 +40,13 @@ func GetFlushInterval() time.Duration {
 	return DefaultFlushInterval
 }
 
-// IsLogUploadEnabled returns whether log upload is enabled
+// IsLogUploadEnabled returns whether log upload is enabled. Defaults to off
+// because the matched-only nuclei findings upload (SDK WithPDCPUpload) covers
+// the dashboard already; scan_log_upload is a separate audit-feed endpoint
+// the platform isn't always provisioned to accept. Set
+// PDCP_ENABLE_SCAN_LOG_UPLOAD=true to opt in.
 func IsLogUploadEnabled() bool {
-	return envutil.GetEnvOrDefault("PDCP_ENABLE_SCAN_LOG_UPLOAD", "true") == "true"
+	return envutil.GetEnvOrDefault("PDCP_ENABLE_SCAN_LOG_UPLOAD", "false") == "true"
 }
 
 // NewScanLogBatcher creates a new batcher for scan log entries
@@ -76,4 +80,3 @@ func NewScanLogBatcher(scanID, teamID string) *batcher.Batcher[types.ScanLogUplo
 
 	return b
 }
-
