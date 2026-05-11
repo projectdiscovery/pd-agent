@@ -48,10 +48,8 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
 	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
-	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
-	"github.com/projectdiscovery/utils/batcher"
 	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -1298,16 +1296,6 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 	}
 
 	err := func() error {
-		// Set up scan log batcher
-		var scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]
-		if scanlog.IsLogUploadEnabled() {
-			scanBatcher = scanlog.NewScanLogBatcher(work.ScanID, r.options.TeamID)
-			defer func() {
-				scanBatcher.Stop()
-				scanBatcher.WaitDone()
-			}()
-		}
-
 		// Consume chunks from the group stream, filtered by chunk subject
 		creds := r.GetNATSCredentials()
 		chunkConsumer := work.ChunkConsumer
@@ -1327,7 +1315,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		return natsrpc.ConsumeChunks(ctx, pool.JS(), creds.Stream, chunkConsumer, work.ChunkSubject, scanSem.Size(),
 			scanSem, nil,
 			func(ctx context.Context, chunk *natsrpc.ChunkMessage) error {
-				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, work.ReportConfig, work.HistoryID, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets, scanBatcher)
+				r.executeNucleiScan(ctx, work.ScanID, chunk.ChunkID, work.Config, work.ReportConfig, work.HistoryID, chunk.PublicTemplates, chunk.PrivateTemplates, chunk.Targets)
 				return nil
 			},
 		)
@@ -1614,13 +1602,11 @@ func (r *Runner) agentMode(ctx context.Context) error {
 	return nil
 }
 
-// executeNucleiScan is the shared implementation for executing nuclei scans
-// using the same logic as pd-agent.
+// executeNucleiScan runs a single nuclei chunk through pkg.Run.
 // privateTemplates maps name -> base64-encoded YAML; entries are decoded and
 // written to a per-chunk temp dir, with their paths appended to the templates
 // list passed to nuclei. The temp dir is cleaned up before the function returns.
-// If scanBatcher is nil, a new batcher will be created for this scan.
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, reportConfig, historyID string, templates []string, privateTemplates map[string]string, assets []string, scanBatcher *batcher.Batcher[types.ScanLogUploadEntry]) {
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, reportConfig string, historyID int64, templates []string, privateTemplates map[string]string, assets []string) {
 	// Resource profiling: snapshot before scan
 	var activeWorkers int32
 	if pool := r.jsPool.Load(); pool != nil {
@@ -1635,19 +1621,6 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		endSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "end", aw)
 		resourceprofile.LogScanDelta(startSnap, endSnap)
 	}()
-
-	// Create batcher for this scan if not provided (if log upload is enabled)
-	if scanBatcher == nil && scanlog.IsLogUploadEnabled() {
-		scanBatcher = scanlog.NewScanLogBatcher(scanID, r.options.TeamID)
-		// Defer batcher stop when scan completes
-		defer func() {
-			if scanBatcher != nil {
-				scanBatcher.Stop()
-				scanBatcher.WaitDone() // Wait for any pending uploads
-				slog.Debug("Stopped scan log batcher", "scan_id", scanID)
-			}
-		}()
-	}
 
 	// Build the template list from whatever the chunk supplied. We never fall
 	// back to "scan with all default templates" - a chunk that arrives with
@@ -1793,25 +1766,6 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		"chunk_id", metaID,
 		"output_files", len(outputFiles),
 	)
-
-	// Parse and add log entries to scan's batcher (process immediately at chunk completion)
-	if scanBatcher != nil && taskResult != nil && outputFile != "" {
-		// Pass output file path + historyID to ExtractLogEntries so log
-		// entries land on the right history record on the platform.
-		logEntries, err := scanlog.ExtractLogEntries(taskResult, scanID, historyID, outputFile)
-		if err != nil {
-			slog.Warn("Failed to parse log entries", "scan_id", scanID, "error", err)
-		} else {
-			for _, entry := range logEntries {
-				scanBatcher.Append(entry)
-			}
-			slog.Debug("Added log entries to batcher",
-				"scan_id", scanID,
-				"entry_count", len(logEntries),
-				"source", "output_file",
-				"chunk_id", metaID)
-		}
-	}
 
 	// Cleanup output file immediately after processing (unless keep-output-files flag is set)
 	// This prevents file accumulation during long scans with many chunks

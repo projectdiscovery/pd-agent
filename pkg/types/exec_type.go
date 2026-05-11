@@ -66,7 +66,7 @@ type Options struct {
 	Templates    []string
 	Config       string
 	ReportConfig string // base64 nuclei reporting (-rc) config (Jira/Linear/GitHub/etc. tracker)
-	HistoryID    string // scan history record id; carried through for per-chunk scan_log uploads
+	HistoryID    int64  // scan history record id (from work message); 0 = unset
 
 	// - Enumeration
 	EnumerationID string

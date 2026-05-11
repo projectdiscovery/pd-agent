@@ -161,7 +161,7 @@ type WorkMessage struct {
 	ChunkCount    int      `json:"chunk_count,omitempty"`   // number of chunks in the stream
 	Config        string   `json:"config,omitempty"`        // base64 scan configuration
 	ReportConfig  string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration; tracker creds for issue creation on matches
-	HistoryID     string   `json:"history_id,omitempty"`    // scan history record id; threaded into pkg/scanlog uploads so per-chunk log entries land on the right history row
+	HistoryID     int64    `json:"history_id,omitempty"`    // scan history record id; threaded through task.Options for downstream consumers
 	Steps         []string `json:"steps,omitempty"`         // enumeration steps (enumerations)
 }
 
