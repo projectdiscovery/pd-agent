@@ -383,14 +383,20 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return nil
 	}
 
-	// Gzip to a sibling .gz file so we can stat it and set ContentLength on
-	// the PUT. Cleanup is unconditional: KeepOutputFiles governs the source.
-	gzPath := outputFile + ".gz"
+	// Gzip into a temp sibling so we can stat for ContentLength. Unique name
+	// keeps a redelivered chunk from clobbering a still-PUTting goroutine.
+	// Cleanup is unconditional: KeepOutputFiles governs the source.
+	gzFile, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+"-*.gz")
+	if err != nil {
+		return fmt.Errorf("create gz tempfile: %w", err)
+	}
+	gzPath := gzFile.Name()
+	_ = gzFile.Close()
+	defer func() { _ = os.Remove(gzPath) }()
 	gzSize, err := gzipFile(outputFile, gzPath)
 	if err != nil {
 		return fmt.Errorf("gzip output: %w", err)
 	}
-	defer func() { _ = os.Remove(gzPath) }()
 
 	slog.Debug("nuclei scan: gzipped scan-log",
 		"scan_id", task.Options.ScanID, "chunk_id", task.Id,
