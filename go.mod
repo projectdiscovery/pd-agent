@@ -11,13 +11,12 @@ require (
 	github.com/nats-io/nats.go v1.49.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/projectdiscovery/dnsx v1.2.3
-	github.com/projectdiscovery/fdmax v0.0.4
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.68
 	github.com/projectdiscovery/httpx v1.9.0
 	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275
-	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512110135-fbf7d0053fb8
+	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512125924-609cf3daba73
 	github.com/projectdiscovery/retryabledns v1.0.114
 	github.com/projectdiscovery/tlsx v1.2.2
 	github.com/projectdiscovery/utils v0.10.1
@@ -309,6 +308,7 @@ require (
 	github.com/projectdiscovery/dsl v0.8.17 // indirect
 	github.com/projectdiscovery/fastdialer v0.5.6 // indirect
 	github.com/projectdiscovery/fasttemplate v0.0.2 // indirect
+	github.com/projectdiscovery/fdmax v0.0.5-0.20260512115530-ac1eeccc6294 // indirect
 	github.com/projectdiscovery/freeport v0.0.7 // indirect
 	github.com/projectdiscovery/gcache v0.0.0-20241015120333-12546c6e3f4c // indirect
 	github.com/projectdiscovery/go-smb2 v0.0.0-20240129202741-052cc450c6cb // indirect
