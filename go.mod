@@ -17,7 +17,7 @@ require (
 	github.com/projectdiscovery/httpx v1.9.0
 	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275
-	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512092517-642887e985e5
+	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512110135-fbf7d0053fb8
 	github.com/projectdiscovery/retryabledns v1.0.114
 	github.com/projectdiscovery/tlsx v1.2.2
 	github.com/projectdiscovery/utils v0.10.1
@@ -25,8 +25,8 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
 	go.uber.org/automaxprocs v1.6.0
-	golang.org/x/net v0.52.0
-	golang.org/x/sys v0.42.0
+	golang.org/x/net v0.53.0
+	golang.org/x/sys v0.43.0
 	google.golang.org/protobuf v1.36.11
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.2
@@ -129,7 +129,7 @@ require (
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/corona10/goimagehash v1.1.0 // indirect
-	github.com/cyphar/filepath-securejoin v0.5.1 // indirect
+	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/davidmz/go-pageant v1.0.2 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -163,8 +163,8 @@ require (
 	github.com/go-faker/faker/v4 v4.7.0 // indirect
 	github.com/go-fed/httpsig v1.1.0 // indirect
 	github.com/go-git/gcfg v1.5.1-0.20230307220236-3a3c6141e376 // indirect
-	github.com/go-git/go-billy/v5 v5.8.0 // indirect
-	github.com/go-git/go-git/v5 v5.18.0 // indirect
+	github.com/go-git/go-billy/v5 v5.9.0 // indirect
+	github.com/go-git/go-git/v5 v5.19.0 // indirect
 	github.com/go-ldap/ldap/v3 v3.4.12 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
@@ -296,7 +296,7 @@ require (
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/perimeterx/marshmallow v1.1.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.23 // indirect
-	github.com/pjbgf/sha1cd v0.3.2 // indirect
+	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/pkg/browser v0.0.0-20240102092130-5ac0b6a4141c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
@@ -416,15 +416,15 @@ require (
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	goftp.io/server/v2 v2.0.1 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.49.0 // indirect
-	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
-	golang.org/x/mod v0.33.0 // indirect
+	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
+	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/term v0.41.0 // indirect
-	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/term v0.42.0 // indirect
+	golang.org/x/text v0.36.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.42.0 // indirect
+	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6 // indirect
 	gopkg.in/corvus-ch/zbase32.v1 v1.0.0 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.12.0 // indirect
@@ -447,9 +447,3 @@ require (
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
-
-// httpx pulls in happyhackingspace/dit, which requires gitlab-client v1.9.1.
-// MVS then picks v1.9.1 process-wide, but nuclei's gitlab tracker was built
-// against v0.130.1 (pre int64 type changes) and won't compile against v1.x.
-// Force the older version until nuclei updates its gitlab tracker.
-replace gitlab.com/gitlab-org/api/client-go => gitlab.com/gitlab-org/api/client-go v0.130.1
