@@ -2703,6 +2703,6 @@ func warnOrphanDBs(dir, myAgentID string) {
 		}
 	}
 	if len(orphans) > 0 {
-		slog.Warn("agentdb: found other agent DB files", "count", len(orphans), "files", orphans)
+		slog.Warn("agentdb: found other agent DB files", "count", len(orphans), "dir", dir)
 	}
 }
