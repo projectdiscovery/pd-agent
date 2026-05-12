@@ -268,11 +268,8 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		Headless:             hasMoreThan8GBRAM() && isAMD64(),
 	}
 
-	// task.Options.Config is the work message's `config` field — base64 of
-	// a nuclei -config-style YAML. Decode and hand the bytes to the SDK's
-	// WithConfigBytes (same path the CLI uses for -config <file>). nuclei's
-	// SDK also picks up an inline `report-config: <path>` reference from the
-	// config and loads the reporting YAML implicitly.
+	// task.Options.Config is base64'd RuntimeConfig YAML. Handed to the
+	// SDK's WithConfigBytes for tag/severity/rate-limit/etc. merging.
 	if task.Options.Config != "" {
 		decoded, err := base64.StdEncoding.DecodeString(task.Options.Config)
 		if err != nil {
