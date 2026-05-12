@@ -6,7 +6,11 @@
 // SystemRoot, KUBERNETES_SERVICE_HOST) live at their callsites, not here.
 package envconfig
 
-import envutil "github.com/projectdiscovery/utils/env"
+import (
+	"os"
+
+	envutil "github.com/projectdiscovery/utils/env"
+)
 
 // ---------- Identity & auth ----------
 
@@ -126,7 +130,9 @@ func KeepOutputFiles() bool { return envutil.GetEnvOrDefault(KeyKeepOutputFiles,
 func PassiveDiscovery() bool { return envutil.GetEnvOrDefault(KeyPassiveDiscovery, false) }
 
 // LocalK8s loads kubeconfig from KUBECONFIG instead of the in-cluster service account.
-func LocalK8s() bool { return envutil.GetEnvOrDefault(KeyLocalK8s, false) }
+// Strict "true" match: ParseBool semantics would let LOCAL_K8S=1 flip to a path
+// that fails silently when KUBECONFIG is unset (no in-cluster fallback).
+func LocalK8s() bool { return os.Getenv(KeyLocalK8s) == "true" }
 
 // DisableDiagnosticUpload opts out of shipping the local SQLite DB to GCS at shutdown.
 func DisableDiagnosticUpload() bool {
