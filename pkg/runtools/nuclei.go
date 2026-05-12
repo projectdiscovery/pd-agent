@@ -53,16 +53,12 @@ type NucleiOptions struct {
 	// ProbeNonHttp passes through to LoadTargets — when true, nuclei probes
 	// non-HTTP services via tcp/dns/etc. Defaults to false (HTTP-only).
 	ProbeNonHttp bool
-	// ConfigYAML is the raw -config style YAML the cloud sent in the work
-	// message (already base64-decoded by the caller). When non-empty it's
-	// merged into engine options via the SDK's WithConfigBytes — same path
-	// the CLI uses for `-config <path>`.
+	// ConfigYAML is the cloud-shipped scan config, base64-decoded by the
+	// caller. Passed through to the SDK's WithConfigBytes (the nuclei
+	// RuntimeConfig schema: tags, severity, rate-limit, etc.).
 	ConfigYAML []byte
-	// ReportingConfigYAML is the raw -report-config style YAML (Jira/Linear/
-	// etc. tracker config). When non-empty it's merged via the SDK's
-	// WithReportingConfigBytes. nuclei also resolves `report-config: <path>`
-	// references inside ConfigYAML implicitly, so most callers won't need
-	// this field unless the reporting YAML is sent inline.
+	// ReportingConfigYAML is the cloud-shipped tracker config (Jira/Linear/
+	// GitHub/etc.). Passed through to the SDK's WithReportingConfigBytes.
 	ReportingConfigYAML []byte
 }
 
