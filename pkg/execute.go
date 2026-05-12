@@ -2,6 +2,7 @@ package pkg
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -366,9 +367,12 @@ type signedUploadResponse struct {
 // uploadNucleiOutputViaSignedURL ships the per-chunk nuclei output file to
 // the platform via the presigned-URL flow. Two-hop:
 //  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N
-//     body: {"filename": "<chunk_id>.jsonl"}
-//  2. PUT the file bytes to the signed URL with the exact headers map.
+//     body: {"filename": "<chunk_id>.jsonl.gz"}
+//  2. PUT the gzipped file bytes to the signed URL with the exact headers map.
 //
+// Payload is gzipped client-side as an opaque .gz blob — no Content-Encoding
+// header, no SigV4 signed-header gymnastics. Server decompresses on read.
+// Typical compression ratio on nuclei JSONL is ~10x, well worth the CPU cost.
 // Filename uses task.Id (chunk_id) so the platform can correlate uploaded
 // logs back to a specific chunk inside a scan run.
 func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
@@ -382,7 +386,21 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return nil
 	}
 
-	filename := task.Id + ".jsonl"
+	// Gzip to a sibling .gz file so we can ContentLength the PUT and let
+	// the kernel hand-off page-cache pages on read. Best-effort cleanup
+	// regardless of success — KeepOutputFiles only governs the source.
+	gzPath := outputFile + ".gz"
+	gzSize, err := gzipFile(outputFile, gzPath)
+	if err != nil {
+		return fmt.Errorf("gzip output: %w", err)
+	}
+	defer func() { _ = os.Remove(gzPath) }()
+
+	slog.Debug("nuclei scan: gzipped scan-log",
+		"scan_id", task.Options.ScanID, "chunk_id", task.Id,
+		"raw_bytes", info.Size(), "gz_bytes", gzSize)
+
+	filename := task.Id + ".jsonl.gz"
 	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, envconfig.APIKey())
 	if err != nil {
 		return fmt.Errorf("auth client: %w", err)
@@ -416,14 +434,14 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	if signed.UploadURL == "" || signed.Method == "" {
 		return fmt.Errorf("upload-url response missing url/method")
 	}
-	if signed.MaxBytes > 0 && info.Size() > signed.MaxBytes {
-		return fmt.Errorf("output file %d bytes exceeds signed-url max %d", info.Size(), signed.MaxBytes)
+	if signed.MaxBytes > 0 && gzSize > signed.MaxBytes {
+		return fmt.Errorf("gzipped output %d bytes exceeds signed-url max %d", gzSize, signed.MaxBytes)
 	}
 
-	// Step 2: PUT the file to the signed URL with the exact headers.
-	f, err := os.Open(outputFile)
+	// Step 2: PUT the gzipped file to the signed URL with the exact headers.
+	f, err := os.Open(gzPath)
 	if err != nil {
-		return fmt.Errorf("open output: %w", err)
+		return fmt.Errorf("open gz: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
@@ -431,7 +449,7 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	if err != nil {
 		return fmt.Errorf("build PUT: %w", err)
 	}
-	putReq.ContentLength = info.Size()
+	putReq.ContentLength = gzSize
 	for k, v := range signed.Headers {
 		putReq.Header.Set(k, v)
 	}
@@ -452,9 +470,48 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		"scan_id", task.Options.ScanID,
 		"history_id", task.Options.HistoryID,
 		"chunk_id", task.Id,
-		"size_bytes", info.Size(),
+		"raw_bytes", info.Size(),
+		"gz_bytes", gzSize,
 		"object_path", signed.ObjectPath)
 	return nil
+}
+
+// gzipFile streams src through gzip into dst and returns the on-disk size of dst.
+// Uses gzip.BestSpeed — nuclei JSONL is highly compressible, and we don't
+// want chunk processing to wait on a slower compressor.
+func gzipFile(src, dst string) (int64, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, fmt.Errorf("open src: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return 0, fmt.Errorf("create dst: %w", err)
+	}
+	gzw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
+	if err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip writer: %w", err)
+	}
+	if _, err := io.Copy(gzw, in); err != nil {
+		_ = gzw.Close()
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip copy: %w", err)
+	}
+	if err := gzw.Close(); err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip close: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return 0, fmt.Errorf("close dst: %w", err)
+	}
+	st, err := os.Stat(dst)
+	if err != nil {
+		return 0, fmt.Errorf("stat dst: %w", err)
+	}
+	return st.Size(), nil
 }
 
 // splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.
