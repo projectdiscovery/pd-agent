@@ -3,9 +3,7 @@ GOCMD=go
 GOBUILD=$(GOCMD) build
 GOMOD=$(GOCMD) mod
 GOTEST=$(GOCMD) test
-# -trimpath strips absolute build-machine paths from the binary (stack traces,
-# DWARF, etc.) so released builds are reproducible and don't leak filesystem
-# layouts. Applies to every target below.
+# -trimpath: reproducible builds, no build-machine paths in the binary.
 GOFLAGS := -v -trimpath
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.Version=$(VERSION)
