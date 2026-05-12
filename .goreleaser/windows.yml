@@ -14,9 +14,9 @@ builds:
     main: ./cmd/pd-agent
     goos:
       - windows
+    # arm64 omitted: Mzack9999/gopacket/pcap has no defs_windows_arm64.go.
     goarch:
       - amd64
-      - arm64
       - 386
 archives:
 - formats:
