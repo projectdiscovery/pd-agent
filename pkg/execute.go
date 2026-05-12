@@ -364,17 +364,14 @@ type signedUploadResponse struct {
 	ExpiresAt  time.Time         `json:"expires_at"`
 }
 
-// uploadNucleiOutputViaSignedURL ships the per-chunk nuclei output file to
-// the platform via the presigned-URL flow. Two-hop:
+// uploadNucleiOutputViaSignedURL ships the per-chunk nuclei output to the
+// platform via the two-hop presigned-URL flow:
 //  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N
 //     body: {"filename": "<chunk_id>.jsonl.gz"}
-//  2. PUT the gzipped file bytes to the signed URL with the exact headers map.
+//  2. PUT the gzipped bytes to the signed URL with the exact headers map.
 //
-// Payload is gzipped client-side as an opaque .gz blob — no Content-Encoding
-// header, no SigV4 signed-header gymnastics. Server decompresses on read.
-// Typical compression ratio on nuclei JSONL is ~10x, well worth the CPU cost.
-// Filename uses task.Id (chunk_id) so the platform can correlate uploaded
-// logs back to a specific chunk inside a scan run.
+// Gzipped as an opaque .gz blob (no Content-Encoding) so the SigV4 signed
+// headers never need to cover Content-Encoding. Server gunzips on read.
 func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
 	info, err := os.Stat(outputFile)
 	if err != nil {
@@ -386,9 +383,8 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return nil
 	}
 
-	// Gzip to a sibling .gz file so we can ContentLength the PUT and let
-	// the kernel hand-off page-cache pages on read. Best-effort cleanup
-	// regardless of success — KeepOutputFiles only governs the source.
+	// Gzip to a sibling .gz file so we can stat it and set ContentLength on
+	// the PUT. Cleanup is unconditional: KeepOutputFiles governs the source.
 	gzPath := outputFile + ".gz"
 	gzSize, err := gzipFile(outputFile, gzPath)
 	if err != nil {
@@ -476,9 +472,8 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	return nil
 }
 
-// gzipFile streams src through gzip into dst and returns the on-disk size of dst.
-// Uses gzip.BestSpeed — nuclei JSONL is highly compressible, and we don't
-// want chunk processing to wait on a slower compressor.
+// gzipFile streams src through gzip into dst and returns the size of dst.
+// Uses BestSpeed: nuclei JSONL compresses ~10x even at level 1.
 func gzipFile(src, dst string) (int64, error) {
 	in, err := os.Open(src)
 	if err != nil {
