@@ -105,7 +105,7 @@ func (s *Scaler) evaluate() {
 	currentSize := s.sem.Size()
 	inUse := s.sem.InUse()
 
-	slog.Info("scaler: evaluate",
+	slog.Debug("scaler: evaluate",
 		"current_parallelism", currentSize,
 		"in_use", inUse,
 		"available", currentSize-inUse,
