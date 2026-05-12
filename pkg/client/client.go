@@ -6,8 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"time"
+
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
 func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) {
@@ -16,7 +17,7 @@ func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) 
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
 	}
-	
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -41,7 +42,7 @@ func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) 
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
-	proxyURL := os.Getenv("PROXY_URL")
+	proxyURL := envconfig.ProxyURL()
 	if proxyURL != "" {
 		proxy, err := url.Parse(proxyURL)
 		if err != nil {

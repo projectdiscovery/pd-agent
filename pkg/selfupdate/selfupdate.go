@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/tidwall/gjson"
 )
 
@@ -72,7 +73,7 @@ func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion str
 	var err error
 
 	// Check for URL override (local testing / staging).
-	if overrideURL := os.Getenv("PDCP_UPDATE_URL"); overrideURL != "" {
+	if overrideURL := envconfig.UpdateURL(); overrideURL != "" {
 		downloadURL = overrideURL
 		if targetVersion == "" || targetVersion == "latest" {
 			targetVersion = "override"

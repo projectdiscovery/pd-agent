@@ -7,8 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
 // startPrometheusServer starts a minimal HTTP server exposing /metrics in
@@ -22,7 +23,7 @@ import (
 // The customer wires their HPA to scrape /metrics and scale the agent
 // Deployment based on pdagent_group_chunks_pending (the primary signal).
 func (r *Runner) startPrometheusServer(_ context.Context) (*http.Server, error) {
-	addr := os.Getenv("PDCP_METRICS_ADDR")
+	addr := envconfig.MetricsAddr()
 	if addr == "" {
 		return nil, nil
 	}

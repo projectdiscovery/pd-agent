@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
 // Store defines the persistence contract for local agent observability data.
@@ -162,18 +164,18 @@ func LoadSizeCaps() (SizeCaps, error) {
 		MetricCapBytes: defaultMetricCapMB * 1024 * 1024,
 	}
 
-	if v := os.Getenv("PDCP_AGENTDB_LOG_CAP_MB"); v != "" {
+	if v := envconfig.AgentDBLogCapMB(); v != "" {
 		mb, err := strconv.Atoi(v)
 		if err != nil || mb <= 0 {
-			return caps, fmt.Errorf("invalid PDCP_AGENTDB_LOG_CAP_MB=%q: must be a positive integer", v)
+			return caps, fmt.Errorf("invalid %s=%q: must be a positive integer", envconfig.KeyAgentDBLogCapMB, v)
 		}
 		caps.LogCapBytes = int64(mb) * 1024 * 1024
 	}
 
-	if v := os.Getenv("PDCP_AGENTDB_METRIC_CAP_MB"); v != "" {
+	if v := envconfig.AgentDBMetricCapMB(); v != "" {
 		mb, err := strconv.Atoi(v)
 		if err != nil || mb <= 0 {
-			return caps, fmt.Errorf("invalid PDCP_AGENTDB_METRIC_CAP_MB=%q: must be a positive integer", v)
+			return caps, fmt.Errorf("invalid %s=%q: must be a positive integer", envconfig.KeyAgentDBMetricCapMB, v)
 		}
 		caps.MetricCapBytes = int64(mb) * 1024 * 1024
 	}

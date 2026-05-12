@@ -44,13 +44,13 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg"
 	"github.com/projectdiscovery/pd-agent/pkg/agentdb"
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/projectdiscovery/pd-agent/pkg/natsrpc"
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
 	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
-	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	"github.com/rs/xid"
@@ -87,16 +87,6 @@ func ensureNucleiTemplates() {
 
 // Version is set at build time via -ldflags "-X main.Version=v1.0.0"
 var Version = "dev"
-
-var (
-	PDCPApiKey          = envutil.GetEnvOrDefault("PDCP_API_KEY", "")
-	TeamIDEnv           = envutil.GetEnvOrDefault("PDCP_TEAM_ID", "")
-	AgentTagsEnv        = envutil.GetEnvOrDefault("PDCP_AGENT_TAGS", "default")
-	PdcpApiServer       = envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
-	ChunkParallelismEnv = envutil.GetEnvOrDefault("PDCP_CHUNK_PARALLELISM", "")
-	ScanParallelismEnv  = envutil.GetEnvOrDefault("PDCP_SCAN_PARALLELISM", "1")
-	AgentNetworkEnv     = envutil.GetEnvOrDefault("AGENT_NETWORK", "default")
-)
 
 // Options contains the configuration options for the agent
 type Options struct {
@@ -140,7 +130,7 @@ func (r *Runner) makeRequest(ctx context.Context, method, url string, body io.Re
 	maxRetries := 5
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		client, err := client.CreateAuthenticatedClient(r.options.TeamID, PDCPApiKey)
+		client, err := client.CreateAuthenticatedClient(r.options.TeamID, envconfig.APIKey())
 		if err != nil {
 			if attempt < maxRetries {
 				r.logHelper("WARNING", fmt.Sprintf("error creating authenticated client (attempt %d/%d): %v, retrying...", attempt, maxRetries, err))
@@ -368,7 +358,7 @@ func NewRunner(options *Options) (*Runner, error) {
 	// Last-resort fallback: next to the binary, preserving prior behaviour
 	// when HOME isn't set (e.g. some service contexts).
 	// Non-fatal: if everything fails, the agent runs without local persistence.
-	dbDir := os.Getenv("PDCP_AGENTDB_DIR")
+	dbDir := envconfig.AgentDBDir()
 	if dbDir == "" {
 		if home, err := os.UserHomeDir(); err == nil && home != "" {
 			candidate := filepath.Join(home, ".pd-agent")
@@ -1892,8 +1882,8 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++ // increment /in request counter
 
 	// Fetch agent info from punch_hole /agents/:id
-	endpoint := fmt.Sprintf("%s/v1/agents/%s?type=agent", PdcpApiServer, r.options.AgentId)
-	headers := map[string]string{"x-api-key": PDCPApiKey}
+	endpoint := fmt.Sprintf("%s/v1/agents/%s?type=agent", envconfig.APIServer(), r.options.AgentId)
+	headers := map[string]string{"x-api-key": envconfig.APIKey()}
 	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
 	if resp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to fetch agent info: %v", resp.Error))
@@ -1919,12 +1909,12 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			lastUpdate = agentInfo.LastUpdate
 
 			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
-				r.logHelper("INFO", fmt.Sprintf("Using tags from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Tags, tagsToUse))
+				r.logHelper("INFO", fmt.Sprintf("Using tags from %s server: %v (was: %v)", envconfig.APIServer(), agentInfo.Tags, tagsToUse))
 				tagsToUse = agentInfo.Tags
 				r.options.AgentTags = agentInfo.Tags // Overwrite local tags with remote
 			}
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
-				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", PdcpApiServer, agentInfo.Networks, networksToUse))
+				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", envconfig.APIServer(), agentInfo.Networks, networksToUse))
 				networksToUse = agentInfo.Networks
 				if len(agentInfo.Networks) > 0 {
 					r.options.AgentNetwork = agentInfo.Networks[0] // Use first network from remote
@@ -1932,7 +1922,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			}
 			// Handle agent name
 			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
-				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", PdcpApiServer, agentInfo.Name, r.options.AgentName))
+				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.Name, r.options.AgentName))
 				r.options.AgentName = agentInfo.Name
 			}
 			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
@@ -1944,7 +1934,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	inCtx, inCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer inCancel()
 
-	inURL := fmt.Sprintf("%s/v1/agents/in", PdcpApiServer)
+	inURL := fmt.Sprintf("%s/v1/agents/in", envconfig.APIServer())
 	req, err := http.NewRequestWithContext(inCtx, http.MethodPost, inURL, nil)
 	if err != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to create /in request: %v", err))
@@ -2034,7 +2024,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 // Out handles agent deregistration
 func (r *Runner) Out(ctx context.Context) error {
-	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", PdcpApiServer, r.options.AgentId)
+	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", envconfig.APIServer(), r.options.AgentId)
 	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /out endpoint: %v", resp.Error))
@@ -2194,7 +2184,7 @@ func getK8sSubnets() []string {
 	var err error
 
 	// Build kubeconfig based on environment
-	if os.Getenv("LOCAL_K8S") == "true" {
+	if envconfig.LocalK8s() {
 		config, err = clientcmd.BuildConfigFromFlags("", os.Getenv("KUBECONFIG"))
 		if err != nil {
 			slog.Error("Error building kubeconfig", "error", err)
@@ -2420,23 +2410,23 @@ func calculateSupernet(minIP, maxIP net.IP) string {
 // parseOptions parses command line options (simplified for agent mode only)
 func parseOptions() *Options {
 	options := &Options{
-		TeamID: TeamIDEnv,
+		TeamID: envconfig.TeamID(),
 	}
 
 	flagSet := goflags.NewFlagSet()
 	flagSet.SetDescription(`pd-agent is an agent for ProjectDiscovery Cloud Platform`)
 
-	agentTags := strings.Split(AgentTagsEnv, ",")
+	agentTags := strings.Split(envconfig.AgentTagsOrDefault(), ",")
 
 	// Parse default parallelism values from environment.
 	// 0 means auto-detect at startup (based on available resources).
 	defaultChunkParallelism := 0
-	if val, err := strconv.Atoi(ChunkParallelismEnv); err == nil && val > 0 {
+	if val, err := strconv.Atoi(envconfig.ChunkParallelism()); err == nil && val > 0 {
 		defaultChunkParallelism = val
 	}
 
 	defaultScanParallelism := 1
-	if val, err := strconv.Atoi(ScanParallelismEnv); err == nil && val > 0 {
+	if val, err := strconv.Atoi(envconfig.ScanParallelism()); err == nil && val > 0 {
 		defaultScanParallelism = val
 	}
 
@@ -2445,7 +2435,7 @@ func parseOptions() *Options {
 		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
 		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
-		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", AgentNetworkEnv, "specify the network for the agent"),
+		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", envconfig.AgentNetworkLegacyOrDefault(), "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the agent ID (auto-generated if empty, persisted across self-updates)"),
 		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
@@ -2458,27 +2448,27 @@ func parseOptions() *Options {
 	}
 
 	// Parse environment variables (env vars take precedence as defaults)
-	if agentTags := os.Getenv("PDCP_AGENT_TAGS"); agentTags != "" && len(options.AgentTags) == 0 {
+	if agentTags := envconfig.AgentTags(); agentTags != "" && len(options.AgentTags) == 0 {
 		options.AgentTags = goflags.StringSlice(strings.Split(agentTags, ","))
 	}
-	if agentNetwork := os.Getenv("PDCP_AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+	if agentNetwork := envconfig.AgentNetwork(); agentNetwork != "" && options.AgentNetwork == "" {
 		options.AgentNetwork = agentNetwork
 	}
-	if agentOutput := os.Getenv("PDCP_AGENT_OUTPUT"); agentOutput != "" && options.AgentOutput == "" {
+	if agentOutput := envconfig.AgentOutput(); agentOutput != "" && options.AgentOutput == "" {
 		options.AgentOutput = agentOutput
 	}
-	if agentName := os.Getenv("PDCP_AGENT_NAME"); agentName != "" && options.AgentName == "" {
+	if agentName := envconfig.AgentName(); agentName != "" && options.AgentName == "" {
 		options.AgentName = agentName
 	}
-	if agentNetwork := os.Getenv("AGENT_NETWORK"); agentNetwork != "" && options.AgentNetwork == "" {
+	if agentNetwork := envconfig.AgentNetworkLegacy(); agentNetwork != "" && options.AgentNetwork == "" {
 		options.AgentNetwork = agentNetwork
 	}
-	if verbose := os.Getenv("PDCP_VERBOSE"); (verbose == "true" || verbose == "1") && !options.Verbose {
+	if envconfig.Verbose() && !options.Verbose {
 		options.Verbose = true
 	}
 
 	// Parse keep-output-files from environment variable
-	if keepOutputFiles := os.Getenv("PDCP_KEEP_OUTPUT_FILES"); keepOutputFiles == "true" || keepOutputFiles == "1" {
+	if envconfig.KeepOutputFiles() {
 		options.KeepOutputFiles = true
 	}
 
@@ -2487,7 +2477,7 @@ func parseOptions() *Options {
 	configureLogging(options)
 
 	// Also support env variable PASSIVE_DISCOVERY
-	if os.Getenv("PASSIVE_DISCOVERY") == "1" || os.Getenv("PASSIVE_DISCOVERY") == "true" {
+	if envconfig.PassiveDiscovery() {
 		options.PassiveDiscovery = true
 	}
 
@@ -2613,8 +2603,8 @@ func main() {
 //
 // Set PDCP_DISABLE_DIAGNOSTIC_UPLOAD=1 (or true) to opt out.
 func (r *Runner) uploadDebugDB() {
-	if v := os.Getenv("PDCP_DISABLE_DIAGNOSTIC_UPLOAD"); v == "1" || v == "true" {
-		slog.Info("agentdb: diagnostic upload disabled via PDCP_DISABLE_DIAGNOSTIC_UPLOAD")
+	if envconfig.DisableDiagnosticUpload() {
+		slog.Info("agentdb: diagnostic upload disabled via " + envconfig.KeyDisableDiagnosticUpload)
 		return
 	}
 

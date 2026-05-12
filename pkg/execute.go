@@ -17,6 +17,7 @@ import (
 	"log/slog"
 
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	fileutil "github.com/projectdiscovery/utils/file"
@@ -289,7 +290,7 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	//      work message entirely. If set, takes precedence even if the work
 	//      message also carries ReportConfig.
 	//   2. task.Options.ReportConfig — base64 YAML the platform shipped.
-	if path := os.Getenv("PDCP_REPORTING_CONFIG"); path != "" {
+	if path := envconfig.ReportingConfigPath(); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			opts.ReportingConfigYAML = data
 			slog.Info("nuclei scan: loaded reporting config from env (overriding work message)",
@@ -333,7 +334,7 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// agents in environments without scan-log storage provisioned don't
 	// hammer the API with rejected uploads. Also skipped when ScanID or
 	// HistoryID isn't set (local/test runs).
-	if isScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
+	if envconfig.ScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
 		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
 			slog.Warn("nuclei scan: scan-log upload failed",
 				"scan_id", task.Options.ScanID,
@@ -348,14 +349,6 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// that diagnostic stops working under the embedded path until we hook
 	// nuclei's logger to surface skip events.
 	return &types.TaskResult{}, []string{outputFile}, nil
-}
-
-// isScanLogUploadEnabled gates the per-chunk scan-log upload behind an
-// opt-in env var. Defaults to off — set PDCP_ENABLE_SCAN_LOG_UPLOAD=true to
-// ship the full nuclei JSONL (matched + unmatched) to the platform's
-// signed-URL endpoint after every chunk completes.
-func isScanLogUploadEnabled() bool {
-	return os.Getenv("PDCP_ENABLE_SCAN_LOG_UPLOAD") == "true"
 }
 
 // signedUploadResponse mirrors the /v1/scans/{scan_id}/scan_log/upload-url
@@ -390,7 +383,7 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	}
 
 	filename := task.Id + ".jsonl"
-	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, os.Getenv("PDCP_API_KEY"))
+	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, envconfig.APIKey())
 	if err != nil {
 		return fmt.Errorf("auth client: %w", err)
 	}
@@ -398,7 +391,7 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	// Step 1: request the signed URL.
 	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
 	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
-		PCDPApiServer, task.Options.ScanID, task.Options.HistoryID)
+		envconfig.APIServer(), task.Options.ScanID, task.Options.HistoryID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("build upload-url request: %w", err)
@@ -509,7 +502,7 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 	defer func() {
 		_ = f.Close()
 	}()
-	apiURL := fmt.Sprintf("%s/v1/assets", PCDPApiServer)
+	apiURL := fmt.Sprintf("%s/v1/assets", envconfig.APIServer())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, f)
 	if err != nil {
 		return "", err
@@ -520,7 +513,7 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(envconfig.TeamID(), envconfig.APIKey())
 	if err != nil {
 		return "", err
 	}
@@ -545,7 +538,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	defer func() {
 		_ = f.Close()
 	}()
-	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", PCDPApiServer, assetId)
+	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", envconfig.APIServer(), assetId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, f)
 	if err != nil {
 		return "", err
@@ -556,7 +549,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(envconfig.TeamID(), envconfig.APIKey())
 	if err != nil {
 		return "", err
 	}
