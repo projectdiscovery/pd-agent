@@ -47,6 +47,7 @@ func EnsureAll() (failed []string) {
 // even when the screenshot itself timed out.
 func warmupBrowser() error {
 	slog.Info("prereq: validating browser (embedded httpx screenshot probe)...")
+
 	tmp, err := os.CreateTemp("", "httpx-warmup-*.jsonl")
 	if err != nil {
 		return fmt.Errorf("warmup tmp file: %w", err)
@@ -87,7 +88,7 @@ func warmupBrowser() error {
 
 	if shotPath := readFirstScreenshotPath(tmpPath); shotPath != "" {
 		if info, err := os.Stat(shotPath); err == nil && info.Size() > 0 {
-			slog.Info("prereq: browser validation complete", "screenshot", shotPath)
+			slog.Info("prereq: browser validation complete")
 			return nil
 		}
 	}

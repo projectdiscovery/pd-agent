@@ -2530,6 +2530,7 @@ func main() {
 	}))
 
 	runtools.RaiseFileLimit()
+	runtools.SilenceSDKLoggers()
 
 	options := parseOptions()
 
