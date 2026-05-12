@@ -1,22 +1,9 @@
-// Package envconfig is the single source of truth for every environment
-// variable the agent reads. If you want to know what knobs exist, look here.
-// If you want to add a new knob, add it here.
+// Package envconfig is the single source of truth for environment variables
+// the agent reads. Every name lives in a Key* constant; accessors re-read on
+// every call so operators can flip flags without restarting.
 //
-// Conventions:
-//   - Every env var name lives in a Key* constant. No raw string literals
-//     anywhere else in the codebase.
-//   - Each accessor is a function (not a package var) so values are re-read
-//     on every call. That matches the prior os.Getenv behaviour and lets
-//     operators flip flags without restarting (and keeps tests easy).
-//   - Defaults live next to their accessor as a Default* constant.
-//   - Lookups + type parsing delegate to envutil.GetEnvOrDefault from
-//     projectdiscovery/utils. That gives us strconv.ParseBool semantics
-//     for boolean flags ("true"/"false"/"1"/"0"/"t"/"f", case-insensitive)
-//     instead of hand-rolled string compares.
-//
-// System env vars the agent also reads but doesn't own (PATH, SHELL,
-// KUBECONFIG, SystemRoot, KUBERNETES_SERVICE_HOST) are deliberately
-// excluded — they belong to the OS / k8s, not to us.
+// System env vars the agent reads but does not own (PATH, SHELL, KUBECONFIG,
+// SystemRoot, KUBERNETES_SERVICE_HOST) live at their callsites, not here.
 package envconfig
 
 import envutil "github.com/projectdiscovery/utils/env"
@@ -32,17 +19,16 @@ const (
 	DefaultAPIServer = "https://api.projectdiscovery.io"
 )
 
-// APIKey returns the PDCP API key. Required for authenticated calls.
+// APIKey returns the PDCP API key.
 func APIKey() string { return envutil.GetEnvOrDefault(KeyAPIKey, "") }
 
-// TeamID returns the PDCP team identifier used for X-Team-Id headers.
+// TeamID returns the PDCP team identifier.
 func TeamID() string { return envutil.GetEnvOrDefault(KeyTeamID, "") }
 
-// APIServer returns the platform API base URL. Defaults to production.
+// APIServer returns the platform API base URL.
 func APIServer() string { return envutil.GetEnvOrDefault(KeyAPIServer, DefaultAPIServer) }
 
-// UpdateURL overrides the self-update download URL (local/staging testing).
-// Empty => resolve from GitHub releases.
+// UpdateURL overrides the self-update download URL. Empty resolves from GitHub releases.
 func UpdateURL() string { return envutil.GetEnvOrDefault(KeyUpdateURL, "") }
 
 // ---------- Agent identity & topology ----------
@@ -61,17 +47,13 @@ const (
 // AgentName returns the explicit agent name override.
 func AgentName() string { return envutil.GetEnvOrDefault(KeyAgentName, "") }
 
-// AgentNetwork returns PDCP_AGENT_NETWORK (no fallback). parseOptions composes
-// CLI > PDCP_AGENT_NETWORK > AGENT_NETWORK > default, so callers that want the
-// resolved value should use the parsed Options.AgentNetwork instead.
+// AgentNetwork returns PDCP_AGENT_NETWORK without fallback.
 func AgentNetwork() string { return envutil.GetEnvOrDefault(KeyAgentNetwork, "") }
 
-// AgentNetworkLegacy returns AGENT_NETWORK (the older alias).
+// AgentNetworkLegacy returns AGENT_NETWORK, the older alias.
 func AgentNetworkLegacy() string { return envutil.GetEnvOrDefault(KeyAgentNetworkAlt, "") }
 
-// AgentNetworkLegacyOrDefault returns AGENT_NETWORK, falling back to
-// DefaultAgentNetwork. Used as the CLI --agent-network flag default to
-// preserve legacy behaviour where the env was the implicit default.
+// AgentNetworkLegacyOrDefault returns AGENT_NETWORK, falling back to DefaultAgentNetwork.
 func AgentNetworkLegacyOrDefault() string {
 	return envutil.GetEnvOrDefault(KeyAgentNetworkAlt, DefaultAgentNetwork)
 }
@@ -79,7 +61,7 @@ func AgentNetworkLegacyOrDefault() string {
 // AgentOutput returns the output directory override.
 func AgentOutput() string { return envutil.GetEnvOrDefault(KeyAgentOutput, "") }
 
-// AgentTags returns the raw PDCP_AGENT_TAGS string (comma-separated).
+// AgentTags returns the raw comma-separated tag list.
 func AgentTags() string { return envutil.GetEnvOrDefault(KeyAgentTags, "") }
 
 // AgentTagsOrDefault returns PDCP_AGENT_TAGS, falling back to "default".
@@ -94,8 +76,7 @@ const (
 	DefaultScanParallelism = "1"
 )
 
-// ChunkParallelism returns the raw PDCP_CHUNK_PARALLELISM string. Empty => auto.
-// Callers parse the int themselves so an invalid value can be diagnosed in place.
+// ChunkParallelism returns the raw value. Empty means auto-detect.
 func ChunkParallelism() string { return envutil.GetEnvOrDefault(KeyChunkParallelism, "") }
 
 // ScanParallelism returns PDCP_SCAN_PARALLELISM, defaulting to "1".
@@ -111,22 +92,19 @@ const (
 	KeyAgentDBMetricCapMB = "PDCP_AGENTDB_METRIC_CAP_MB"
 )
 
-// AgentDBDir overrides the default ~/.pd-agent directory for the local
-// observability DB. Empty => use ~/.pd-agent (binary dir as last-resort fallback).
+// AgentDBDir overrides the local observability DB directory.
 func AgentDBDir() string { return envutil.GetEnvOrDefault(KeyAgentDBDir, "") }
 
-// AgentDBLogCapMB returns the raw cap value (MB) for the log ring buffer.
-// pkg/agentdb parses + validates; empty => package default.
+// AgentDBLogCapMB returns the raw log ring-buffer cap (MB).
 func AgentDBLogCapMB() string { return envutil.GetEnvOrDefault(KeyAgentDBLogCapMB, "") }
 
-// AgentDBMetricCapMB returns the raw cap value (MB) for the metric ring buffer.
+// AgentDBMetricCapMB returns the raw metric ring-buffer cap (MB).
 func AgentDBMetricCapMB() string { return envutil.GetEnvOrDefault(KeyAgentDBMetricCapMB, "") }
 
 // ---------- Behavior toggles ----------
 //
-// All booleans use envutil.GetEnvOrDefault[bool], which calls strconv.ParseBool.
-// Accepted truthy values: "1", "t", "T", "true", "TRUE", "True".
-// Falsy: "0", "f", "F", "false", "FALSE", "False". Anything else => default.
+// Booleans use strconv.ParseBool: 1/t/T/true/TRUE/True are truthy, the
+// corresponding false forms are falsy, anything else falls back to default.
 
 const (
 	KeyVerbose                 = "PDCP_VERBOSE"
@@ -140,26 +118,23 @@ const (
 // Verbose returns true when PDCP_VERBOSE is truthy.
 func Verbose() bool { return envutil.GetEnvOrDefault(KeyVerbose, false) }
 
-// KeepOutputFiles returns true when PDCP_KEEP_OUTPUT_FILES is truthy.
-// When true, runtools won't delete chunk output files after upload.
+// KeepOutputFiles preserves per-chunk output files after upload.
 func KeepOutputFiles() bool { return envutil.GetEnvOrDefault(KeyKeepOutputFiles, false) }
 
-// PassiveDiscovery returns true when PASSIVE_DISCOVERY is truthy.
-// Requires libpcap/gopacket at runtime; falls back to warn-and-skip on cgo-free builds.
+// PassiveDiscovery enables libpcap/gopacket-backed discovery. Warns and skips
+// at runtime when libpcap is missing on cgo-free builds.
 func PassiveDiscovery() bool { return envutil.GetEnvOrDefault(KeyPassiveDiscovery, false) }
 
-// LocalK8s returns true when LOCAL_K8S is truthy.
-// When true, the agent loads kubeconfig from KUBECONFIG instead of in-cluster service account.
+// LocalK8s loads kubeconfig from KUBECONFIG instead of the in-cluster service account.
 func LocalK8s() bool { return envutil.GetEnvOrDefault(KeyLocalK8s, false) }
 
-// DisableDiagnosticUpload returns true when PDCP_DISABLE_DIAGNOSTIC_UPLOAD is truthy.
-// Opt-out for shipping the local SQLite DB to GCS during shutdown.
+// DisableDiagnosticUpload opts out of shipping the local SQLite DB to GCS at shutdown.
 func DisableDiagnosticUpload() bool {
 	return envutil.GetEnvOrDefault(KeyDisableDiagnosticUpload, false)
 }
 
-// ScanLogUploadEnabled returns true when PDCP_ENABLE_SCAN_LOG_UPLOAD is truthy.
-// Default off so agents in envs without scan-log storage don't hammer rejected uploads.
+// ScanLogUploadEnabled is opt-in. Default off so agents in environments
+// without scan-log storage provisioned don't hammer the API with rejected uploads.
 func ScanLogUploadEnabled() bool {
 	return envutil.GetEnvOrDefault(KeyEnableScanLogUpload, false)
 }
@@ -168,22 +143,21 @@ func ScanLogUploadEnabled() bool {
 
 const KeyMetricsAddr = "PDCP_METRICS_ADDR"
 
-// MetricsAddr returns the host:port the Prometheus /metrics + /healthz server
-// binds to. Empty => server disabled (opt-in feature).
+// MetricsAddr returns the Prometheus bind address. Empty disables the server.
 func MetricsAddr() string { return envutil.GetEnvOrDefault(KeyMetricsAddr, "") }
 
 // ---------- Networking ----------
 
 const KeyProxyURL = "PROXY_URL"
 
-// ProxyURL returns the HTTP/S proxy URL used by the authenticated PDCP client.
+// ProxyURL returns the outbound HTTP/S proxy URL.
 func ProxyURL() string { return envutil.GetEnvOrDefault(KeyProxyURL, "") }
 
 // ---------- Nuclei ----------
 
 const KeyReportingConfig = "PDCP_REPORTING_CONFIG"
 
-// ReportingConfigPath returns the path to a local nuclei reporting (-rc) YAML
-// on the agent. When set, takes precedence over the work-message ReportConfig
-// — lets operators keep Jira/Linear/GitHub creds off the platform entirely.
+// ReportingConfigPath returns a local path to a nuclei -rc YAML. When set,
+// it overrides any reporting config carried in the work message, letting
+// operators keep tracker credentials off the platform.
 func ReportingConfigPath() string { return envutil.GetEnvOrDefault(KeyReportingConfig, "") }
