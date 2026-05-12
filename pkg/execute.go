@@ -54,7 +54,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		if sliceutil.Contains(steps, "dns_resolve") {
 			ips, hostnames := splitIPsAndHostnames(hosts)
 			if len(hostnames) == 0 {
-				slog.Info("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
+				slog.Debug("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
 			} else {
 				_, err := runEmbeddedTool(ctx, task, "dnsx", func(ctx context.Context, outputFile string) error {
 					_, err := runtools.RunDnsx(ctx, hostnames, runtools.DnsxOptions{OutputFile: outputFile})
@@ -110,15 +110,15 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			}
 		}
 
+		if len(hostsWithOpenPorts) == 0 {
+			slog.Debug("port scan complete, no open ports, skipping downstream",
+				"original_hosts", len(hosts), "enumeration_id", enumID)
+			return nil, outputFiles, nil
+		}
 		slog.Info("port scan complete",
 			"original_hosts", len(hosts),
 			"hosts_with_open_ports", len(hostsWithOpenPorts),
 			"enumeration_id", enumID)
-
-		if len(hostsWithOpenPorts) == 0 {
-			slog.Info("no open ports found, skipping httpx/tlsx/screenshot", "enumeration_id", enumID)
-			return nil, outputFiles, nil
-		}
 
 		// --- Step 3: httpx probe (on open ports only, no screenshot) ---
 		var webServices []string
