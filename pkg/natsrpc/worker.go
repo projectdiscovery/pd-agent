@@ -298,7 +298,42 @@ func ConsumeChunks(
 
 	// Track all in-flight chunks so we can wait for them before exiting.
 	var inflightWg sync.WaitGroup
-	defer inflightWg.Wait() // ensure all chunks finish before ConsumeChunks returns
+	// scanCtx is the cancellation handle for in-flight chunks of this scan.
+	// Detached from ctx so an agent SIGTERM lets chunks drain gracefully. We
+	// cancel it explicitly when the consumer is deleted server-side (platform-
+	// initiated scan stop), which makes in-flight nuclei bail mid-template.
+	scanCtx, scanCancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer func() {
+		// Once the fetch loop exits, in-flight chunks may still be running.
+		// The platform deletes the chunk consumer on user-stop, but the race
+		// between "purge messages" and "delete consumer" means consumer.Info
+		// inside the fetch loop can return NumPending=0 just before the delete
+		// lands. Watch for the delete during the drain so we can scanCancel
+		// any chunks that just started a heavy template load.
+		drainDone := make(chan struct{})
+		go func() {
+			inflightWg.Wait()
+			close(drainDone)
+		}()
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-drainDone:
+				scanCancel()
+				return
+			case <-t.C:
+				if _, err := consumer.Info(ctx); err != nil && isConsumerOrStreamGone(err) {
+					slog.Info("chunk consumer: deleted during drain, cancelling in-flight chunks",
+						"stream", streamName, "subject", chunkSubject)
+					scanCancel()
+					// One-shot: stop polling and just wait for chunks to bail.
+					<-drainDone
+					return
+				}
+			}
+		}
+	}()
 
 	for {
 		if ctx.Err() != nil {
@@ -314,7 +349,8 @@ func ConsumeChunks(
 				return ctx.Err()
 			}
 			if isConsumerOrStreamGone(err) {
-				slog.Info("chunk consumer: consumer/stream deleted, finishing", "stream", streamName, "subject", chunkSubject)
+				slog.Info("chunk consumer: consumer/stream deleted, cancelling in-flight chunks", "stream", streamName, "subject", chunkSubject)
+				scanCancel()
 				return nil
 			}
 			slog.Debug("chunk consumer: fetch error", "stream", streamName, "subject", chunkSubject, "error", err)
@@ -343,9 +379,10 @@ func ConsumeChunks(
 				defer inflightWg.Done()
 				defer sem.Release()
 				defer stopHB()
-				// Use a detached context for processing so in-flight chunks
-				// finish even after the fetch context is cancelled.
-				processCtx := context.WithoutCancel(ctx)
+				// scanCtx survives parent ctx cancellation (agent SIGTERM lets
+				// in-flight chunks drain) but is cancelled when the consumer
+				// is deleted server-side (platform-initiated stop).
+				processCtx := scanCtx
 				start := time.Now()
 				processChunkMsg(processCtx, m, chunkSubject, processFn)
 				if scaler != nil {
@@ -381,7 +418,8 @@ func ConsumeChunks(
 					return ctx.Err()
 				}
 				if isConsumerOrStreamGone(err) {
-					slog.Info("chunk consumer: consumer/stream deleted, finishing", "stream", streamName, "subject", chunkSubject)
+					slog.Info("chunk consumer: consumer/stream deleted, cancelling in-flight chunks", "stream", streamName, "subject", chunkSubject)
+					scanCancel()
 					return nil
 				}
 				slog.Warn("chunk consumer: info error", "stream", streamName, "subject", chunkSubject, "error", err)
@@ -542,6 +580,17 @@ func processChunkMsg(
 			"error", err,
 		)
 		_ = msg.Nak()
+		return
+	}
+
+	// scanCtx is cancelled when the consumer is deleted server-side (platform-
+	// initiated stop). Acking is pointless: the consumer is gone, the message
+	// can't be redelivered, and DoubleAck would just fail noisily.
+	if ctx.Err() != nil {
+		slog.Debug("chunk consumer: skipping ack, scan cancelled",
+			"subject", chunkSubject,
+			"chunk_id", chunk.ChunkID,
+		)
 		return
 	}
 
