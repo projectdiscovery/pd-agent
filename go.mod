@@ -17,7 +17,7 @@ require (
 	github.com/projectdiscovery/httpx v1.9.0
 	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275
-	github.com/projectdiscovery/nuclei/v3 v3.5.1
+	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512092517-642887e985e5
 	github.com/projectdiscovery/retryabledns v1.0.114
 	github.com/projectdiscovery/tlsx v1.2.2
 	github.com/projectdiscovery/utils v0.10.1
@@ -448,12 +448,8 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// Temporarily point at a local nuclei checkout for the sdk-upload branch
-// (WithPDCPUpload + WithConfigBytes + WithReportingConfig* SDK options).
-// Drop this replace once those land in a tagged nuclei release.
-replace github.com/projectdiscovery/nuclei/v3 => /Users/shubhamrasal/workspace/projectdiscovery/nuclei
-
-// Force-pin gitlab client to the version local nuclei was built against.
-// pd-agent's transitive graph otherwise resolves to v1.9.1, whose int64 type
-// changes break nuclei's gitlab tracker. Drop alongside the nuclei replace.
+// httpx pulls in happyhackingspace/dit, which requires gitlab-client v1.9.1.
+// MVS then picks v1.9.1 process-wide, but nuclei's gitlab tracker was built
+// against v0.130.1 (pre int64 type changes) and won't compile against v1.x.
+// Force the older version until nuclei updates its gitlab tracker.
 replace gitlab.com/gitlab-org/api/client-go => gitlab.com/gitlab-org/api/client-go v0.130.1

@@ -939,6 +939,8 @@ github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275 h1:arM
 github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275/go.mod h1:HIcdXLTvZpM8IVVJMjdHcIMBk7UcEL9LqWnfIMJdP+8=
 github.com/projectdiscovery/networkpolicy v0.1.37 h1:y/eGU4Mu+z8thiOrAMj9RMmxXG6Zi2Nci81cjZVkMqM=
 github.com/projectdiscovery/networkpolicy v0.1.37/go.mod h1:RCyBSZmhCueYfQflmvvsMZHMMH+Z6AQubpXAgM5b5r0=
+github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512092517-642887e985e5 h1:MGcMy+M1C9uw/bbSpXQF0YBesjB1yRCE9QXJeohoRok=
+github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512092517-642887e985e5/go.mod h1:voLYp8qTdR6qa766H8YuddGlrvzqBWcwrWaTRpj3QGc=
 github.com/projectdiscovery/ratelimit v0.0.86 h1:wkSKOQj3FvPUnh5zbZj50o8Ddgir4qgZN+FqWMc7dfw=
 github.com/projectdiscovery/ratelimit v0.0.86/go.mod h1:d15gU8NFjgKw0F0hrDYprcPf73DqS51NJ44BwYmM1D8=
 github.com/projectdiscovery/rawhttp v0.1.90 h1:LOSZ6PUH08tnKmWsIwvwv1Z/4zkiYKYOSZ6n+8RFKtw=
