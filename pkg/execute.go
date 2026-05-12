@@ -329,10 +329,11 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 
 	// Scan-log upload: ship the raw nuclei output file (full JSONL, both
 	// matched and unmatched events) to the platform via the presigned-URL
-	// flow. This is what powers the "what did the agent actually execute"
-	// audit view on the platform side. Skipped when ScanID or HistoryID
-	// isn't set (local/test runs).
-	if task.Options.ScanID != "" && task.Options.HistoryID != 0 {
+	// flow. Opt-in via PDCP_ENABLE_SCAN_LOG_UPLOAD=true. Default off so
+	// agents in environments without scan-log storage provisioned don't
+	// hammer the API with rejected uploads. Also skipped when ScanID or
+	// HistoryID isn't set (local/test runs).
+	if isScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
 		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
 			slog.Warn("nuclei scan: scan-log upload failed",
 				"scan_id", task.Options.ScanID,
@@ -347,6 +348,14 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// that diagnostic stops working under the embedded path until we hook
 	// nuclei's logger to surface skip events.
 	return &types.TaskResult{}, []string{outputFile}, nil
+}
+
+// isScanLogUploadEnabled gates the per-chunk scan-log upload behind an
+// opt-in env var. Defaults to off — set PDCP_ENABLE_SCAN_LOG_UPLOAD=true to
+// ship the full nuclei JSONL (matched + unmatched) to the platform's
+// signed-URL endpoint after every chunk completes.
+func isScanLogUploadEnabled() bool {
+	return os.Getenv("PDCP_ENABLE_SCAN_LOG_UPLOAD") == "true"
 }
 
 // signedUploadResponse mirrors the /v1/scans/{scan_id}/scan_log/upload-url
