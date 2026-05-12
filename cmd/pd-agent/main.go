@@ -2555,7 +2555,6 @@ func main() {
 	// Ensure nuclei templates are downloaded or updated before starting the agent
 	ensureNucleiTemplates()
 
-	// Set nuclei's process-global flags once, before any chunk runs.
 	runtools.InitNucleiProcess()
 
 	var err error
