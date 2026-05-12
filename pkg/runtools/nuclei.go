@@ -106,7 +106,6 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 	}
 
 	sdkOpts := []nuclei.NucleiSDKOptions{
-		nuclei.DisableUpdateCheck(),
 		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
 	}
 	if len(opts.Templates) > 0 {
@@ -144,8 +143,6 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		engineOpts.MatcherStatus = opts.MatcherStatus
 		engineOpts.EnableCodeTemplates = opts.EnableCodeTemplates
 		engineOpts.JSONL = true
-		engineOpts.ScanID = opts.ScanID
-		engineOpts.TeamID = opts.TeamID
 	}
 
 	ne.LoadTargets(opts.Targets, opts.ProbeNonHttp)
