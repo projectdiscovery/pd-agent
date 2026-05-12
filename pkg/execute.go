@@ -1,8 +1,10 @@
 package pkg
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"log/slog"
 
@@ -230,16 +233,25 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		return nil, nil, fmt.Errorf("nuclei scan: no targets")
 	}
 
+	// Name the output file after the chunk id (task.Id is set to the
+	// chunk's metaID upstream). Gives the upload step a stable, traceable
+	// filename rather than a random temp suffix.
+	outputName := task.Id
+	if outputName == "" {
+		outputName = "nuclei"
+	}
+	outputName += ".jsonl"
+
 	var outputFile string
 	if task.Options.Output != "" {
 		_ = fileutil.CreateFolder(task.Options.Output)
-		outputFile = filepath.Join(task.Options.Output, "nuclei.output")
+		outputFile = filepath.Join(task.Options.Output, outputName)
 	} else {
-		tmp, err := fileutil.GetTempFileName()
+		dir, err := os.MkdirTemp("", "pd-agent-nuclei-*")
 		if err != nil {
-			return nil, nil, fmt.Errorf("create temp output for nuclei: %w", err)
+			return nil, nil, fmt.Errorf("create temp output dir for nuclei: %w", err)
 		}
-		outputFile = tmp
+		outputFile = filepath.Join(dir, outputName)
 	}
 
 	opts := runtools.NucleiOptions{
@@ -308,12 +320,26 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"config_bytes", len(opts.ConfigYAML),
 	)
 
-	// Dashboard upload is now handled by the nuclei SDK itself
-	// (WithPDCPUpload, wired in pkg/runtools/nuclei.go). The SDK wraps the
-	// engine's output writer with pdcp.UploadWriter — same path the CLI takes
-	// with -dashboard -scan-id, including the matched-only filter.
+	// Dashboard upload is handled by the nuclei SDK itself (WithPDCPUpload,
+	// wired in pkg/runtools/nuclei.go) — matched-only findings flow into
+	// pdcp.UploadWriter the same way -dashboard -scan-id does on the CLI.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
 		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
+	}
+
+	// Scan-log upload: ship the raw nuclei output file (full JSONL, both
+	// matched and unmatched events) to the platform via the presigned-URL
+	// flow. This is what powers the "what did the agent actually execute"
+	// audit view on the platform side. Skipped when ScanID or HistoryID
+	// isn't set (local/test runs).
+	if task.Options.ScanID != "" && task.Options.HistoryID != 0 {
+		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
+			slog.Warn("nuclei scan: scan-log upload failed",
+				"scan_id", task.Options.ScanID,
+				"history_id", task.Options.HistoryID,
+				"chunk_id", task.Id,
+				"error", err)
+		}
 	}
 
 	// Empty TaskResult: the embedded path doesn't capture stdout/stderr the
@@ -321,6 +347,112 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// that diagnostic stops working under the embedded path until we hook
 	// nuclei's logger to surface skip events.
 	return &types.TaskResult{}, []string{outputFile}, nil
+}
+
+// signedUploadResponse mirrors the /v1/scans/{scan_id}/scan_log/upload-url
+// response shape. Headers are authoritative — set them verbatim on the PUT,
+// don't add Content-Type or anything else (the V4 signature covers headers).
+type signedUploadResponse struct {
+	UploadURL  string            `json:"upload_url"`
+	Method     string            `json:"method"`
+	Headers    map[string]string `json:"headers"`
+	MaxBytes   int64             `json:"max_bytes"`
+	ObjectPath string            `json:"object_path"`
+	ExpiresAt  time.Time         `json:"expires_at"`
+}
+
+// uploadNucleiOutputViaSignedURL ships the per-chunk nuclei output file to
+// the platform via the presigned-URL flow. Two-hop:
+//  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N
+//     body: {"filename": "<chunk_id>.jsonl"}
+//  2. PUT the file bytes to the signed URL with the exact headers map.
+//
+// Filename uses task.Id (chunk_id) so the platform can correlate uploaded
+// logs back to a specific chunk inside a scan run.
+func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
+	info, err := os.Stat(outputFile)
+	if err != nil {
+		return fmt.Errorf("stat output: %w", err)
+	}
+	if info.Size() == 0 {
+		slog.Debug("nuclei scan: output file empty, skipping scan-log upload",
+			"scan_id", task.Options.ScanID, "chunk_id", task.Id)
+		return nil
+	}
+
+	filename := task.Id + ".jsonl"
+	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, os.Getenv("PDCP_API_KEY"))
+	if err != nil {
+		return fmt.Errorf("auth client: %w", err)
+	}
+
+	// Step 1: request the signed URL.
+	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
+		PCDPApiServer, task.Options.ScanID, task.Options.HistoryID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("build upload-url request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("get upload-url: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload-url status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var signed signedUploadResponse
+	if err := json.Unmarshal(respBody, &signed); err != nil {
+		return fmt.Errorf("decode upload-url response: %w", err)
+	}
+	if signed.UploadURL == "" || signed.Method == "" {
+		return fmt.Errorf("upload-url response missing url/method")
+	}
+	if signed.MaxBytes > 0 && info.Size() > signed.MaxBytes {
+		return fmt.Errorf("output file %d bytes exceeds signed-url max %d", info.Size(), signed.MaxBytes)
+	}
+
+	// Step 2: PUT the file to the signed URL with the exact headers.
+	f, err := os.Open(outputFile)
+	if err != nil {
+		return fmt.Errorf("open output: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	putReq, err := http.NewRequestWithContext(ctx, signed.Method, signed.UploadURL, f)
+	if err != nil {
+		return fmt.Errorf("build PUT: %w", err)
+	}
+	putReq.ContentLength = info.Size()
+	for k, v := range signed.Headers {
+		putReq.Header.Set(k, v)
+	}
+
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		return fmt.Errorf("PUT: %w", err)
+	}
+	defer func() { _ = putResp.Body.Close() }()
+
+	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(putResp.Body)
+		return fmt.Errorf("PUT status %d: %s", putResp.StatusCode, string(body))
+	}
+	_, _ = io.Copy(io.Discard, putResp.Body)
+
+	slog.Info("nuclei scan: output file uploaded",
+		"scan_id", task.Options.ScanID,
+		"history_id", task.Options.HistoryID,
+		"chunk_id", task.Id,
+		"size_bytes", info.Size(),
+		"object_path", signed.ObjectPath)
+	return nil
 }
 
 // splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.
