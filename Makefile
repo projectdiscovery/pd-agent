@@ -3,7 +3,10 @@ GOCMD=go
 GOBUILD=$(GOCMD) build
 GOMOD=$(GOCMD) mod
 GOTEST=$(GOCMD) test
-GOFLAGS := -v
+# -trimpath strips absolute build-machine paths from the binary (stack traces,
+# DWARF, etc.) so released builds are reproducible and don't leak filesystem
+# layouts. Applies to every target below.
+GOFLAGS := -v -trimpath
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.Version=$(VERSION)
 
@@ -18,15 +21,15 @@ all: build
 build:
 	$(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent" ./cmd/pd-agent/
 build-linux-amd64:
-	GOOS=linux GOARCH=amd64 $(GOBUILD) -ldflags '$(LDFLAGS)' -o "pd-agent-linux-amd64" ./cmd/pd-agent/
+	GOOS=linux GOARCH=amd64 $(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent-linux-amd64" ./cmd/pd-agent/
 build-linux-arm64:
-	GOOS=linux GOARCH=arm64 $(GOBUILD) -ldflags '$(LDFLAGS)' -o "pd-agent-linux-arm64" ./cmd/pd-agent/
+	GOOS=linux GOARCH=arm64 $(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent-linux-arm64" ./cmd/pd-agent/
 build-darwin-amd64:
-	GOOS=darwin GOARCH=amd64 $(GOBUILD) -ldflags '$(LDFLAGS)' -o "pd-agent-darwin-amd64" ./cmd/pd-agent/
+	GOOS=darwin GOARCH=amd64 $(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent-darwin-amd64" ./cmd/pd-agent/
 build-darwin-arm64:
-	GOOS=darwin GOARCH=arm64 $(GOBUILD) -ldflags '$(LDFLAGS)' -o "pd-agent-darwin-arm64" ./cmd/pd-agent/
+	GOOS=darwin GOARCH=arm64 $(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent-darwin-arm64" ./cmd/pd-agent/
 build-windows-amd64:
-	GOOS=windows GOARCH=amd64 $(GOBUILD) -ldflags '$(LDFLAGS)' -o "pd-agent-windows-amd64.exe" ./cmd/pd-agent/
+	GOOS=windows GOARCH=amd64 $(GOBUILD) $(GOFLAGS) -ldflags '$(LDFLAGS)' -o "pd-agent-windows-amd64.exe" ./cmd/pd-agent/
 test:
 	$(GOTEST) $(GOFLAGS) ./...
 tidy:

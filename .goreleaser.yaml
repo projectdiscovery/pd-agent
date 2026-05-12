@@ -5,6 +5,10 @@ before:
 builds:
 - env:
   - CGO_ENABLED=0
+  # -trimpath strips absolute build-machine paths from the binary so released
+  # builds are reproducible and don't leak filesystem layouts.
+  flags:
+  - -trimpath
   goos:
     - windows
     - linux
