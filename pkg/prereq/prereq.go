@@ -12,6 +12,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"time"
@@ -35,18 +37,22 @@ func EnsureAll() (failed []string) {
 	return failed
 }
 
-// warmupBrowser runs an embedded httpx screenshot probe against a known host
-// to trigger Chrome download (via go-rod) and validate that the browser
-// starts. Surfaces missing shared libraries as a clear startup error instead
-// of a confusing mid-scan failure.
+// warmupBrowser validates the embedded headless browser by running an httpx
+// screenshot probe against a loopback server. Surfaces missing Chrome shared
+// libraries as a clear startup error instead of a mid-scan failure.
 //
-// First-time runs are slow because Chrome itself has to download (~150 MB)
-// on first launch, so timeouts here are generous. We validate success by
-// confirming an actual screenshot file landed on disk; the JSON Result alone
-// is unreliable since httpx still emits a record (with screenshot_path set)
-// even when the screenshot itself timed out.
+// First-launch Chrome download is ~150MB, hence the generous timeouts.
+// Success is verified by stat'ing the screenshot file: httpx emits a Result
+// record even when the screenshot itself timed out, so the JSON line alone
+// is unreliable.
 func warmupBrowser() error {
 	slog.Info("prereq: validating browser (embedded httpx screenshot probe)...")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><body><h1>pd-agent warmup</h1></body></html>`))
+	}))
+	defer srv.Close()
 
 	tmp, err := os.CreateTemp("", "httpx-warmup-*.jsonl")
 	if err != nil {
@@ -65,7 +71,7 @@ func warmupBrowser() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	_, _, runErr := runtools.RunHttpx(ctx, []string{"www.example.com"}, runtools.HttpxOptions{
+	_, _, runErr := runtools.RunHttpx(ctx, []string{srv.URL}, runtools.HttpxOptions{
 		OutputFile:        tmpPath,
 		Screenshot:        true,
 		Timeout:           20 * time.Second,
