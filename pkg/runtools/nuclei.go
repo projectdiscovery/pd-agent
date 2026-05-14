@@ -103,6 +103,7 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 
 	sdkOpts := []nuclei.NucleiSDKOptions{
 		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
+		nuclei.WithSandboxOptions(opts.AllowLocalFileAccess, false),
 	}
 	if len(opts.Templates) > 0 {
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
@@ -112,16 +113,18 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 	if opts.Headless {
 		sdkOpts = append(sdkOpts, nuclei.EnableHeadlessWithOpts(nil))
 	}
+	if opts.MatcherStatus {
+		sdkOpts = append(sdkOpts, nuclei.EnableMatcherStatus())
+	}
+	if opts.EnableCodeTemplates {
+		sdkOpts = append(sdkOpts, nuclei.EnableCodeTemplates())
+	}
 	if len(opts.ConfigYAML) > 0 {
 		sdkOpts = append(sdkOpts, nuclei.WithConfigBytes(opts.ConfigYAML))
 	}
 	if len(opts.ReportingConfigYAML) > 0 {
 		sdkOpts = append(sdkOpts, nuclei.WithReportingConfigBytes(opts.ReportingConfigYAML))
 	}
-	// PDCP cloud upload: matches CLI -dashboard -scan-id -team-id. The SDK
-	// wraps the engine's output writer with pdcp.UploadWriter, which filters
-	// to matched results only (its inner StandardWriter defaults
-	// matcherStatus=false), exactly as the CLI does today.
 	if opts.ScanID != "" {
 		sdkOpts = append(sdkOpts, nuclei.WithPDCPUpload(opts.ScanID, opts.TeamID))
 	}
@@ -131,15 +134,6 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		return opts.OutputFile, fmt.Errorf("init nuclei engine: %w", err)
 	}
 	defer ne.Close()
-
-	// Stamp options on the underlying engine that don't have dedicated SDK
-	// option functions. Matches the CLI flag set pd-agent passes today.
-	if engineOpts := ne.Options(); engineOpts != nil {
-		engineOpts.AllowLocalFileAccess = opts.AllowLocalFileAccess
-		engineOpts.MatcherStatus = opts.MatcherStatus
-		engineOpts.EnableCodeTemplates = opts.EnableCodeTemplates
-		engineOpts.JSONL = true
-	}
 
 	ne.LoadTargets(opts.Targets, opts.ProbeNonHttp)
 
