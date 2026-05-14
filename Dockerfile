@@ -20,9 +20,9 @@ FROM --platform=linux/amd64 ubuntu:latest
 # Runtime dependencies: Chrome for nuclei/httpx headless screenshots, plus
 # ca-certificates for outbound TLS. naabu does service-version detection
 # natively (nmap-service-probes parsed in-process), so no nmap binary is
-# required. libpcap is intentionally not installed: syn-scan and IGMP
-# discovery warn-and-skip when it's missing. Users who want libpcap-backed
-# features can extend this image with `apt install libpcap0.8`.
+# required. libpcap is intentionally not installed: naabu's syn-scan warns
+# and skips when it's missing. Users who want libpcap-backed features can
+# extend this image with `apt install libpcap0.8`.
 RUN apt update && apt install -y \
     ca-certificates \
     wget \

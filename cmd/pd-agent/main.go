@@ -91,7 +91,6 @@ type Options struct {
 	AgentOutput      string
 	AgentName        string
 	Verbose          bool
-	PassiveDiscovery bool // Enable passive discovery
 	ChunkParallelism int  // Number of chunks to process in parallel
 	ScanParallelism  int  // Number of scans to process in parallel
 	KeepOutputFiles  bool // If true, don't delete output files after processing
@@ -378,11 +377,6 @@ func NewRunner(options *Options) (*Runner, error) {
 			warnOrphanDBs(dbDir, r.options.AgentId)
 		}
 	}
-
-	// Start passive discovery if enabled
-	// if r.options.PassiveDiscovery {
-	// 	go r.startPassiveDiscovery()
-	// }
 
 	return r, nil
 }
@@ -2432,7 +2426,6 @@ func parseOptions() *Options {
 		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", envconfig.AgentNetworkLegacyOrDefault(), "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the agent ID (auto-generated if empty, persisted across self-updates)"),
-		flagSet.BoolVar(&options.PassiveDiscovery, "passive-discovery", false, "enable passive discovery via libpcap/gopacket"),
 		flagSet.IntVarP(&options.ChunkParallelism, "chunk-parallelism", "c", defaultChunkParallelism, "number of chunks to process in parallel"),
 		flagSet.IntVarP(&options.ScanParallelism, "scan-parallelism", "s", defaultScanParallelism, "number of scans to process in parallel"),
 	)
@@ -2469,11 +2462,6 @@ func parseOptions() *Options {
 	// Note: AgentName initialization moved to NewRunner() after AgentId generation
 
 	configureLogging(options)
-
-	// Also support env variable PASSIVE_DISCOVERY
-	if envconfig.PassiveDiscovery() {
-		options.PassiveDiscovery = true
-	}
 
 	// Ensure agent network has a default value
 	if options.AgentNetwork == "" {

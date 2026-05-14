@@ -113,7 +113,6 @@ func AgentDBMetricCapMB() string { return envutil.GetEnvOrDefault(KeyAgentDBMetr
 const (
 	KeyVerbose                 = "PDCP_VERBOSE"
 	KeyKeepOutputFiles         = "PDCP_KEEP_OUTPUT_FILES"
-	KeyPassiveDiscovery        = "PASSIVE_DISCOVERY"
 	KeyLocalK8s                = "LOCAL_K8S"
 	KeyDisableDiagnosticUpload = "PDCP_DISABLE_DIAGNOSTIC_UPLOAD"
 	KeyEnableScanLogUpload     = "PDCP_ENABLE_SCAN_LOG_UPLOAD"
@@ -124,10 +123,6 @@ func Verbose() bool { return envutil.GetEnvOrDefault(KeyVerbose, false) }
 
 // KeepOutputFiles preserves per-chunk output files after upload.
 func KeepOutputFiles() bool { return envutil.GetEnvOrDefault(KeyKeepOutputFiles, false) }
-
-// PassiveDiscovery enables libpcap/gopacket-backed discovery. Warns and skips
-// at runtime when libpcap is missing on cgo-free builds.
-func PassiveDiscovery() bool { return envutil.GetEnvOrDefault(KeyPassiveDiscovery, false) }
 
 // LocalK8s loads kubeconfig from KUBECONFIG instead of the in-cluster service account.
 // Strict "true" match: ParseBool semantics would let LOCAL_K8S=1 flip to a path

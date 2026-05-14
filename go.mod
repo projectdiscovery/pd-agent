@@ -3,7 +3,6 @@ module github.com/projectdiscovery/pd-agent
 go 1.25.7
 
 require (
-	github.com/Mzack9999/gopacket v0.0.0-20260327212258-d211b432c22b
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.18.4
 	github.com/miekg/dns v1.1.68
@@ -14,7 +13,6 @@ require (
 	github.com/projectdiscovery/goflags v0.1.74
 	github.com/projectdiscovery/gologger v1.1.68
 	github.com/projectdiscovery/httpx v1.9.0
-	github.com/projectdiscovery/mapcidr v1.1.97
 	github.com/projectdiscovery/naabu/v2 v2.3.5-0.20260508200509-c61000aab275
 	github.com/projectdiscovery/nuclei/v3 v3.6.3-0.20260512125924-609cf3daba73
 	github.com/projectdiscovery/retryabledns v1.0.114
@@ -24,7 +22,6 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
 	go.uber.org/automaxprocs v1.6.0
-	golang.org/x/net v0.53.0
 	golang.org/x/sys v0.43.0
 	google.golang.org/protobuf v1.36.11
 	k8s.io/apimachinery v0.34.2
@@ -55,6 +52,7 @@ require (
 	github.com/Mzack9999/goimpacket v0.0.0-20260422121140-7085336a0415 // indirect
 	github.com/Mzack9999/goja v0.0.0-20250507184235-e46100e9c697 // indirect
 	github.com/Mzack9999/goja_nodejs v0.0.0-20250507184139-66bcbf65c883 // indirect
+	github.com/Mzack9999/gopacket v0.0.0-20260327212258-d211b432c22b // indirect
 	github.com/ProtonMail/go-crypto v1.1.6 // indirect
 	github.com/PuerkitoBio/goquery v1.11.0 // indirect
 	github.com/STARRY-S/zip v0.2.3 // indirect
@@ -320,6 +318,7 @@ require (
 	github.com/projectdiscovery/ipranger v0.0.53 // indirect
 	github.com/projectdiscovery/ldapserver v1.0.2-0.20240219154113-dcc758ebc0cb // indirect
 	github.com/projectdiscovery/machineid v0.0.0-20250715113114-c77eb3567582 // indirect
+	github.com/projectdiscovery/mapcidr v1.1.97 // indirect
 	github.com/projectdiscovery/n3iwf v0.0.0-20230523120440-b8cd232ff1f5 // indirect
 	github.com/projectdiscovery/networkpolicy v0.1.37 // indirect
 	github.com/projectdiscovery/ratelimit v0.0.86 // indirect
@@ -419,6 +418,7 @@ require (
 	golang.org/x/crypto v0.50.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.35.0 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/term v0.42.0 // indirect
