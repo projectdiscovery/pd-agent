@@ -39,9 +39,7 @@ const (
 	KeyAgentNetwork    = "PDCP_AGENT_NETWORK"
 	KeyAgentNetworkAlt = "AGENT_NETWORK" // legacy alias; PDCP_AGENT_NETWORK wins
 	KeyAgentOutput     = "PDCP_AGENT_OUTPUT"
-	KeyAgentTags       = "PDCP_AGENT_TAGS"
 
-	DefaultAgentTags    = "default"
 	DefaultAgentNetwork = "default"
 )
 
@@ -61,12 +59,6 @@ func AgentNetworkLegacyOrDefault() string {
 
 // AgentOutput returns the output-directory override.
 func AgentOutput() string { return envutil.GetEnvOrDefault(KeyAgentOutput, "") }
-
-// AgentTags returns the raw comma-separated tag list.
-func AgentTags() string { return envutil.GetEnvOrDefault(KeyAgentTags, "") }
-
-// AgentTagsOrDefault returns PDCP_AGENT_TAGS or "default".
-func AgentTagsOrDefault() string { return envutil.GetEnvOrDefault(KeyAgentTags, DefaultAgentTags) }
 
 // ---------- Concurrency ----------
 

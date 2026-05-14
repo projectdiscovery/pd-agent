@@ -68,8 +68,6 @@ spec:
             add: ["NET_RAW", "NET_ADMIN"]
         imagePullPolicy: Always
         args:
-          - -agent-tags
-          - production
           - -agent-networks
           - kube-prod-cluster
         env:

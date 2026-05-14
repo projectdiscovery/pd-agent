@@ -84,7 +84,6 @@ var Version = "dev"
 type Options struct {
 	TeamID           string
 	AgentId          string
-	AgentTags        goflags.StringSlice
 	AgentNetwork     string
 	AgentOutput      string
 	AgentName        string
@@ -1309,11 +1308,6 @@ func (r *Runner) Run(ctx context.Context) error {
 		if r.options.AgentId != "" {
 			fmt.Fprintf(&infoMessage, " with id %s", r.options.AgentId)
 		}
-		if len(r.options.AgentTags) > 0 {
-			fmt.Fprintf(&infoMessage, " (tags: [%s])", strings.Join(r.options.AgentTags, ", "))
-		} else {
-			infoMessage.WriteString(" (tags: [])")
-		}
 		if r.options.AgentNetwork != "" {
 			fmt.Fprintf(&infoMessage, " (network: %s)", r.options.AgentNetwork)
 		}
@@ -1772,14 +1766,12 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		r.logHelper("ERROR", fmt.Sprintf("failed to fetch agent info: %v", resp.Error))
 	}
 
-	tagsToUse := r.options.AgentTags
 	networksToUse := []string{r.options.AgentNetwork}
 	var lastUpdate time.Time
 	if resp.Error == nil && resp.StatusCode == http.StatusOK {
 		var response struct {
 			Agent struct {
 				Id         string    `json:"id"`
-				Tags       []string  `json:"tags"`
 				Networks   []string  `json:"networks"`
 				LastUpdate time.Time `json:"last_update"`
 				Name       string    `json:"name"`
@@ -1789,11 +1781,6 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 			agentInfo := response.Agent
 			lastUpdate = agentInfo.LastUpdate
 
-			if len(agentInfo.Tags) > 0 && !sliceutil.Equal(tagsToUse, agentInfo.Tags) {
-				r.logHelper("INFO", fmt.Sprintf("Using tags from %s server: %v (was: %v)", envconfig.APIServer(), agentInfo.Tags, tagsToUse))
-				tagsToUse = agentInfo.Tags
-				r.options.AgentTags = agentInfo.Tags
-			}
 			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
 				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", envconfig.APIServer(), agentInfo.Networks, networksToUse))
 				networksToUse = agentInfo.Networks
@@ -1827,13 +1814,6 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("name", r.options.AgentName)
 	q.Add("type", "agent")
 	q.Add("agent_network", r.options.AgentNetwork)
-
-	if len(tagsToUse) > 0 {
-		tagsStr := strings.Join(tagsToUse, ",")
-		if tagsStr != "" {
-			q.Add("tags", tagsStr)
-		}
-	}
 
 	if len(networksToUse) > 0 {
 		networksStr := strings.Join(networksToUse, ",")
@@ -2266,8 +2246,6 @@ func parseOptions() *Options {
 	flagSet := goflags.NewFlagSet()
 	flagSet.SetDescription(`pd-agent is an agent for ProjectDiscovery Cloud Platform`)
 
-	agentTags := strings.Split(envconfig.AgentTagsOrDefault(), ",")
-
 	// 0 means auto-detect at startup based on available resources.
 	defaultChunkParallelism := 0
 	if val, err := strconv.Atoi(envconfig.ChunkParallelism()); err == nil && val > 0 {
@@ -2283,7 +2261,6 @@ func parseOptions() *Options {
 		flagSet.BoolVar(&options.Verbose, "verbose", false, "show verbose output"),
 		flagSet.BoolVar(&options.KeepOutputFiles, "keep-output-files", false, "keep output files after processing (default: false, files are deleted immediately after processing)"),
 		flagSet.StringVar(&options.AgentOutput, "agent-output", "", "agent output folder"),
-		flagSet.StringSliceVarP(&options.AgentTags, "agent-tags", "at", agentTags, "specify the tags for the agent", goflags.CommaSeparatedStringSliceOptions),
 		flagSet.StringVarP(&options.AgentNetwork, "agent-network", "an", envconfig.AgentNetworkLegacyOrDefault(), "specify the network for the agent"),
 		flagSet.StringVar(&options.AgentName, "agent-name", "", "specify the name for the agent"),
 		flagSet.StringVar(&options.AgentId, "agent-id", "", "specify the agent ID (auto-generated if empty, persisted across self-updates)"),
@@ -2295,9 +2272,6 @@ func parseOptions() *Options {
 		slog.Error("error", "error", err)
 	}
 
-	if agentTags := envconfig.AgentTags(); agentTags != "" && len(options.AgentTags) == 0 {
-		options.AgentTags = goflags.StringSlice(strings.Split(agentTags, ","))
-	}
 	if agentNetwork := envconfig.AgentNetwork(); agentNetwork != "" && options.AgentNetwork == "" {
 		options.AgentNetwork = agentNetwork
 	}

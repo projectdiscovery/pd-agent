@@ -8,11 +8,10 @@ services:
     environment:
       - PDCP_API_KEY=your-api-key
       - PDCP_TEAM_ID=your-team-id
-      - PDCP_AGENT_TAGS=production
       - PDCP_VERBOSE=true
     volumes:
       - ./output:/output
-    command: -agent-output /output -verbose -agent-tags production
+    command: -agent-output /output -verbose
     # Enable host network mode for subnet discovery
     network_mode: host
     # Add network capabilities for full network access
