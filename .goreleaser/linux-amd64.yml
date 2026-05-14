@@ -6,6 +6,8 @@ before:
 project_name: pd-agent
 builds:
   - id: pd-agent-linux-amd64
+    flags:
+      - -trimpath
     ldflags:
       - -s -w
     binary: pd-agent
