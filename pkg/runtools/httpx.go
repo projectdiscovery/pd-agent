@@ -94,11 +94,16 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 	}
 	defer r.Close()
 
-	// httpx@v1.8.1 doesn't expose Interrupt; RunEnumeration blocks until done.
-	// Caller's ctx still bounds the surrounding tool task, so cancellation
-	// works at the task level even if individual probes can't be aborted.
-	_ = ctx
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			r.Interrupt()
+		case <-done:
+		}
+	}()
 	r.RunEnumeration()
+	close(done)
 
 	return opts.OutputFile, urls, nil
 }
