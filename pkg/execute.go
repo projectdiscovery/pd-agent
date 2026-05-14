@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -446,7 +448,7 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 
 	putReq, err := http.NewRequestWithContext(ctx, signed.Method, signed.UploadURL, f)
 	if err != nil {
-		return fmt.Errorf("build PUT: %w", err)
+		return fmt.Errorf("build PUT: %s", stripSignedURL(err))
 	}
 	putReq.ContentLength = gzSize
 	for k, v := range signed.Headers {
@@ -455,7 +457,7 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 
 	putResp, err := http.DefaultClient.Do(putReq)
 	if err != nil {
-		return fmt.Errorf("PUT: %w", err)
+		return fmt.Errorf("PUT: %s", stripSignedURL(err))
 	}
 	defer func() { _ = putResp.Body.Close() }()
 
@@ -473,6 +475,17 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		"gz_bytes", gzSize,
 		"object_path", signed.ObjectPath)
 	return nil
+}
+
+// stripSignedURL returns err.Error() with the signed URL removed if err is a
+// *url.Error. Keeps the operation and underlying cause; drops the URL so the
+// SigV4 (or GCS HMAC) signature in the query string can't end up in logs.
+func stripSignedURL(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Sprintf("%s: %s", ue.Op, ue.Err)
+	}
+	return err.Error()
 }
 
 // gzipFile streams src through gzip into dst and returns the size of dst.
