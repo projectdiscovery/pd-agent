@@ -16,29 +16,22 @@ import (
 	"github.com/projectdiscovery/tlsx/pkg/tlsx/clients"
 )
 
-// TlsxOptions configures an embedded tlsx scan. Only fields pd-agent actually
-// drives are exposed; defaults match the CLI behaviour for everything else.
+// TlsxOptions configures an embedded tlsx scan.
 type TlsxOptions struct {
 	// OutputFile receives one JSON Response per line. Required.
-	OutputFile string
-	// Concurrency is the worker count. Defaults to 25 (matches CLI default).
+	OutputFile  string
 	Concurrency int
-	// Timeout is the per-host TLS handshake timeout. Defaults to 5s.
-	Timeout time.Duration
-	// Retries is the per-host retry count. Defaults to 3.
-	Retries int
+	Timeout     time.Duration
+	Retries     int
 	// ScanMode picks the TLS implementation: "ctls" (default), "ztls", "openssl", "auto".
 	ScanMode string
 }
 
-// tlsxDefaultPort is used when a target has no port suffix — same default as
-// the tlsx CLI.
 const tlsxDefaultPort = "443"
 
-// RunTlsx scans every target in `targets` and writes one JSON Response per
-// reachable host to opts.OutputFile. Targets may be bare hosts or "host:port".
-// Returns the output file path. Per-target errors are logged and skipped, not
-// surfaced: matching CLI semantics where one bad host doesn't fail the run.
+// RunTlsx scans every target and writes one JSON Response per reachable host
+// to opts.OutputFile. Targets may be bare hosts or "host:port". Per-target
+// errors are logged and skipped, not surfaced.
 func RunTlsx(ctx context.Context, targets []string, opts TlsxOptions) (string, error) {
 	if opts.OutputFile == "" {
 		return "", errors.New("RunTlsx: OutputFile is required")
@@ -73,9 +66,6 @@ func RunTlsx(ctx context.Context, targets []string, opts TlsxOptions) (string, e
 	}
 	defer out.Close()
 
-	// bufio.Writer + mutex is simpler than a channel-funnel goroutine and
-	// handles back-pressure naturally: workers block on the lock while the
-	// writer drains. Buffer is small because results are small.
 	bw := bufio.NewWriter(out)
 	defer bw.Flush()
 
@@ -139,8 +129,8 @@ dispatch:
 	return opts.OutputFile, nil
 }
 
-// parseTlsxTarget splits a "host:port" or bare "host" into (host, port),
-// defaulting to port 443. Returns ("", "") if the input is unusable.
+// parseTlsxTarget splits "host:port" or bare "host" into (host, port),
+// defaulting to 443. Returns ("", "") for empty input.
 func parseTlsxTarget(raw string) (host, port string) {
 	if raw == "" {
 		return "", ""
@@ -149,8 +139,5 @@ func parseTlsxTarget(raw string) (host, port string) {
 	if err == nil {
 		return h, p
 	}
-	// SplitHostPort fails for bare hosts (and IPv6 without brackets, which
-	// wouldn't make sense as a tlsx target anyway). Treat as host with
-	// default port.
 	return raw, tlsxDefaultPort
 }

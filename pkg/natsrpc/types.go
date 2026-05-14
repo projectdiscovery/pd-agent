@@ -2,8 +2,7 @@ package natsrpc
 
 import "encoding/json"
 
-// Response is the standard JSON envelope sent back over NATS reply subjects.
-// Data uses encoding/json.RawMessage for compatibility across packages.
+// Response is the JSON envelope returned over NATS reply subjects.
 type Response struct {
 	Status string          `json:"status"`         // "ok" or "error"
 	Data   json.RawMessage `json:"data,omitempty"` // handler-specific payload
@@ -128,11 +127,10 @@ type SystemInfo struct {
 	Hostname string `json:"hostname"`
 }
 
-// ProcessInfo contains pd-agent process resource usage.
-// Uses runtime.MemStats (cross-platform) instead of syscall.Rusage.
+// ProcessInfo contains pd-agent process resource usage via runtime.MemStats.
 type ProcessInfo struct {
 	PID        int     `json:"pid"`
-	MemAllocMB float64 `json:"mem_alloc_mb"` // runtime.MemStats.Sys — total memory from OS
+	MemAllocMB float64 `json:"mem_alloc_mb"` // runtime.MemStats.Sys: total memory from OS
 }
 
 // RuntimeInfo contains Go runtime metrics.
@@ -149,36 +147,33 @@ type RuntimeInfo struct {
 
 // --- JetStream Work Distribution Types ---
 
-// WorkMessage is published by the server to the group stream to notify agents
-// about a new scan or enumeration to process. All messages (work notifications,
-// chunks, etc.) live in a single group-level stream; consumers use FilterSubject
-// to scope what they read.
+// WorkMessage notifies agents of a new scan or enumeration to process. All
+// work and chunks share a single group-level stream; consumers scope reads
+// via FilterSubject.
 type WorkMessage struct {
-	Type          string   `json:"type"`                    // "scan" or "enumeration"
-	ScanID        string   `json:"scan_id"`                 // scan_id or enumeration_id
-	ChunkSubject  string   `json:"chunk_subject"`           // subject filter for chunks (e.g., "ws-123.scanners.scan-1.chunks")
-	ChunkConsumer string   `json:"chunk_consumer"`          // shared consumer name (typically agent-network)
-	ChunkCount    int      `json:"chunk_count,omitempty"`   // number of chunks in the stream
+	Type          string   `json:"type"`           // "scan" or "enumeration"
+	ScanID        string   `json:"scan_id"`        // scan_id or enumeration_id
+	ChunkSubject  string   `json:"chunk_subject"`  // subject filter for chunks
+	ChunkConsumer string   `json:"chunk_consumer"` // shared consumer name
+	ChunkCount    int      `json:"chunk_count,omitempty"`
 	Config        string   `json:"config,omitempty"`        // base64 scan configuration
-	ReportConfig  string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration; tracker creds for issue creation on matches
-	HistoryID     int64    `json:"history_id,omitempty"`    // scan history record id; threaded through task.Options for downstream consumers
-	Steps         []string `json:"steps,omitempty"`         // enumeration steps (enumerations)
+	ReportConfig  string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration
+	HistoryID     int64    `json:"history_id,omitempty"`
+	Steps         []string `json:"steps,omitempty"` // enumeration steps
 }
 
 // ChunkMessage is a single unit of work decoded from the group stream.
-// For scan chunks: ZSTD-compressed protobuf (ScanRequest).
-// For enumeration chunks: plain protobuf (AssetEnrichmentRequest).
+// Scan chunks decode from ZSTD-compressed protobuf (ScanRequest);
+// enumeration chunks from plain protobuf (AssetEnrichmentRequest).
 type ChunkMessage struct {
 	ChunkID         string   `json:"chunk_id"`
 	Targets         []string `json:"targets"`
 	PublicTemplates []string `json:"public_templates,omitempty"`
-	// PrivateTemplates maps a template file name to its base64-encoded YAML
-	// contents. Materialized to disk in executeNucleiScan before the nuclei
-	// binary is invoked.
+	// PrivateTemplates maps a template file name to base64-encoded YAML.
 	PrivateTemplates map[string]string `json:"private_templates,omitempty"`
 	ScanConfig       string            `json:"scan_configuration,omitempty"`
 
-	// Enrichment-specific fields (populated for enumeration chunks)
+	// Enrichment fields (enumeration chunks).
 	EnrichmentID   string `json:"enrichment_id,omitempty"`
 	EnrichmentType string `json:"enrichment_type,omitempty"`
 	EnumConfig     string `json:"enumeration_configuration,omitempty"`

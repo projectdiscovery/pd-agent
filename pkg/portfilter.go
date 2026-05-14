@@ -23,19 +23,10 @@ import (
 	syncutil "github.com/projectdiscovery/utils/sync"
 )
 
-// FilterTargetsByTemplatePorts extracts ports from templates and filters targets
-// to only include hosts with open ports using naabu scan.
-// Takes as input:
-//   - targetsFile: filename containing targets (one per line, same format as passed to nuclei -l)
-//   - templatesFile: filename containing templates (one per line, same format as passed to nuclei -templates)
-//   - scanID: scan identifier for logging
-//   - chunkID: chunk identifier for logging
-//
-// Returns:
-//   - filtered hosts with open ports
-//   - ports extracted from targets
+// FilterTargetsByTemplatePorts extracts ports from templates, runs naabu
+// against (host x ports), and returns the URLs whose ports were reachable
+// plus the merged port list.
 func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFile, scanID, chunkID string) ([]string, []string, error) {
-	// Read targets file
 	targetsF, err := os.Open(targetsFile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to open targets file: %w", err)
@@ -44,18 +35,11 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 		_ = targetsF.Close()
 	}()
 
-	// Strategy: extract host from each input line, run naabu against
-	// host x (template-extracted ports + any port hint from input), then emit
-	// scheme://host:port for every (host, openPort) pair naabu reports. nuclei
-	// is invoked once per URL, so it scans every reachable port on the host
-	// even if the input only mentioned one. The scheme is preserved from the
-	// input when present — nuclei's SDK doesn't auto-probe scheme for bare
-	// host:port targets the way the CLI does, so templates with {{BaseURL}}
-	// would never run otherwise.
+	// nuclei's SDK does not auto-probe scheme for bare host:port targets the
+	// way the CLI does, so preserve the input scheme to keep {{BaseURL}}
+	// templates working.
 	var hosts []string
 	var ports []string
-	// hostSchemes maps host (without port) → scheme from the original input.
-	// Used to reconstruct the URL when emitting results.
 	hostSchemes := make(map[string]string)
 
 	scanner := bufio.NewScanner(targetsF)
@@ -65,21 +49,16 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 			continue
 		}
 
-		// Strip URL scheme (e.g. "https://host:port" → "host:port") and
-		// remember it for reconstruction.
 		stripped := line
 		scheme := ""
 		if idx := strings.Index(stripped, "://"); idx != -1 {
 			scheme = stripped[:idx]
 			stripped = stripped[idx+3:]
 		}
-		// Remove trailing path (e.g. "host:port/path" → "host:port")
 		if idx := strings.Index(stripped, "/"); idx != -1 {
 			stripped = stripped[:idx]
 		}
 
-		// Try to split host:port using net.SplitHostPort. Either way, we
-		// keep just the host - naabu does the per-port reachability check.
 		host, port, err := net.SplitHostPort(stripped)
 		if err == nil {
 			hosts = append(hosts, host)
@@ -101,13 +80,11 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 		return nil, nil, fmt.Errorf("error reading targets file: %w", err)
 	}
 
-	// Read templates file and extract ports
 	templatePorts, _, err := extractPortsFromTemplatesFile(templatesFile, scanID, chunkID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error extracting ports from templates: %w", err)
 	}
 
-	// Merge ports from targets and templates
 	allPorts := make(map[string]struct{})
 	for _, p := range ports {
 		allPorts[p] = struct{}{}
@@ -116,19 +93,14 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 		allPorts[p] = struct{}{}
 	}
 
-	// Convert to slice
 	mergedPorts := make([]string, 0, len(allPorts))
 	for p := range allPorts {
 		mergedPorts = append(mergedPorts, p)
 	}
 
-	// Deduplicate targets and ports before returning
 	hosts = sliceutil.Dedupe(hosts)
 	mergedPorts = sliceutil.Dedupe(mergedPorts)
 
-	// Run naabu against (host x ports). Returns map[host][]openPort. We then
-	// expand to host:port lines so nuclei probes every reachable port on
-	// every host.
 	var hostPorts map[string][]string
 	if len(hosts) > 0 && len(mergedPorts) > 0 {
 		hostPorts, err = runNaabuScan(ctx, hosts, mergedPorts, scanID, chunkID)
@@ -157,10 +129,7 @@ func FilterTargetsByTemplatePorts(ctx context.Context, targetsFile, templatesFil
 	return out, mergedPorts, nil
 }
 
-// runNaabuScan runs naabu scan with specified targets and ports using the SDK
-// Uses -no-probe (skip host discovery) for fast scanning.
-// Returns a map of host -> []openPort for every host with at least one
-// reachable port.
+// runNaabuScan returns host -> []openPort for hosts with at least one reachable port.
 func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID, chunkID string) (map[string][]string, error) {
 	if len(targets) == 0 || len(ports) == 0 {
 		slog.Info("naabu prefilter: skipped (no targets or ports)",
@@ -169,7 +138,6 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 		return nil, nil
 	}
 
-	// Convert ports to comma-separated string for naabu
 	portStr := strings.Join(ports, ",")
 
 	slog.Info("naabu prefilter: running",
@@ -179,12 +147,11 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 	var mu sync.Mutex
 	hostPorts := make(map[string][]string)
 
-	// Configure naabu options
 	options := &runner.Options{
 		Host:              goflags.StringSlice(targets),
 		Ports:             portStr,
-		SkipHostDiscovery: true, // Skip host discovery (equivalent to nmap -Pn)
-		Silent:            true, // Silent mode
+		SkipHostDiscovery: true,
+		Silent:            true,
 		OnResult: func(hr *result.HostResult) {
 			if hr.Host == "" || len(hr.Ports) == 0 {
 				return
@@ -197,7 +164,6 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 		},
 	}
 
-	// Create naabu runner
 	naabuRunner, err := runner.NewRunner(options)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create naabu runner: %w", err)
@@ -206,10 +172,9 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 		_ = naabuRunner.Close()
 	}()
 
-	// Run enumeration
 	err = naabuRunner.RunEnumeration(ctx)
 	if err != nil {
-		// naabu may return errors if no ports are found, which is acceptable
+		// naabu returns an error when no ports are found; not fatal.
 		slog.Debug("Naabu enumeration completed",
 			"scan_id", scanID,
 			"chunk_id", chunkID,
@@ -229,9 +194,8 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 	return hostPorts, nil
 }
 
-// extractPortsFromTemplatesFile reads the templates file (one template path per line)
-// and extracts ports from each template using all available extractors in parallel
-// Returns ports, template count, and error
+// extractPortsFromTemplatesFile reads the templates file and extracts ports
+// from each template in parallel. Returns ports, template count, and error.
 func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]string, int, error) {
 	templatesF, err := os.Open(templatesFile)
 	if err != nil {
@@ -246,7 +210,6 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 		_ = templatesF.Close()
 	}()
 
-	// Collect all template paths first
 	var templatePaths []string
 	scanner := bufio.NewScanner(templatesF)
 	for scanner.Scan() {
@@ -265,11 +228,9 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 		return nil, 0, fmt.Errorf("error reading templates file: %w", err)
 	}
 
-	// If no template paths in file, try to get all default nuclei templates
 	if len(templatePaths) == 0 {
 		defaultTemplateDir := GetNucleiDefaultTemplateDir()
 		if defaultTemplateDir != "" {
-			// Try to get all templates from the directory
 			err := filepath.Walk(defaultTemplateDir, func(path string, info os.FileInfo, err error) error {
 				if err != nil {
 					return err
@@ -277,7 +238,6 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 				if !info.IsDir() {
 					ext := filepath.Ext(path)
 					if ext == ".yaml" || ext == ".yml" {
-						// Get relative path from template directory
 						relPath, err := filepath.Rel(defaultTemplateDir, path)
 						if err == nil {
 							templatePaths = append(templatePaths, relPath)
@@ -294,30 +254,24 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 					"error", err)
 			}
 		}
-		// If still no templates found, return empty
 		if len(templatePaths) == 0 {
 			return []string{}, 0, nil
 		}
 	}
 
-	// Get nuclei default template directory once
 	defaultTemplateDir := GetNucleiDefaultTemplateDir()
 
-	// Use thread-safe map for ports
 	portSet := mapsutil.NewSyncLockMap[string, struct{}]()
 
-	// Use atomic counter for template count
 	var templateCount int64
 
-	// Create syncutil waitgroup with 50 threads
 	awg, err := syncutil.New(syncutil.WithSize(50))
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create syncutil: %w", err)
 	}
 
-	// Process templates in parallel
 	for _, templatePath := range templatePaths {
-		templatePath := templatePath // capture for goroutine
+		templatePath := templatePath
 
 		awg.Add()
 		go func(tp string) {
@@ -325,7 +279,6 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 
 			atomic.AddInt64(&templateCount, 1)
 
-			// Resolve template path - if relative, use nuclei default template directory
 			resolvedPath := tp
 			if !filepath.IsAbs(tp) {
 				if defaultTemplateDir != "" {
@@ -333,7 +286,6 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 				}
 			}
 
-			// Read the actual template file
 			templateContent, err := os.ReadFile(resolvedPath)
 			if err != nil {
 				slog.Error("Failed to read template file",
@@ -342,13 +294,11 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 					"template_path", tp,
 					"resolved_path", resolvedPath,
 					"error", err)
-				// Template path might not exist, skip
 				return
 			}
 
 			content := string(templateContent)
 
-			// Extract ports using all extractors
 			ports := extractAllPorts(content)
 			for _, port := range ports {
 				_ = portSet.Set(port, struct{}{})
@@ -356,10 +306,8 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 		}(templatePath)
 	}
 
-	// Wait for all templates to be processed
 	awg.Wait()
 
-	// Convert set to slice
 	allPorts := make([]string, 0)
 	allPortsMap := portSet.GetAll()
 	for p := range allPortsMap {
@@ -372,18 +320,14 @@ func extractPortsFromTemplatesFile(templatesFile, scanID, chunkID string) ([]str
 var cachedTemplateDir string
 var templateDirOnce sync.Once
 
-// GetNucleiDefaultTemplateDir returns the default nuclei template directory
-// Caches the result to avoid repeated lookups
-// Exported for use in other packages
+// GetNucleiDefaultTemplateDir returns the default nuclei template directory, cached.
 func GetNucleiDefaultTemplateDir() string {
 	templateDirOnce.Do(func() {
-		// Try to get from nuclei config
 		if cfg := config.DefaultConfig; cfg != nil && cfg.TemplatesDirectory != "" {
 			cachedTemplateDir = cfg.TemplatesDirectory
 			return
 		}
 
-		// Fallback to default location: $HOME/nuclei-templates
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			cachedTemplateDir = ""
@@ -395,20 +339,15 @@ func GetNucleiDefaultTemplateDir() string {
 	return cachedTemplateDir
 }
 
-// extractAllPorts is the super function that calls all port extractors
 func extractAllPorts(content string) []string {
 	var allPorts []string
-
-	// Call all extractors
 	allPorts = append(allPorts, extractJavascriptSinglePort(content)...)
 	allPorts = append(allPorts, extractJavascriptMultiplePorts(content)...)
 	allPorts = append(allPorts, extractHttpProtocolPorts(content)...)
-
 	return allPorts
 }
 
-// extractJavascriptSinglePort extracts single port from JavaScript template format
-// Pattern: Port: "3389" or Port: 3389
+// extractJavascriptSinglePort matches: Port: "3389" or Port: 3389.
 func extractJavascriptSinglePort(content string) []string {
 	var ports []string
 	regex := regexp.MustCompile(`(?i)(?:^|\s)Port:\s*["']?(\d+)["']?\s*$`)
@@ -427,8 +366,7 @@ func extractJavascriptSinglePort(content string) []string {
 	return ports
 }
 
-// extractJavascriptMultiplePorts extracts multiple ports from JavaScript template format
-// Pattern: ports: port1,port2 or ports: [port1, port2]
+// extractJavascriptMultiplePorts matches: ports: 1,2 or ports: [1, 2].
 func extractJavascriptMultiplePorts(content string) []string {
 	var ports []string
 	regex := regexp.MustCompile(`(?i)(?:^|\s)ports:\s*([\d,\s\[\]]+)\s*$`)
@@ -438,9 +376,7 @@ func extractJavascriptMultiplePorts(content string) []string {
 		matches := regex.FindStringSubmatch(line)
 		if len(matches) > 1 {
 			portsStr := matches[1]
-			// Remove brackets if present
 			portsStr = strings.Trim(portsStr, "[]")
-			// Split by comma
 			portParts := strings.Split(portsStr, ",")
 			for _, part := range portParts {
 				port := strings.TrimSpace(part)
@@ -454,8 +390,7 @@ func extractJavascriptMultiplePorts(content string) []string {
 	return ports
 }
 
-// extractHttpProtocolPorts extracts ports 80 and 443 if http protocol is detected
-// Pattern: http: section in template
+// extractHttpProtocolPorts returns 80 and 443 if the template has an http: section.
 func extractHttpProtocolPorts(content string) []string {
 	var ports []string
 	regex := regexp.MustCompile(`(?i)^\s*http:\s*$`)
@@ -463,7 +398,6 @@ func extractHttpProtocolPorts(content string) []string {
 	lines := strings.Split(content, "\n")
 	for _, line := range lines {
 		if regex.MatchString(line) {
-			// HTTP protocol detected, add default HTTP ports
 			ports = append(ports, "80", "443")
 			break
 		}
@@ -472,7 +406,6 @@ func extractHttpProtocolPorts(content string) []string {
 	return ports
 }
 
-// isValidPort validates if a string is a valid port number (1-65535)
 func isValidPort(portStr string) bool {
 	port, err := strconv.Atoi(portStr)
 	if err != nil {

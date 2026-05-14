@@ -15,25 +15,19 @@ import (
 	"github.com/projectdiscovery/dnsx/libs/dnsx"
 )
 
-// DnsxOptions configures an embedded dnsx scan. Only fields pd-agent actually
-// drives are exposed; defaults match the CLI behaviour for everything else.
+// DnsxOptions configures an embedded dnsx scan.
 type DnsxOptions struct {
 	// OutputFile receives one JSON DNSData per line. Required.
-	OutputFile string
-	// Concurrency is the worker count. Defaults to 25 (matches CLI default).
+	OutputFile  string
 	Concurrency int
-	// Timeout per query is governed by retryabledns; we expose Retries here.
-	Retries int
-	// Resolvers overrides the default resolver list. Empty means use defaults.
-	Resolvers []string
-	// QueryAll requests every record type (A/AAAA/CNAME/MX/...). When false
-	// (default) only A records are queried, matching dnsx CLI default.
+	Retries     int
+	Resolvers   []string
+	// QueryAll requests every record type (A/AAAA/CNAME/MX/...) instead of A only.
 	QueryAll bool
 }
 
-// RunDnsx resolves every hostname in `hosts` and writes one JSON DNSData per
-// hostname to opts.OutputFile, matching `dnsx -json -o`. Per-host errors are
-// logged at DEBUG and skipped — same behaviour as the CLI.
+// RunDnsx resolves every hostname in hosts and writes one JSON DNSData per
+// line to opts.OutputFile. Per-host errors are logged at DEBUG and skipped.
 func RunDnsx(ctx context.Context, hosts []string, opts DnsxOptions) (string, error) {
 	if opts.OutputFile == "" {
 		return "", errors.New("RunDnsx: OutputFile is required")
@@ -52,7 +46,6 @@ func RunDnsx(ctx context.Context, hosts []string, opts DnsxOptions) (string, err
 		dnsxOpts.BaseResolvers = opts.Resolvers
 	}
 	if opts.QueryAll {
-		// All record types when QueryAll is set; CLI does the same.
 		dnsxOpts.QuestionTypes = []uint16{
 			miekgdns.TypeA, miekgdns.TypeAAAA, miekgdns.TypeCNAME,
 			miekgdns.TypeMX, miekgdns.TypeNS, miekgdns.TypeTXT,

@@ -15,9 +15,8 @@ import (
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
 
-// UpdateNucleiTemplates installs nuclei-templates if missing, otherwise checks
-// for updates and applies them. Replaces a `nuclei -update-templates` shell-out.
-// Idempotent: safe to call at every agent startup.
+// UpdateNucleiTemplates installs nuclei-templates if missing, otherwise
+// updates them. Idempotent.
 func UpdateNucleiTemplates() error {
 	tm := &installer.TemplateManager{}
 	if err := tm.UpdateIfOutdated(); err != nil {
@@ -26,45 +25,32 @@ func UpdateNucleiTemplates() error {
 	return nil
 }
 
-// NucleiOptions configures an embedded nuclei scan. Mirrors the CLI flags
-// pd-agent's scan path drives today.
+// NucleiOptions configures an embedded nuclei scan.
 type NucleiOptions struct {
 	// OutputFile receives one JSON ResultEvent per match. Required.
 	OutputFile string
 	// Targets is the list of hosts/URLs to scan. Required.
 	Targets []string
-	// Templates is the list of template paths or IDs to run. Empty means run
-	// the default template set.
+	// Templates lists template paths or IDs; empty runs the default set.
 	Templates []string
-	// ScanID and TeamID gate dashboard upload — pd-agent does the upload
-	// itself via the embedded helper, so we just stamp these into output.
-	ScanID string
-	TeamID string
-	// AllowLocalFileAccess maps to nuclei's -lfa flag.
+	// ScanID and TeamID stamp dashboard-upload metadata into output.
+	ScanID               string
+	TeamID               string
 	AllowLocalFileAccess bool
-	// MatcherStatus emits records for failed matches too (nuclei -ms).
-	MatcherStatus bool
-	// EnableCodeTemplates allows code: protocol templates (nuclei -code).
-	// pd-agent gates this by available RAM (>2GB).
-	EnableCodeTemplates bool
-	// Headless allows browser-driven templates (nuclei -headless). pd-agent
-	// gates this by RAM (>8GB) and arch (amd64).
-	Headless bool
-	// ProbeNonHttp passes through to LoadTargets — when true, nuclei probes
-	// non-HTTP services via tcp/dns/etc. Defaults to false (HTTP-only).
+	MatcherStatus        bool
+	EnableCodeTemplates  bool
+	Headless             bool
+	// ProbeNonHttp enables tcp/dns/etc protocol probing in addition to HTTP.
 	ProbeNonHttp bool
-	// ConfigYAML is the cloud-shipped scan config, base64-decoded by the
-	// caller. Passed through to the SDK's WithConfigBytes (the nuclei
-	// RuntimeConfig schema: tags, severity, rate-limit, etc.).
+	// ConfigYAML is the cloud-shipped nuclei RuntimeConfig (tags, severity,
+	// rate-limit, ...). Already base64-decoded by the caller.
 	ConfigYAML []byte
-	// ReportingConfigYAML is the cloud-shipped tracker config (Jira/Linear/
-	// GitHub/etc.). Passed through to the SDK's WithReportingConfigBytes.
+	// ReportingConfigYAML is the cloud-shipped tracker config (Jira/Linear/GitHub/etc.).
 	ReportingConfigYAML []byte
 }
 
 // RunNuclei runs nuclei via the embedded SDK and writes one JSON ResultEvent
-// per finding to opts.OutputFile (matching `nuclei -jsonl -o`). Returns the
-// output path.
+// per finding to opts.OutputFile.
 func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 	if opts.OutputFile == "" {
 		return "", errors.New("RunNuclei: OutputFile is required")
@@ -141,8 +127,8 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		if event == nil {
 			return
 		}
-		// Strip Interaction since it can carry raw bytes from interactsh
-		// DNS responses that fail JSON marshal with control-char errors.
+		// Interaction can carry raw bytes from interactsh DNS responses that
+		// fail JSON marshal with control-char errors.
 		event.Interaction = nil
 
 		line, marshalErr := json.Marshal(event)

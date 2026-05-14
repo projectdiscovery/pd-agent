@@ -33,9 +33,6 @@ func TestParseTlsxTarget(t *testing.T) {
 	}
 }
 
-// TestRunTlsx_NoTargets exercises the happy-path defaults and confirms an
-// empty input list still produces a valid (empty) output file rather than
-// erroring or panicking.
 func TestRunTlsx_NoTargets(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "tlsx.jsonl")
@@ -63,9 +60,8 @@ func TestRunTlsx_RequiresOutputFile(t *testing.T) {
 	}
 }
 
-// TestResponseSerialization locks in that the tlsx Response type round-trips
-// through JSON cleanly. If tlsx ever changes its struct in a way that breaks
-// JSONL output (the contract pd-agent's pipeline depends on), this fails.
+// TestResponseSerialization guards JSONL output: fails if tlsx's Response
+// stops round-tripping through JSON.
 func TestResponseSerialization(t *testing.T) {
 	resp := &clients.Response{
 		Host:        "example.com",

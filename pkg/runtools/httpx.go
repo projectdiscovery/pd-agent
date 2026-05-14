@@ -11,34 +11,23 @@ import (
 	"github.com/projectdiscovery/httpx/runner"
 )
 
-// HttpxOptions configures an embedded httpx scan. Exposes only the fields
-// pd-agent actually drives; defaults match the CLI for everything else.
+// HttpxOptions configures an embedded httpx scan.
 type HttpxOptions struct {
 	// OutputFile receives one JSON Result per line. Required.
-	OutputFile string
-	// Concurrency is the worker count. Defaults to 50 (matches CLI default).
+	OutputFile  string
 	Concurrency int
-	// Timeout per probe. Defaults to 5s.
-	Timeout time.Duration
-	// Screenshot enables headless Chrome screenshot capture per result.
-	Screenshot bool
-	// ScreenshotTimeout bounds each headless screenshot. Defaults to 10s
-	// (matches CLI default), but first-time runs need longer because Chrome
-	// itself has to download.
+	Timeout     time.Duration
+	Screenshot  bool
+	// ScreenshotTimeout bounds each headless screenshot. First-time runs need
+	// longer because Chrome has to download.
 	ScreenshotTimeout time.Duration
-	// DisableStdout suppresses httpx's per-result stdout writes. Output still
-	// lands in OutputFile; callers that don't want JSON spilling into the
-	// agent log should set this.
-	DisableStdout bool
-	// StoreResponseDir overrides where stored responses + screenshots land.
-	// Empty falls through to httpx's default ("output" in cwd).
+	// DisableStdout suppresses httpx's per-result stdout writes.
+	DisableStdout    bool
 	StoreResponseDir string
 }
 
 // RunHttpx probes every target and writes one JSON Result per line to
-// opts.OutputFile (matching `httpx -json -irr -o`). Returns the output file
-// path and the list of resolved URLs from successful probes — callers can use
-// the URL slice to feed the next pipeline step without re-parsing the file.
+// opts.OutputFile. Returns the output path and the URLs of successful probes.
 func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string, []string, error) {
 	if opts.OutputFile == "" {
 		return "", nil, errors.New("RunHttpx: OutputFile is required")
@@ -61,7 +50,7 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 		InputTargetHost:    goflags.StringSlice(targets),
 		Output:             opts.OutputFile,
 		JSONOutput:         true,
-		ResponseInStdout:   true, // -irr equivalent
+		ResponseInStdout:   true,
 		Silent:             true,
 		Threads:            opts.Concurrency,
 		Timeout:            int(opts.Timeout.Seconds()),

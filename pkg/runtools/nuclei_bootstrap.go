@@ -10,14 +10,11 @@ import (
 var nucleiBootstrapOnce sync.Once
 
 // InitNucleiProcess flips nuclei's package-level globals once. These are
-// process-wide, so per-scan toggling is wasted work and risks a write race
-// when the first concurrent scans fire.
+// process-wide, so per-scan toggling risks a write race with concurrent scans.
 func InitNucleiProcess() {
 	nucleiBootstrapOnce.Do(func() {
 		nuclei.DefaultConfig.DisableUpdateCheck()
-
-		// Defaults to true upstream, set explicitly so a future default
-		// flip in nuclei/pkg/installer doesn't surprise us.
+		// Defaults to true upstream; pin in case that flips.
 		installer.HideReleaseNotes = true
 	})
 }

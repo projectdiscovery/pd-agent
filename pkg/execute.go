@@ -36,14 +36,8 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		}
 		return runNucleiScan(ctx, task)
 	} else if task.Options.EnumerationID != "" {
-		// Enumeration pipeline: linear flow, each step gates the next.
-		//
-		//   1. dnsx       → resolve hostnames (skip if all IPs)
-		//   2. port scan  → find open ports (always runs)
-		//   3. httpx      → probe web services (only on open ports)
-		//   4. httpx -screenshot → screenshot (only on confirmed web services)
-		//   5. tlsx       → TLS scan (only on open ports)
-
+		// Enumeration pipeline: each step gates the next.
+		//   dnsx -> port scan -> httpx (+screenshot) -> tlsx
 		steps := task.Options.Steps
 		wantScreenshot := sliceutil.Contains(steps, "http_screenshot")
 		manualAssetId := task.Options.EnumerationID
@@ -52,7 +46,6 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		hosts := task.Options.Hosts
 		enumID := task.Options.EnumerationID
 
-		// --- Step 1: DNS resolve (skip if all targets are IPs) ---
 		if sliceutil.Contains(steps, "dns_resolve") {
 			ips, hostnames := splitIPsAndHostnames(hosts)
 			if len(hostnames) == 0 {
@@ -65,16 +58,11 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				if err != nil {
 					return nil, nil, err
 				}
-				// dnsx doesn't change the host list for subsequent tools
 			}
 		}
 
-		// --- Step 2: Port scan (always — use step's naabu or quick filter) ---
 		var hostsWithOpenPorts []string
 		if sliceutil.Contains(steps, "port_scan") {
-			// Full port scan via naabu. ServiceVersion turns on naabu's
-			// native fingerprinting (nmap-service-probes parsed in-process,
-			// no external binary).
 			serviceVersion := sliceutil.Contains(steps, "ports_service_scan")
 			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
 				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
@@ -82,9 +70,8 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 					SkipHostDiscovery: true,
 					ServiceVersion:    serviceVersion,
 				})
-				// naabu returns an error when no ports are found; that's not
-				// a pipeline failure — downstream steps short-circuit on an
-				// empty hostsWithOpenPorts list.
+				// naabu returns an error when no ports are found; downstream
+				// steps short-circuit on an empty hostsWithOpenPorts list.
 				if err != nil {
 					slog.Warn("naabu enumeration finished with error", "error", err)
 				}
@@ -102,7 +89,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				}
 			}
 		} else {
-			// No port_scan step — quick filter on HTTP ports (80, 443, 8443)
+			// Quick HTTP-port filter (80, 443, 8443) when no naabu step.
 			filtered, err := quickPortFilter(ctx, hosts, enumID)
 			if err != nil {
 				slog.Warn("quick port filter failed, proceeding with all hosts", "error", err)
@@ -122,7 +109,6 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			"hosts_with_open_ports", len(hostsWithOpenPorts),
 			"enumeration_id", enumID)
 
-		// --- Step 3: httpx probe (on open ports only, no screenshot) ---
 		var webServices []string
 		if sliceutil.Contains(steps, "http_probe") {
 			_, err := runEmbeddedTool(ctx, task, "httpx", func(ctx context.Context, outputFile string) error {
@@ -139,7 +125,6 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				"enumeration_id", enumID)
 		}
 
-		// --- Step 4: httpx screenshot (only on confirmed web services) ---
 		if wantScreenshot && len(webServices) > 0 {
 			slog.Info("running httpx screenshot on confirmed web services",
 				"web_services", len(webServices), "enumeration_id", enumID)
@@ -157,7 +142,6 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			slog.Info("skipping httpx screenshot, no web services found", "enumeration_id", enumID)
 		}
 
-		// --- Step 5: TLS scan (on open ports only) ---
 		if sliceutil.Contains(steps, "tls_scan") {
 			_, err := runEmbeddedTool(ctx, task, "tlsx", func(ctx context.Context, outputFile string) error {
 				_, err := runtools.RunTlsx(ctx, hostsWithOpenPorts, runtools.TlsxOptions{OutputFile: outputFile})
@@ -174,11 +158,8 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 	return nil, nil, nil
 }
 
-// runEmbeddedTool runs a tool whose execution lives in pd-agent's own process
-// (via pkg/runtools) instead of a CLI subprocess. It owns the same output-file
-// and dashboard-upload orchestration as runEnumTool but skips the args/env/exec
-// machinery: the caller passes a runFn that takes the resolved output path and
-// performs the scan. Returns the output file path on success.
+// runEmbeddedTool resolves an output path, invokes runFn, and uploads the
+// result when the task is dashboard-bound. Returns the output file path.
 func runEmbeddedTool(
 	ctx context.Context,
 	task *types.Task,
@@ -206,8 +187,6 @@ func runEmbeddedTool(
 
 	*outputFiles = append(*outputFiles, outputFile)
 
-	// Embedded tools never delegate dashboard upload; we always handle it
-	// here when the task is dashboard-bound and the file is non-empty.
 	if task.Options.EnumerationID == "" && task.Options.TeamID == "" {
 		return outputFile, nil
 	}
@@ -228,18 +207,14 @@ func runEmbeddedTool(
 	return outputFile, nil
 }
 
-// runNucleiScan replaces the previous parseScanArgs + runCommand shell-out
-// path. It builds NucleiOptions from the task, runs nuclei via pkg/runtools,
-// uploads the JSONL output to PDCP if the task is dashboard-bound, and
-// returns the output file path.
+// runNucleiScan runs nuclei via pkg/runtools and uploads the JSONL output
+// for dashboard-bound tasks.
 func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []string, error) {
 	if len(task.Options.Hosts) == 0 {
 		return nil, nil, fmt.Errorf("nuclei scan: no targets")
 	}
 
-	// Name the output file after the chunk id (task.Id is set to the
-	// chunk's metaID upstream). Gives the upload step a stable, traceable
-	// filename rather than a random temp suffix.
+	// Naming the file after the chunk id gives the upload step a traceable filename.
 	outputName := task.Id
 	if outputName == "" {
 		outputName = "nuclei"
@@ -270,8 +245,8 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		Headless:             hasMoreThan8GBRAM() && isAMD64(),
 	}
 
-	// task.Options.Config is base64'd RuntimeConfig YAML. Handed to the
-	// SDK's WithConfigBytes for tag/severity/rate-limit/etc. merging.
+	// task.Options.Config is base64'd RuntimeConfig YAML for the SDK's
+	// WithConfigBytes (tag/severity/rate-limit merging).
 	if task.Options.Config != "" {
 		decoded, err := base64.StdEncoding.DecodeString(task.Options.Config)
 		if err != nil {
@@ -282,14 +257,10 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		}
 	}
 
-	// Reporting config (nuclei -rc / -report-config): tracker credentials for
-	// auto-creating Jira/Linear/GitHub/etc. issues on matched findings.
-	// Resolution order — operator override wins:
-	//   1. PDCP_REPORTING_CONFIG env — path to a local YAML on the agent.
-	//      Lets customers keep tracker creds off the platform and out of the
-	//      work message entirely. If set, takes precedence even if the work
-	//      message also carries ReportConfig.
-	//   2. task.Options.ReportConfig — base64 YAML the platform shipped.
+	// Reporting config (nuclei -rc): tracker credentials for auto-filing
+	// Jira/Linear/GitHub issues on matches. PDCP_REPORTING_CONFIG (local
+	// YAML) wins over the work-message base64 so operators can keep creds
+	// off the platform.
 	if path := envconfig.ReportingConfigPath(); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
 			opts.ReportingConfigYAML = data
@@ -321,19 +292,14 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"config_bytes", len(opts.ConfigYAML),
 	)
 
-	// Dashboard upload is handled by the nuclei SDK itself (WithPDCPUpload,
-	// wired in pkg/runtools/nuclei.go) — matched-only findings flow into
-	// pdcp.UploadWriter the same way -dashboard -scan-id does on the CLI.
+	// Match upload is handled by the nuclei SDK via WithPDCPUpload.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
 		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
 	}
 
-	// Scan-log upload: ship the raw nuclei output file (full JSONL, both
-	// matched and unmatched events) to the platform via the presigned-URL
-	// flow. Opt-in via PDCP_ENABLE_SCAN_LOG_UPLOAD=true. Default off so
-	// agents in environments without scan-log storage provisioned don't
-	// hammer the API with rejected uploads. Also skipped when ScanID or
-	// HistoryID isn't set (local/test runs).
+	// Raw scan-log upload (full JSONL, matched + unmatched). Opt-in via
+	// PDCP_ENABLE_SCAN_LOG_UPLOAD; default off so agents without storage
+	// provisioned don't hammer the API with rejected uploads.
 	if envconfig.ScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
 		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
 			slog.Warn("nuclei scan: scan-log upload failed",
@@ -344,16 +310,14 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		}
 	}
 
-	// Empty TaskResult: the embedded path doesn't capture stdout/stderr the
-	// way the subprocess did. ExtractUnresponsiveHosts loses its input here;
-	// that diagnostic stops working under the embedded path until we hook
-	// nuclei's logger to surface skip events.
+	// Empty TaskResult: embedded path doesn't capture stdout/stderr, so
+	// ExtractUnresponsiveHosts has no input until we hook nuclei's logger.
 	return &types.TaskResult{}, []string{outputFile}, nil
 }
 
-// signedUploadResponse mirrors the /v1/scans/{scan_id}/scan_log/upload-url
-// response shape. Headers are authoritative — set them verbatim on the PUT,
-// don't add Content-Type or anything else (the V4 signature covers headers).
+// signedUploadResponse mirrors /v1/scans/{scan_id}/scan_log/upload-url.
+// Headers are authoritative: set them verbatim on the PUT and add nothing
+// else, since the SigV4 signature covers headers.
 type signedUploadResponse struct {
 	UploadURL  string            `json:"upload_url"`
 	Method     string            `json:"method"`
@@ -363,14 +327,12 @@ type signedUploadResponse struct {
 	ExpiresAt  time.Time         `json:"expires_at"`
 }
 
-// uploadNucleiOutputViaSignedURL ships the per-chunk nuclei output to the
-// platform via the two-hop presigned-URL flow:
-//  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N
-//     body: {"filename": "<chunk_id>.jsonl.gz"}
-//  2. PUT the gzipped bytes to the signed URL with the exact headers map.
+// uploadNucleiOutputViaSignedURL ships the per-chunk output via:
+//  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N with {"filename": ...}
+//  2. PUT gzipped bytes to the signed URL with the response Headers verbatim.
 //
 // Gzipped as an opaque .gz blob (no Content-Encoding) so the SigV4 signed
-// headers never need to cover Content-Encoding. Server gunzips on read.
+// headers never need to cover Content-Encoding; server gunzips on read.
 func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
 	info, err := os.Stat(outputFile)
 	if err != nil {
@@ -382,9 +344,8 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return nil
 	}
 
-	// Gzip into a temp sibling so we can stat for ContentLength. Unique name
+	// Gzip into a sibling temp so we can stat for ContentLength. Unique name
 	// keeps a redelivered chunk from clobbering a still-PUTting goroutine.
-	// Cleanup is unconditional: KeepOutputFiles governs the source.
 	gzFile, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+"-*.gz")
 	if err != nil {
 		return fmt.Errorf("create gz tempfile: %w", err)
@@ -407,7 +368,6 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return fmt.Errorf("auth client: %w", err)
 	}
 
-	// Step 1: request the signed URL.
 	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
 	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
 		envconfig.APIServer(), task.Options.ScanID, task.Options.HistoryID)
@@ -439,7 +399,6 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 		return fmt.Errorf("gzipped output %d bytes exceeds signed-url max %d", gzSize, signed.MaxBytes)
 	}
 
-	// Step 2: PUT the gzipped file to the signed URL with the exact headers.
 	f, err := os.Open(gzPath)
 	if err != nil {
 		return fmt.Errorf("open gz: %w", err)
@@ -477,9 +436,8 @@ func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outpu
 	return nil
 }
 
-// stripSignedURL returns err.Error() with the signed URL removed if err is a
-// *url.Error. Keeps the operation and underlying cause; drops the URL so the
-// SigV4 (or GCS HMAC) signature in the query string can't end up in logs.
+// stripSignedURL drops the URL from a *url.Error so SigV4/GCS HMAC query
+// signatures never reach the logs. Keeps operation and underlying cause.
 func stripSignedURL(err error) string {
 	var ue *url.Error
 	if errors.As(err, &ue) {
@@ -488,8 +446,8 @@ func stripSignedURL(err error) string {
 	return err.Error()
 }
 
-// gzipFile streams src through gzip into dst and returns the size of dst.
-// Uses BestSpeed: nuclei JSONL compresses ~10x even at level 1.
+// gzipFile streams src through gzip into dst at BestSpeed (nuclei JSONL
+// compresses ~10x even at level 1) and returns the dst size.
 func gzipFile(src, dst string) (int64, error) {
 	in, err := os.Open(src)
 	if err != nil {
@@ -525,17 +483,15 @@ func gzipFile(src, dst string) (int64, error) {
 	return st.Size(), nil
 }
 
-// splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.
-// Handles host:port format — strips port before checking.
+// splitIPsAndHostnames separates IPs from hostnames; strips port if present.
 func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
 	for _, h := range hosts {
-		// Strip port if present (e.g., "10.0.0.1:8080" → "10.0.0.1")
 		host := h
 		if hostOnly, _, err := net.SplitHostPort(h); err == nil {
 			host = hostOnly
 		}
 		if net.ParseIP(host) != nil {
-			ips = append(ips, h) // keep original (with port if present)
+			ips = append(ips, h)
 		} else {
 			hostnames = append(hostnames, h)
 		}
@@ -543,9 +499,8 @@ func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
 	return ips, hostnames
 }
 
-// quickPortFilter runs a lightweight naabu scan on HTTP default ports (80, 443, 8443)
-// to check which hosts are alive before launching expensive tools like httpx with Chrome.
-// Returns host:port pairs for hosts with at least one open port.
+// quickPortFilter runs naabu on 80/443/8443 to drop dead hosts before launching
+// heavy tools like httpx+Chrome. Returns host:port pairs.
 func quickPortFilter(ctx context.Context, hosts []string, enumID string) ([]string, error) {
 	httpPorts := []string{"80", "443", "8443"}
 	hostPorts, err := runNaabuScan(ctx, hosts, httpPorts, enumID, "quick-filter")
@@ -630,22 +585,17 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	return assetId, nil
 }
 
-// getTotalRAM returns the total physical/installed RAM in bytes (not virtual memory)
-// Returns 0 and an error if unable to determine RAM
-// Note: mem.VirtualMemory().Total returns the total physical RAM installed on the system
+// getTotalRAM returns total installed physical RAM in bytes.
 func getTotalRAM() (uint64, error) {
 	vmStat, err := mem.VirtualMemory()
 	if err != nil {
 		return 0, err
 	}
-	// Total field represents the total physical RAM installed, not virtual memory
 	return vmStat.Total, nil
 }
 
-// hasMoreThan2GBRAM checks if the system has more than 2GB of RAM
-// Returns true if RAM > 2GB, false otherwise or if unable to determine
 func hasMoreThan2GBRAM() bool {
-	const minRAMBytes = 2 * 1024 * 1024 * 1024 // 2GB in bytes
+	const minRAMBytes = 2 * 1024 * 1024 * 1024
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
@@ -656,10 +606,8 @@ func hasMoreThan2GBRAM() bool {
 	return totalRAM > minRAMBytes
 }
 
-// hasMoreThan8GBRAM checks if the system has more than 8GB of RAM
-// Returns true if RAM > 8GB, false otherwise or if unable to determine
 func hasMoreThan8GBRAM() bool {
-	const minRAMBytes = 8 * 1024 * 1024 * 1024 // 8GB in bytes
+	const minRAMBytes = 8 * 1024 * 1024 * 1024
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
@@ -670,8 +618,6 @@ func hasMoreThan8GBRAM() bool {
 	return totalRAM > minRAMBytes
 }
 
-// isAMD64 checks if the system architecture is AMD64 (x86_64)
-// Returns true if architecture is amd64, false otherwise
 func isAMD64() bool {
 	return runtime.GOARCH == "amd64"
 }

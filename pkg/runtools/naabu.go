@@ -15,28 +15,21 @@ import (
 	"github.com/projectdiscovery/naabu/v2/pkg/runner"
 )
 
-// NaabuOptions configures an embedded naabu scan. Mirrors the CLI flags
-// pd-agent actually uses today.
+// NaabuOptions configures an embedded naabu scan.
 type NaabuOptions struct {
 	// OutputFile receives one "host:port" line per open port. Required.
 	OutputFile string
-	// Ports is a comma-separated list (e.g. "80,443,8443"). Empty means
-	// naabu's default top-1000.
-	Ports string
-	// SkipHostDiscovery is the equivalent of nmap -Pn: don't try to ping the
-	// host first, just probe the ports.
+	// Ports is a comma-separated list (e.g. "80,443,8443"); empty uses naabu's top-1000.
+	Ports             string
 	SkipHostDiscovery bool
-	// ServiceVersion enables naabu's native service-version detection
-	// (equivalent of the CLI's -sV). Uses nmap-service-probes natively,
-	// no external nmap binary needed.
+	// ServiceVersion enables nmap-service-probes scanning (no external nmap binary).
 	ServiceVersion bool
-	// ServiceDiscovery enables naabu's port-number-to-service mapping
-	// (CLI -sD). Cheaper than ServiceVersion.
+	// ServiceDiscovery enables port-number-to-service mapping (cheaper than ServiceVersion).
 	ServiceDiscovery bool
 }
 
-// RunNaabu scans every target in `hosts` and writes one "host:port" line per
-// open port to opts.OutputFile. Returns the path on success.
+// RunNaabu scans every target and writes one "host:port" line per open port
+// to opts.OutputFile.
 func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, error) {
 	if opts.OutputFile == "" {
 		return "", errors.New("RunNaabu: OutputFile is required")
@@ -83,8 +76,7 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	}
 	defer r.Close()
 
-	// naabu's RunEnumeration returns an error when no ports are found; that's
-	// not a failure for our pipeline, so log-and-continue at the call site.
+	// RunEnumeration returns an error when no ports are found; treat at call site.
 	if err := r.RunEnumeration(ctx); err != nil {
 		return opts.OutputFile, fmt.Errorf("naabu enumeration: %w", err)
 	}

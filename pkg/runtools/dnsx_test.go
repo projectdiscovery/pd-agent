@@ -37,9 +37,8 @@ func TestRunDnsx_RequiresOutputFile(t *testing.T) {
 	}
 }
 
-// TestDNSDataSerialization locks in that retryabledns.DNSData round-trips
-// through JSON cleanly. If the upstream struct changes shape in a way that
-// breaks JSONL output, this fails.
+// TestDNSDataSerialization guards JSONL output: fails if upstream
+// retryabledns.DNSData stops round-tripping through JSON.
 func TestDNSDataSerialization(t *testing.T) {
 	data := &retryabledns.DNSData{
 		Host:  "example.com",

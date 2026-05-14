@@ -12,7 +12,6 @@ import (
 )
 
 func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) {
-	// Create a custom dialer that forces IPv4 only
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
@@ -23,22 +22,19 @@ func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) 
 			InsecureSkipVerify: true,
 		},
 		ForceAttemptHTTP2: true,
-		// Custom dial function that forces IPv4 only
+		// Force IPv4: some agent networks IPv6-resolve but cannot route AAAA.
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Force IPv4 by changing network type
 			if network == "tcp" {
 				network = "tcp4"
 			}
 			return dialer.DialContext(ctx, network, addr)
 		},
-		// Connection management settings to prevent socket issues
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		DisableKeepAlives:     false,
 		MaxIdleConnsPerHost:   10,
-		// Add response header timeout to prevent hanging connections
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
 
@@ -53,11 +49,9 @@ func CreateAuthenticatedClient(teamID, pdcpApiKey string) (*http.Client, error) 
 
 	client := &http.Client{
 		Transport: transport,
-		// Add overall request timeout to prevent hanging requests
-		Timeout: 60 * time.Second,
+		Timeout:   60 * time.Second,
 	}
 
-	// Create a custom RoundTripper to add headers to every request
 	client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		req.Header.Set("X-Api-Key", pdcpApiKey)
 		req.Header.Set("X-Team-Id", teamID)

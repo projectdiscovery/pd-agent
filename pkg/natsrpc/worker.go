@@ -25,15 +25,13 @@ const (
 	defaultAckWait           = 5 * time.Minute
 )
 
-// WorkHandler processes a work message (scan or enumeration).
-// The handler receives the raw JetStream message for ack/nak control
-// and the parsed WorkMessage payload.
+// WorkHandler processes a parsed WorkMessage. The raw jetstream.Msg is
+// supplied so the handler can ack or nak directly.
 type WorkHandler func(ctx context.Context, msg jetstream.Msg, work *WorkMessage) error
 
-// WorkerPool manages a pool of goroutines that pull work messages from a
-// JetStream consumer and dispatch them to a handler. Each worker pulls one
-// work message at a time; concurrency is controlled by the pool size and
-// MaxAckPending on the consumer.
+// WorkerPool pulls work messages from a JetStream consumer and dispatches
+// them to a handler. Concurrency is bounded by parallelism and the consumer's
+// MaxAckPending.
 type WorkerPool struct {
 	js           jetstream.JetStream
 	workConsumer jetstream.Consumer
@@ -46,13 +44,9 @@ type WorkerPool struct {
 	activeWorkers atomic.Int32 // number of workers currently processing
 }
 
-// NewWorkerPool creates a WorkerPool that consumes work notifications from
-// the group stream. It creates a durable pull consumer with a FilterSubject
-// scoped to groupPrefix.work.> so it only receives work messages, not chunks
-// or other messages in the same stream.
-//
-// The consumer's MaxAckPending is set to parallelism so JetStream itself acts
-// as the backpressure mechanism.
+// NewWorkerPool creates a durable pull consumer filtered to
+// groupPrefix.work.>, with MaxAckPending=parallelism so JetStream provides
+// the backpressure.
 func NewWorkerPool(nc *nats.Conn, streamName, consumerName, groupPrefix string, parallelism int, handler WorkHandler) (*WorkerPool, error) {
 	if parallelism <= 0 {
 		parallelism = 1
@@ -85,14 +79,12 @@ func NewWorkerPool(nc *nats.Conn, streamName, consumerName, groupPrefix string, 
 	}, nil
 }
 
-// JS returns the underlying JetStream instance for use by chunk consumers.
+// JS returns the underlying JetStream instance.
 func (wp *WorkerPool) JS() jetstream.JetStream {
 	return wp.js
 }
 
-// Run starts the worker goroutines. Each worker pulls one work message at a
-// time from the consumer, starts a heartbeat, dispatches to the handler, and
-// acks/naks based on the result. Run blocks until ctx is cancelled.
+// Run starts the worker goroutines and blocks until ctx is cancelled.
 func (wp *WorkerPool) Run(ctx context.Context) {
 	ctx, wp.cancel = context.WithCancel(ctx)
 
@@ -150,11 +142,10 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 	var work WorkMessage
 	if err := json.Unmarshal(msg.Data(), &work); err != nil {
 		slog.Error("jetstream worker: unmarshal work message", "worker", workerID, "error", err)
-		_ = msg.Term() // permanent failure, don't redeliver
+		_ = msg.Term()
 		return
 	}
 
-	// Include NATS metadata (stream seq, num delivered) to identify redeliveries
 	meta, _ := msg.Metadata()
 	var streamSeq, numDelivered uint64
 	if meta != nil {
@@ -170,7 +161,6 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 		"num_delivered", numDelivered,
 	)
 
-	// Start heartbeat on the work message to prevent redelivery
 	stopHeartbeat := StartHeartbeat(ctx, msg, defaultHeartbeatInterval)
 	defer stopHeartbeat()
 
@@ -183,8 +173,7 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 			"num_delivered", numDelivered,
 			"error", err,
 		)
-		// After too many redeliveries, terminate the message to stop poison-pill loops.
-		// Otherwise nak for retry.
+		// Terminate after too many redeliveries to break poison-pill loops.
 		if numDelivered > 5 {
 			slog.Error("jetstream worker: terminating poison message after too many redeliveries",
 				"worker", workerID,
@@ -223,8 +212,7 @@ func (wp *WorkerPool) touchActivity() {
 	wp.lastActivity.Store(time.Now().UnixNano())
 }
 
-// LastActivity returns the time of the last work activity.
-// Returns zero time if no work has been processed yet.
+// LastActivity returns the time of the last work activity, or zero if none.
 func (wp *WorkerPool) LastActivity() time.Time {
 	nanos := wp.lastActivity.Load()
 	if nanos == 0 {
@@ -238,35 +226,24 @@ func (wp *WorkerPool) ActiveWorkers() int32 {
 	return wp.activeWorkers.Load()
 }
 
-// IdleSince returns the time the pool became idle, or zero time if it's
-// currently processing work or has never processed any work.
+// IdleSince returns the last-activity time when the pool is idle, or zero
+// when it is actively processing or has never processed work.
 func (wp *WorkerPool) IdleSince() time.Time {
 	if wp.activeWorkers.Load() > 0 {
-		return time.Time{} // actively working — not idle
+		return time.Time{}
 	}
 	return wp.LastActivity()
 }
 
-// ChunkScaler is the interface for reporting chunk durations to the adaptive
-// scaler. If nil, no duration tracking is performed.
+// ChunkScaler receives chunk duration reports for adaptive scaling.
 type ChunkScaler interface {
 	RecordChunkDuration(d time.Duration)
 }
 
-// ConsumeChunks pulls and processes chunks from the group stream using a shared
-// durable consumer with a FilterSubject scoped to the scan's chunk subject.
-// All agents in the same group bind to the same consumer name, so each chunk
-// is delivered to exactly one agent.
-//
-// sem controls how many chunks are processed concurrently. If nil, a fixed
-// semaphore is created from chunkParallelism. When a ResizableSemaphore is
-// provided, the adaptive scaler can adjust concurrency at runtime.
-//
-// scaler (optional) receives chunk duration reports for adaptive scaling.
-//
-// processFn is called for each chunk. If it returns an error, the chunk is
-// nak'd for redelivery. ConsumeChunks returns when the stream is drained
-// (no pending messages and fetch returns empty).
+// ConsumeChunks pulls chunks from a shared durable consumer scoped to
+// chunkSubject and processes them concurrently. sem caps concurrency; if nil,
+// a fixed semaphore of size chunkParallelism is created. scaler is optional.
+// processFn errors trigger a nak; ConsumeChunks returns once NumPending == 0.
 func ConsumeChunks(
 	ctx context.Context,
 	js jetstream.JetStream,
@@ -280,7 +257,6 @@ func ConsumeChunks(
 		chunkParallelism = 1
 	}
 
-	// If no external semaphore provided, create a fixed one.
 	if sem == nil {
 		sem = resourceprofile.NewResizableSemaphore(chunkParallelism, chunkParallelism)
 	}
@@ -296,20 +272,15 @@ func ConsumeChunks(
 		return fmt.Errorf("bind chunk consumer %q on stream %q (filter=%s): %w", consumerName, streamName, chunkSubject, err)
 	}
 
-	// Track all in-flight chunks so we can wait for them before exiting.
 	var inflightWg sync.WaitGroup
-	// scanCtx is the cancellation handle for in-flight chunks of this scan.
-	// Detached from ctx so an agent SIGTERM lets chunks drain gracefully. We
-	// cancel it explicitly when the consumer is deleted server-side (platform-
-	// initiated scan stop), which makes in-flight nuclei bail mid-template.
+	// scanCtx is detached from ctx so an agent SIGTERM lets chunks drain. It
+	// is cancelled explicitly when the consumer is deleted server-side, which
+	// makes in-flight nuclei bail mid-template.
 	scanCtx, scanCancel := context.WithCancel(context.WithoutCancel(ctx))
 	defer func() {
-		// Once the fetch loop exits, in-flight chunks may still be running.
-		// The platform deletes the chunk consumer on user-stop, but the race
-		// between "purge messages" and "delete consumer" means consumer.Info
-		// inside the fetch loop can return NumPending=0 just before the delete
-		// lands. Watch for the delete during the drain so we can scanCancel
-		// any chunks that just started a heavy template load.
+		// consumer.Info inside the fetch loop may return NumPending=0 just
+		// before a server-side delete lands. Watch for the delete during the
+		// drain so chunks that just started a heavy template load get cancelled.
 		drainDone := make(chan struct{})
 		go func() {
 			inflightWg.Wait()
@@ -327,7 +298,6 @@ func ConsumeChunks(
 					slog.Info("chunk consumer: deleted during drain, cancelling in-flight chunks",
 						"stream", streamName, "subject", chunkSubject)
 					scanCancel()
-					// One-shot: stop polling and just wait for chunks to bail.
 					<-drainDone
 					return
 				}
@@ -340,7 +310,6 @@ func ConsumeChunks(
 			return ctx.Err()
 		}
 
-		// Use current semaphore size for fetch batch size.
 		fetchSize := max(sem.Size(), 1)
 
 		batch, err := consumer.Fetch(fetchSize, jetstream.FetchMaxWait(5*time.Second))
@@ -362,26 +331,19 @@ func ConsumeChunks(
 		for msg := range batch.Messages() {
 			gotMessages = true
 
-			// Start heartbeat BEFORE acquiring semaphore — keeps the message
-			// alive while waiting for a processing slot.
+			// Heartbeat must start before Acquire so the message stays alive
+			// while waiting for a processing slot.
 			stopHeartbeat := StartHeartbeat(ctx, msg, defaultHeartbeatInterval)
 
-			// Acquire semaphore slot — blocks if all slots are occupied.
-			// This is the only concurrency control: when a chunk finishes and
-			// releases its slot, the next Acquire unblocks immediately. No
-			// batch-level waiting — chunks flow through continuously.
 			if err := sem.Acquire(ctx); err != nil {
 				stopHeartbeat()
-				return err // context cancelled
+				return err
 			}
 			inflightWg.Add(1)
 			go func(m jetstream.Msg, stopHB context.CancelFunc) {
 				defer inflightWg.Done()
 				defer sem.Release()
 				defer stopHB()
-				// scanCtx survives parent ctx cancellation (agent SIGTERM lets
-				// in-flight chunks drain) but is cancelled when the consumer
-				// is deleted server-side (platform-initiated stop).
 				processCtx := scanCtx
 				start := time.Now()
 				processChunkMsg(processCtx, m, chunkSubject, processFn)
@@ -392,26 +354,12 @@ func ConsumeChunks(
 		}
 
 		if !gotMessages {
-			// No messages available — check if there are any undelivered chunks left.
-			//
-			// We intentionally check only NumPending (undelivered messages), NOT
-			// NumAckPending (delivered but unacked). This enables the multi-agent
-			// flow-through pattern:
-			//
-			//   100 agents race for 1000 chunks on scan-1.
-			//   990 chunks done, 10 agents still processing their last chunk.
-			//   90 agents fetch → empty → NumPending=0 → done → ACK scan-1 → move to scan-2.
-			//   The 10 agents finish their chunks → also see NumPending=0 → move on.
-			//
-			// If we waited for NumAckPending==0 (all agents done), those 90 agents
-			// would idle-loop until the last 10 finish — defeating the purpose of
-			// distributed chunk processing.
-			//
-			// Crash handling: with MaxDeliver=1, if an agent crashes mid-chunk,
-			// AckWait expires and the chunk is terminated (not redelivered).
-			// The chunk is picked up in the next scan run instead. This matches
-			// once-only delivery semantics; it is not crash-safe within a single
-			// scan run.
+			// Check NumPending only, not NumAckPending. With many agents racing
+			// for the same chunks, waiting for NumAckPending==0 would idle agents
+			// that finished early until the slow agents catch up. NumPending==0
+			// lets each agent exit as soon as no undelivered chunks remain.
+			// MaxDeliver=1 means a crash mid-chunk is recovered in the next scan
+			// run, not within this one.
 			info, err := consumer.Info(ctx)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -429,25 +377,21 @@ func ConsumeChunks(
 				slog.Info("chunk consumer: no more chunks to fetch", "stream", streamName, "subject", chunkSubject)
 				return nil
 			}
-			// Chunks still pending delivery — keep trying
 		}
 	}
 }
 
-// isConsumerOrStreamGone returns true when the error indicates the consumer or
-// stream has been deleted server-side. These are permanent conditions — retrying
-// will loop forever.
+// isConsumerOrStreamGone reports a server-side delete: retrying will spin forever.
 func isConsumerOrStreamGone(err error) bool {
 	return errors.Is(err, jetstream.ErrConsumerNotFound) ||
 		errors.Is(err, jetstream.ErrConsumerDeleted) ||
 		errors.Is(err, jetstream.ErrStreamNotFound)
 }
 
-// ZSTD magic number: 0xFD2FB528 (little-endian)
+// ZSTD magic number 0xFD2FB528, little-endian.
 var zstdMagic = []byte{0x28, 0xB5, 0x2F, 0xFD}
 
-// Package-level zstd decoder — reused across all chunk decodes.
-// zstd.Decoder.DecodeAll is safe for concurrent use.
+// zstd.Decoder.DecodeAll is safe for concurrent use, so one decoder suffices.
 var zstdDecoder *zstd.Decoder
 
 func init() {
@@ -458,10 +402,9 @@ func init() {
 	}
 }
 
-// decodeChunkMsg deserializes a chunk message from NATS.
-// Scan chunks are ZSTD-compressed protobuf (ScanRequest).
-// Enumeration chunks are plain protobuf (AssetEnrichmentRequest).
-// Detection is based on the ZSTD magic number in the first 4 bytes.
+// decodeChunkMsg deserializes a chunk message. Scan chunks are
+// ZSTD-compressed ScanRequest protobufs; enumeration chunks are plain
+// AssetEnrichmentRequest. Discriminated by the ZSTD magic in the first 4 bytes.
 func decodeChunkMsg(data []byte) (*ChunkMessage, error) {
 	if len(data) >= 4 && data[0] == zstdMagic[0] && data[1] == zstdMagic[1] && data[2] == zstdMagic[2] && data[3] == zstdMagic[3] {
 		return decodeScanChunk(data)
@@ -469,7 +412,6 @@ func decodeChunkMsg(data []byte) (*ChunkMessage, error) {
 	return decodeEnrichmentChunk(data)
 }
 
-// decodeScanChunk handles ZSTD-compressed protobuf ScanRequest chunks.
 func decodeScanChunk(data []byte) (*ChunkMessage, error) {
 	decompressed, err := zstdDecoder.DecodeAll(data, nil)
 	if err != nil {
@@ -491,9 +433,8 @@ func decodeScanChunk(data []byte) (*ChunkMessage, error) {
 		publicTemplates = append(publicTemplates, t)
 	}
 
-	// Private templates arrive as map[name]base64-encoded-YAML. Pass through
-	// without flattening so executeNucleiScan can materialize each file with
-	// its real name before invoking the nuclei binary.
+	// Pass private templates through unflattened so each file can be
+	// materialized under its real name downstream.
 	var privateTemplates map[string]string
 	if len(req.PrivateTemplates) > 0 {
 		privateTemplates = maps.Clone(req.PrivateTemplates)
@@ -508,7 +449,6 @@ func decodeScanChunk(data []byte) (*ChunkMessage, error) {
 	}, nil
 }
 
-// decodeEnrichmentChunk handles plain protobuf AssetEnrichmentRequest chunks.
 func decodeEnrichmentChunk(data []byte) (*ChunkMessage, error) {
 	var req agentproto.AssetEnrichmentRequest
 	if err := proto.Unmarshal(data, &req); err != nil {
@@ -583,9 +523,8 @@ func processChunkMsg(
 		return
 	}
 
-	// scanCtx is cancelled when the consumer is deleted server-side (platform-
-	// initiated stop). Acking is pointless: the consumer is gone, the message
-	// can't be redelivered, and DoubleAck would just fail noisily.
+	// Skip ack when the scan was cancelled server-side; the consumer is gone
+	// and DoubleAck would only fail noisily.
 	if ctx.Err() != nil {
 		slog.Debug("chunk consumer: skipping ack, scan cancelled",
 			"subject", chunkSubject,
@@ -603,12 +542,10 @@ func processChunkMsg(
 	}
 }
 
-// ackWithRetry acknowledges a message using DoubleAck (server-confirmed) with
-// retry logic and jitter to avoid thundering herd when many chunks finish
-// simultaneously. Plain Ack() is fire-and-forget — if the ack packet is lost,
-// the message stays unacked and can become orphaned when no consumers are pulling.
+// ackWithRetry uses DoubleAck (server-confirmed) with jittered backoff.
+// Plain Ack is fire-and-forget; a dropped ack would leave the message
+// orphaned once consumers stop pulling.
 func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error {
-	// Jitter 0-500ms to stagger acks when many chunks finish at once.
 	time.Sleep(time.Duration(rand.IntN(500)) * time.Millisecond)
 
 	var err error
@@ -625,7 +562,6 @@ func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error 
 		slog.Debug("ack: retry", "attempt", i+1, "error", err)
 
 		if i < maxRetries {
-			// Exponential backoff with re-jitter between retries.
 			backoff := time.Duration(100*(1<<i))*time.Millisecond + time.Duration(rand.IntN(100))*time.Millisecond
 			select {
 			case <-ctx.Done():
@@ -637,9 +573,8 @@ func ackWithRetry(ctx context.Context, msg jetstream.Msg, maxRetries int) error 
 	return fmt.Errorf("ack failed after %d retries: %w", maxRetries+1, err)
 }
 
-// StartHeartbeat spawns a goroutine that calls msg.InProgress() at the given
-// interval to prevent JetStream from redelivering the message while it is
-// being processed. Returns a cancel function to stop the heartbeat.
+// StartHeartbeat calls msg.InProgress() every interval to prevent JetStream
+// redelivery while the message is being processed. The returned cancel stops it.
 func StartHeartbeat(ctx context.Context, msg jetstream.Msg, interval time.Duration) context.CancelFunc {
 	ctx, cancel := context.WithCancel(ctx)
 	go func() {

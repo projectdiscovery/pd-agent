@@ -14,9 +14,6 @@ func TestRunHttpx_RequiresOutputFile(t *testing.T) {
 	}
 }
 
-// TestRunHttpx_NoTargets exercises defaults and confirms an empty input list
-// completes without erroring. Output file may or may not be created depending
-// on whether httpx writes a header — we only care that the call returns clean.
 func TestRunHttpx_NoTargets(t *testing.T) {
 	dir := t.TempDir()
 	outFile := filepath.Join(dir, "httpx.jsonl")
@@ -31,7 +28,6 @@ func TestRunHttpx_NoTargets(t *testing.T) {
 	if len(urls) != 0 {
 		t.Errorf("expected no URLs, got %v", urls)
 	}
-	// Output file is optional for empty input; if it exists, must be empty.
 	if info, err := os.Stat(outFile); err == nil && info.Size() != 0 {
 		t.Errorf("expected empty output file, got %d bytes", info.Size())
 	}
