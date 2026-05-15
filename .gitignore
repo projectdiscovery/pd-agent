@@ -44,5 +44,7 @@ scan-*.log
 /cmd/interactsh-debug/
 /docs/*
 !/docs/scaling.md
+!/docs/install.md
+!/docs/configuration.md
 /pd-agent-deployment.yaml
 /pd-agent-deployment-prod.yaml
