@@ -6,7 +6,7 @@ require (
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.18.4
 	github.com/miekg/dns v1.1.68
-	github.com/nats-io/nats-server/v2 v2.10.29
+	github.com/nats-io/nats-server/v2 v2.11.15
 	github.com/nats-io/nats.go v1.49.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/projectdiscovery/dnsx v1.2.3
@@ -71,6 +71,7 @@ require (
 	github.com/antchfx/htmlquery v1.3.5 // indirect
 	github.com/antchfx/xmlquery v1.4.4 // indirect
 	github.com/antchfx/xpath v1.3.6 // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aws/aws-sdk-go-v2 v1.41.5 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
@@ -197,6 +198,7 @@ require (
 	github.com/google/go-github v17.0.0+incompatible // indirect
 	github.com/google/go-github/v30 v30.1.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/google/pprof v0.0.0-20250317173921-a4b03ec1a45e // indirect
 	github.com/google/shlex v0.0.0-20191202100458-e7afc7fbc510 // indirect
 	github.com/google/uuid v1.6.0 // indirect
