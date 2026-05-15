@@ -649,11 +649,25 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		return nil, fmt.Errorf("nuclei-retest: template_id, template_encoded, or template_url required")
 	}
 
-	r.logHelper("INFO", fmt.Sprintf("NATS RPC: nuclei-retest targets=%d", len(req.Targets)))
+	templateInfo := fmt.Sprintf("template_id=%q", req.TemplateID)
+	switch {
+	case req.TemplateURL != "":
+		templateInfo = fmt.Sprintf("template_url=%q", req.TemplateURL)
+	case req.TemplateEncoded != "":
+		templateInfo = fmt.Sprintf("template_encoded_len=%d", len(req.TemplateEncoded))
+	}
+	r.logHelper("INFO", fmt.Sprintf("nuclei-retest: targets=%v %s", req.Targets, templateInfo))
 
 	sdkOpts := []nuclei.NucleiSDKOptions{
 		nuclei.DisableUpdateCheck(),
 		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
+		nuclei.WithSandboxOptions(false, false),
+		nuclei.EnableCodeTemplates(),
+		nuclei.EnableHeadlessWithOpts(nil),
+		nuclei.EnableSelfContainedTemplates(),
+		// Emits a ResultEvent on no-match too, so the response carries
+		// real severity/template-id instead of empty strings.
+		nuclei.EnableMatcherStatus(),
 	}
 
 	// Template source priority: encoded > url > id.
