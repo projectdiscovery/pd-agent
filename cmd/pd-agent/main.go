@@ -46,7 +46,6 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	fileutil "github.com/projectdiscovery/utils/file"
-	sliceutil "github.com/projectdiscovery/utils/slice"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -1754,46 +1753,50 @@ func (r *Runner) In(ctx context.Context) error {
 
 var isRegistered bool
 
-// inFunctionTickCallback runs one /in registration cycle.
+// inFunctionTickCallback runs one register/heartbeat cycle: GET /v1/agents/{id}
+// to sync server-authoritative state, then POST /v1/agents/in to refresh the
+// 7-minute Redis TTL and obtain NATS credentials.
 func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++
 
-	endpoint := fmt.Sprintf("%s/v1/agents/%s?type=agent", envconfig.APIServer(), r.options.AgentId)
+	endpoint := fmt.Sprintf("%s/v1/agents/%s", envconfig.APIServer(), r.options.AgentId)
 	headers := map[string]string{"x-api-key": envconfig.APIKey()}
 	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
-	if resp.Error != nil {
-		// Non-fatal: fall back to local tags below.
-		r.logHelper("ERROR", fmt.Sprintf("failed to fetch agent info: %v", resp.Error))
-	}
 
-	networksToUse := []string{r.options.AgentNetwork}
-	var lastUpdate time.Time
-	if resp.Error == nil && resp.StatusCode == http.StatusOK {
+	switch {
+	case resp.Error != nil:
+		// Non-fatal: /in below will retry the next tick.
+		r.logHelper("ERROR", fmt.Sprintf("failed to fetch agent info: %v", resp.Error))
+	case resp.StatusCode == http.StatusOK:
 		var response struct {
 			Agent struct {
-				Id         string    `json:"id"`
-				Networks   []string  `json:"networks"`
-				LastUpdate time.Time `json:"last_update"`
-				Name       string    `json:"name"`
+				Id           string    `json:"id"`
+				Name         string    `json:"name"`
+				AgentNetwork string    `json:"agent_network"`
+				LastUpdate   time.Time `json:"last_update"`
 			} `json:"agent"`
 		}
-		if err := json.Unmarshal(resp.Body, &response); err == nil {
+		if err := json.Unmarshal(resp.Body, &response); err != nil {
+			r.logHelper("WARNING", fmt.Sprintf("failed to parse agent info response: %v", err))
+		} else {
 			agentInfo := response.Agent
-			lastUpdate = agentInfo.LastUpdate
-
-			if len(agentInfo.Networks) > 0 && !sliceutil.Equal(networksToUse, agentInfo.Networks) {
-				r.logHelper("INFO", fmt.Sprintf("Using networks from %s server: %v (was: %v)", envconfig.APIServer(), agentInfo.Networks, networksToUse))
-				networksToUse = agentInfo.Networks
-				if len(agentInfo.Networks) > 0 {
-					r.options.AgentNetwork = agentInfo.Networks[0]
-				}
+			if agentInfo.AgentNetwork != "" && agentInfo.AgentNetwork != r.options.AgentNetwork {
+				r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.AgentNetwork, r.options.AgentNetwork))
+				r.options.AgentNetwork = agentInfo.AgentNetwork
 			}
-			if agentInfo.Name != "" && r.options.AgentName != agentInfo.Name {
+			if agentInfo.Name != "" && agentInfo.Name != r.options.AgentName {
 				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.Name, r.options.AgentName))
 				r.options.AgentName = agentInfo.Name
 			}
-			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", lastUpdate.Format(time.RFC3339)))
+			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", agentInfo.LastUpdate.Format(time.RFC3339)))
 		}
+	case resp.StatusCode == http.StatusNotFound:
+		// Cold start or TTL drained; /in below will (re-)register.
+		r.logHelper("DEBUG", "agent not yet registered on server; will register via /in")
+	case resp.StatusCode == http.StatusUnauthorized:
+		r.logHelper("FATAL", "GET /v1/agents/{id} rejected with 401: PDCP_API_KEY is missing or invalid")
+	default:
+		r.logHelper("WARNING", fmt.Sprintf("unexpected status code from GET /v1/agents/{id}: %d", resp.StatusCode))
 	}
 
 	// Heartbeat must be fast: 30s cap so it doesn't stall the agent.
@@ -1812,15 +1815,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	q.Add("arch", runtime.GOARCH)
 	q.Add("id", r.options.AgentId)
 	q.Add("name", r.options.AgentName)
-	q.Add("type", "agent")
 	q.Add("agent_network", r.options.AgentNetwork)
-
-	if len(networksToUse) > 0 {
-		networksStr := strings.Join(networksToUse, ",")
-		if networksStr != "" {
-			q.Add("networks", networksStr)
-		}
-	}
 
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
@@ -1839,8 +1834,15 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	if inResp.StatusCode != http.StatusOK {
-		r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d", inResp.StatusCode))
-		return fmt.Errorf("unexpected status code from /in endpoint: %d", inResp.StatusCode)
+		switch inResp.StatusCode {
+		case http.StatusUnauthorized:
+			r.logHelper("FATAL", "/in rejected with 401: PDCP_API_KEY is missing or invalid")
+		case http.StatusInternalServerError:
+			r.logHelper("ERROR", fmt.Sprintf("/in returned 500: server-side validation failure (id=%q agent_network=%q)", r.options.AgentId, r.options.AgentNetwork))
+		default:
+			r.logHelper("ERROR", fmt.Sprintf("unexpected status code from /in endpoint: %d", inResp.StatusCode))
+		}
+		return fmt.Errorf("/in returned status %d", inResp.StatusCode)
 	}
 
 	var agentInResp AgentInResponse
@@ -1877,7 +1879,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 // Out deregisters the agent.
 func (r *Runner) Out(ctx context.Context) error {
-	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&type=agent", envconfig.APIServer(), r.options.AgentId)
+	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s", envconfig.APIServer(), r.options.AgentId)
 	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /out endpoint: %v", resp.Error))
