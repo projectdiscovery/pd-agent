@@ -8,7 +8,7 @@ func init() {
 	}
 }
 
-// ToolType represents the type of tool to execute
+// ToolType identifies a scanner tool.
 type ToolType int
 
 const (
@@ -55,18 +55,19 @@ type TaskResult struct {
 }
 
 type Options struct {
-	// Common options
 	Hosts  []string
 	Silent bool
 	TeamID string
 	Output string
 
-	// - Nuclei
-	ScanID    string
-	Templates []string
-	Config    string
+	// Nuclei
+	ScanID       string
+	Templates    []string
+	Config       string
+	ReportConfig string // base64 nuclei reporting config (Jira/Linear/GitHub tracker)
+	HistoryID    int64
 
-	// - Enumeration
+	// Enumeration
 	EnumerationID string
 	Steps         []string
 }

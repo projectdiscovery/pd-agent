@@ -1,6 +1,6 @@
-// Package agentdb provides a local SQLite database for agent observability.
-// It persists agent info, structured logs, and resource metrics so they
-// survive restarts and can be uploaded for offline investigation.
+// Package agentdb persists agent info, structured logs, and resource metrics
+// in a local SQLite database so they survive restarts and can be uploaded
+// for offline investigation.
 package agentdb
 
 import (
@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
-// Store defines the persistence contract for local agent observability data.
-// Implementations must be safe for concurrent use by multiple goroutines.
+// Store persists local agent observability data. Implementations must be
+// safe for concurrent use.
 type Store interface {
 	// UpsertAgentInfo inserts or replaces the single agent_info row.
 	UpsertAgentInfo(ctx context.Context, info *AgentInfo) error
@@ -41,16 +43,16 @@ type Store interface {
 	// FinishTask updates a task's status and sets finished_at.
 	FinishTask(ctx context.Context, taskID, status string) error
 
-	// ActiveTasks returns all tasks with status "running", ordered by id DESC (newest first).
+	// ActiveTasks returns tasks with status "running", newest first.
 	ActiveTasks(ctx context.Context) ([]Task, error)
 
-	// RecentTasks returns the most recent tasks (any status), ordered by id DESC (newest first).
+	// RecentTasks returns the most recent tasks (any status), newest first.
 	RecentTasks(ctx context.Context, limit int) ([]Task, error)
 
-	// DBSizeBytes returns the current database file size in bytes.
+	// DBSizeBytes returns the database file size in bytes.
 	DBSizeBytes() (int64, error)
 
-	// Close closes the database connection. Must be called on shutdown.
+	// Close closes the database connection.
 	Close() error
 }
 
@@ -130,11 +132,11 @@ type Task struct {
 	FinishedAt time.Time // zero if still running
 }
 
-// cgnatRange is RFC6598 (Carrier-Grade NAT), not covered by net.IP.IsPrivate().
+// RFC6598 CGNAT range; net.IP.IsPrivate does not cover it.
 var _, cgnatRange, _ = net.ParseCIDR("100.64.0.0/10")
 
-// classifyIP returns true if the IP is a private/reserved address
-// (RFC1918, RFC6598, link-local, loopback, IPv6 ULA).
+// classifyIP returns true for private/reserved addresses (RFC1918, RFC6598,
+// link-local, loopback, IPv6 ULA).
 func classifyIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -153,27 +155,27 @@ const (
 	defaultMetricCapMB = 18
 )
 
-// LoadSizeCaps reads PDCP_AGENTDB_LOG_CAP_MB and PDCP_AGENTDB_METRIC_CAP_MB
-// from the environment. Returns defaults (10MB logs, 18MB metrics) if unset
-// or invalid. Returns an error only if a value is set but not a valid positive integer.
+// LoadSizeCaps reads PDCP_AGENTDB_LOG_CAP_MB and PDCP_AGENTDB_METRIC_CAP_MB,
+// defaulting to 10MB logs and 18MB metrics. Returns an error only if a value
+// is set but not a positive integer.
 func LoadSizeCaps() (SizeCaps, error) {
 	caps := SizeCaps{
 		LogCapBytes:    defaultLogCapMB * 1024 * 1024,
 		MetricCapBytes: defaultMetricCapMB * 1024 * 1024,
 	}
 
-	if v := os.Getenv("PDCP_AGENTDB_LOG_CAP_MB"); v != "" {
+	if v := envconfig.AgentDBLogCapMB(); v != "" {
 		mb, err := strconv.Atoi(v)
 		if err != nil || mb <= 0 {
-			return caps, fmt.Errorf("invalid PDCP_AGENTDB_LOG_CAP_MB=%q: must be a positive integer", v)
+			return caps, fmt.Errorf("invalid %s=%q: must be a positive integer", envconfig.KeyAgentDBLogCapMB, v)
 		}
 		caps.LogCapBytes = int64(mb) * 1024 * 1024
 	}
 
-	if v := os.Getenv("PDCP_AGENTDB_METRIC_CAP_MB"); v != "" {
+	if v := envconfig.AgentDBMetricCapMB(); v != "" {
 		mb, err := strconv.Atoi(v)
 		if err != nil || mb <= 0 {
-			return caps, fmt.Errorf("invalid PDCP_AGENTDB_METRIC_CAP_MB=%q: must be a positive integer", v)
+			return caps, fmt.Errorf("invalid %s=%q: must be a positive integer", envconfig.KeyAgentDBMetricCapMB, v)
 		}
 		caps.MetricCapBytes = int64(mb) * 1024 * 1024
 	}
@@ -181,10 +183,9 @@ func LoadSizeCaps() (SizeCaps, error) {
 	return caps, nil
 }
 
-// sensitiveKeys are substrings that trigger value masking in args and env vars.
+// sensitiveKeys trigger value masking in args and env vars.
 var sensitiveKeys = []string{"key", "secret", "password", "token", "cred", "auth"}
 
-// isSensitiveKey returns true if the key likely holds a secret.
 func isSensitiveKey(key string) bool {
 	lower := strings.ToLower(key)
 	for _, s := range sensitiveKeys {
@@ -195,8 +196,7 @@ func isSensitiveKey(key string) bool {
 	return false
 }
 
-// MaskArgs returns os.Args as a JSON array string with sensitive flag values masked.
-// Flags like --api-key=VALUE or --api-key VALUE get the value replaced with "***".
+// MaskArgs returns os.Args as a JSON array with sensitive flag values masked.
 func MaskArgs(args []string) string {
 	masked := make([]string, len(args))
 	skipNext := false
@@ -206,7 +206,6 @@ func MaskArgs(args []string) string {
 			skipNext = false
 			continue
 		}
-		// --flag=value form
 		if strings.HasPrefix(arg, "-") && strings.Contains(arg, "=") {
 			parts := strings.SplitN(arg, "=", 2)
 			if isSensitiveKey(parts[0]) {
@@ -214,7 +213,6 @@ func MaskArgs(args []string) string {
 				continue
 			}
 		}
-		// --flag value form: mark next arg for masking
 		if strings.HasPrefix(arg, "-") && isSensitiveKey(arg) {
 			masked[i] = arg
 			skipNext = true
@@ -226,8 +224,7 @@ func MaskArgs(args []string) string {
 	return string(b)
 }
 
-// MaskEnv returns selected env vars as a JSON object with sensitive values masked.
-// Only includes PDCP_* and AGENT_* vars.
+// MaskEnv returns PDCP_* and AGENT_* env vars as a JSON object with sensitive values masked.
 func MaskEnv() string {
 	result := make(map[string]string)
 	for _, kv := range os.Environ() {
@@ -249,7 +246,6 @@ func MaskEnv() string {
 	return string(b)
 }
 
-// deriveNetworkType classifies the network based on detected IPs and gateway.
 func deriveNetworkType(publicIPs []string, gateway string) string {
 	if len(publicIPs) > 0 {
 		return "direct_public"

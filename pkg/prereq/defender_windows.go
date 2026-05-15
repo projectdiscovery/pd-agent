@@ -10,31 +10,19 @@ import (
 	"time"
 )
 
-// defenderTools lists process names that must be in Microsoft Defender's
-// exclusion list. Without exclusions, real-time scanning quarantines them
-// mid-scan and the agent silently produces partial/empty results.
-// Keep this list in sync with prereq-windows.ps1.
+// defenderTools must be in Defender's exclusion list, otherwise real-time
+// scanning quarantines them mid-run and the agent produces partial results.
+// Keep in sync with prereq-windows.ps1.
 var defenderTools = []string{
 	"pd-agent.exe",
 	"pd-agent-windows-amd64.exe",
 	"pd-agent-windows-arm64.exe",
-	"naabu.exe",
-	"nuclei.exe",
-	"httpx.exe",
-	"dnsx.exe",
-	"subfinder.exe",
-	"katana.exe",
 	"leakless.exe",
-	"mapcidr.exe",
-	"asnmap.exe",
-	"tlsx.exe",
-	"cdncheck.exe",
 }
 
-// CheckDefenderExclusions verifies pd-agent's bundled tools are excluded from
-// Defender real-time scanning. Soft check — never blocks startup, only warns.
-// Skips silently if Defender isn't reachable (third-party AV, Server Core,
-// PowerShell policy blocked, etc.) since we can't make any claim then.
+// CheckDefenderExclusions warns if pd-agent's bundled tools are not in the
+// Defender exclusion list. Never blocks startup; silently skips when Defender
+// is unreachable (third-party AV, Server Core, PS policy, ...).
 func CheckDefenderExclusions() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -61,7 +49,7 @@ func CheckDefenderExclusions() {
 
 	bar := strings.Repeat("=", 78)
 	slog.Warn(bar)
-	slog.Warn("WINDOWS DEFENDER EXCLUSIONS MISSING — SCANS WILL LIKELY FAIL")
+	slog.Warn("WINDOWS DEFENDER EXCLUSIONS MISSING, SCANS WILL LIKELY FAIL")
 	slog.Warn(bar)
 	slog.Warn("These tools are NOT excluded from real-time scanning",
 		"missing", strings.Join(missing, ", "))

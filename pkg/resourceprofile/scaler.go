@@ -25,8 +25,8 @@ const (
 	durationDegradationThreshold = 1.30 // 30% slower
 )
 
-// Scaler monitors resource pressure and chunk duration, and adjusts a
-// ResizableSemaphore accordingly. It runs a background loop every 30s.
+// Scaler resizes a ResizableSemaphore based on resource pressure and chunk
+// duration trends.
 type Scaler struct {
 	sem      *ResizableSemaphore
 	interval time.Duration
@@ -60,26 +60,23 @@ func NewScaler(sem *ResizableSemaphore) *Scaler {
 		cooldown:   defaultCooldown,
 		maxSamples: 100,
 	}
-	// Take initial CPU sample.
 	s.prevCPU = readCPU()
 	s.prevCPUTime = time.Now()
 	return s
 }
 
-// RecordChunkDuration records the duration of a completed chunk.
-// Called from ConsumeChunks after each chunk finishes.
+// RecordChunkDuration appends the duration of a completed chunk to the rolling window.
 func (s *Scaler) RecordChunkDuration(d time.Duration) {
 	s.durationsMu.Lock()
 	defer s.durationsMu.Unlock()
 
 	s.durations = append(s.durations, d)
-	// Keep only the last maxSamples.
 	if len(s.durations) > s.maxSamples {
 		s.durations = s.durations[len(s.durations)-s.maxSamples:]
 	}
 }
 
-// Run starts the control loop. Blocks until ctx is cancelled.
+// Run starts the control loop and blocks until ctx is cancelled.
 func (s *Scaler) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()
@@ -95,7 +92,6 @@ func (s *Scaler) Run(ctx context.Context) {
 }
 
 func (s *Scaler) evaluate() {
-	// Check cooldown.
 	if time.Since(s.lastResize) < s.cooldown {
 		return
 	}
@@ -105,7 +101,7 @@ func (s *Scaler) evaluate() {
 	currentSize := s.sem.Size()
 	inUse := s.sem.InUse()
 
-	slog.Info("scaler: evaluate",
+	slog.Debug("scaler: evaluate",
 		"current_parallelism", currentSize,
 		"in_use", inUse,
 		"available", currentSize-inUse,
@@ -116,10 +112,9 @@ func (s *Scaler) evaluate() {
 		"duration_trend", fmt.Sprintf("%.2f", durationTrend),
 	)
 
-	// Decision logic.
 	switch {
 	case pressure.max() >= pressureCriticalAt:
-		// Critical: shrink hard (halve).
+		// Critical pressure: halve.
 		newSize := currentSize / 2
 		if newSize < MinParallelism {
 			newSize = MinParallelism
@@ -133,7 +128,6 @@ func (s *Scaler) evaluate() {
 		s.lastResize = time.Now()
 
 	case pressure.max() >= pressureShrinkAt:
-		// High pressure: shrink by 1.
 		newSize := currentSize - 1
 		if newSize < MinParallelism {
 			newSize = MinParallelism
@@ -149,7 +143,7 @@ func (s *Scaler) evaluate() {
 		}
 
 	case durationTrend > durationDegradationThreshold:
-		// Chunk duration climbing while resources are OK = target saturation.
+		// Duration climbing while resources are OK indicates target saturation.
 		newSize := currentSize - 1
 		if newSize < MinParallelism {
 			newSize = MinParallelism
@@ -161,12 +155,11 @@ func (s *Scaler) evaluate() {
 			)
 			s.sem.Resize(newSize)
 			s.lastResize = time.Now()
-			// Reset baseline after shrinking so we measure from the new level.
 			s.resetBaseline()
 		}
 
 	case pressure.max() < pressureGrowBelow && inUse >= currentSize:
-		// Low pressure + all workers busy = room to grow.
+		// Low pressure with all workers busy: room to grow.
 		newSize := currentSize + 1
 		if newSize > MaxParallelism {
 			newSize = MaxParallelism
@@ -178,7 +171,6 @@ func (s *Scaler) evaluate() {
 			)
 			s.sem.Resize(newSize)
 			s.lastResize = time.Now()
-			// Reset baseline so we measure the effect of the new size.
 			s.resetBaseline()
 		}
 	}
@@ -217,10 +209,6 @@ func (p resourcePressure) maxDimension() string {
 func (s *Scaler) measurePressure() resourcePressure {
 	var p resourcePressure
 
-	// CPU: use readCPU delta. For simplicity, use a rough estimate from
-	// the runtime — number of goroutines vs GOMAXPROCS as a proxy.
-	// A proper implementation would track CPU samples over time.
-	// For now, we read the cgroup/proc stats directly.
 	memTotal, memAvail := ReadMemory()
 	if memTotal > 0 {
 		p.mem = 1.0 - float64(memAvail)/float64(memTotal)
@@ -231,16 +219,13 @@ func (s *Scaler) measurePressure() resourcePressure {
 		p.fd = float64(fdUsed) / float64(fdLimit)
 	}
 
-	// CPU pressure from actual process CPU time delta.
 	p.cpu = s.measureCPUPressure()
 
 	return p
 }
 
-// measureCPUPressure computes actual CPU utilization as a ratio [0.0, 1.0]
-// by comparing process CPU time delta against wall time since last measurement.
-// A value of 1.0 means the process used 100% of one core. We normalize by
-// effective CPU count so 1.0 = all cores fully utilized.
+// measureCPUPressure returns process CPU utilization in [0.0, 1.0],
+// normalised by effective CPU count (1.0 = all cores saturated).
 func (s *Scaler) measureCPUPressure() float64 {
 	now := time.Now()
 	current := readCPU()
@@ -250,7 +235,7 @@ func (s *Scaler) measureCPUPressure() float64 {
 		return s.lastCPUPercent / 100.0
 	}
 
-	// Guard against counter wrap.
+	// Counter wrap.
 	if current.user < s.prevCPU.user || current.system < s.prevCPU.system {
 		s.prevCPU = current
 		s.prevCPUTime = now
@@ -264,8 +249,6 @@ func (s *Scaler) measureCPUPressure() float64 {
 	s.prevCPUTime = now
 	s.lastCPUPercent = cpuPercent
 
-	// Normalize by number of effective CPUs.
-	// cpuPercent of 800% on an 8-core box = 100% utilization = pressure 1.0.
 	cpus := readEffectiveCPUs()
 	if cpus <= 0 {
 		cpus = 1
@@ -293,14 +276,13 @@ func goMaxProcs() int {
 	return runtime.GOMAXPROCS(0)
 }
 
-// measureDurationTrend compares recent chunk durations against the baseline.
-// Returns ratio: 1.0 = same speed, 1.5 = 50% slower, 0.8 = 20% faster.
+// measureDurationTrend returns median(recent) / baseline. 1.0 means stable,
+// 1.5 means 50% slower.
 func (s *Scaler) measureDurationTrend() float64 {
 	s.durationsMu.Lock()
 	samples := make([]time.Duration, 0, len(s.durations))
 	for _, d := range s.durations {
-		// Filter out no-op chunks (< 5s) — these are fast-skip chunks
-		// where naabu found nothing. They shouldn't influence the baseline.
+		// Skip fast-skip chunks (naabu found nothing) so they don't drag the baseline.
 		if d >= 5*time.Second {
 			samples = append(samples, d)
 		}
@@ -308,7 +290,7 @@ func (s *Scaler) measureDurationTrend() float64 {
 	s.durationsMu.Unlock()
 
 	if len(samples) < 8 {
-		return 1.0 // not enough data
+		return 1.0
 	}
 
 	currentMedian := median(samples)
@@ -339,12 +321,10 @@ func (s *Scaler) resetBaseline() {
 	s.durationsMu.Unlock()
 }
 
-// median returns the median duration from a slice.
 func median(durations []time.Duration) time.Duration {
 	if len(durations) == 0 {
 		return 0
 	}
-	// Copy to avoid mutating the caller's slice.
 	sorted := make([]time.Duration, len(durations))
 	copy(sorted, durations)
 

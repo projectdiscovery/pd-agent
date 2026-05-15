@@ -4,7 +4,6 @@
 # Configuration - Update these values
 $AgentBinaryPath = "C:\Program Files\pd-agent\pd-agent.exe"
 $OutputPath = "C:\ProgramData\pd-agent\output"
-$AgentTags = "production"
 $NSSMPath = "C:\nssm\nssm-2.24\win64\nssm.exe"
 
 # Environment variables - Update these values
@@ -63,7 +62,7 @@ Write-Host "Installing pd-agent service..."
 & $NSSMPath install pd-agent $AgentBinaryPath
 
 # Set arguments
-$Arguments = "-agent-output $OutputPath -verbose -agent-tags $AgentTags"
+$Arguments = "-agent-output $OutputPath -verbose"
 & $NSSMPath set pd-agent AppParameters $Arguments
 
 # Set environment variables

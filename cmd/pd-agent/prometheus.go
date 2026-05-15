@@ -7,22 +7,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
-// startPrometheusServer starts a minimal HTTP server exposing /metrics in
-// Prometheus text format and /healthz for liveness checks. Returns nil if
-// PDCP_METRICS_ADDR is unset (feature is opt-in).
-//
-// We hand-roll the text format rather than pulling in client_golang because
-// the surface is six gauges plus one counter — the upside of the dep does not
-// justify the weight.
-//
-// The customer wires their HPA to scrape /metrics and scale the agent
-// Deployment based on pdagent_group_chunks_pending (the primary signal).
+// startPrometheusServer exposes /metrics (Prometheus text format) and /healthz
+// when PDCP_METRICS_ADDR is set; returns nil otherwise. The HPA scale signal
+// is pdagent_group_chunks_pending.
 func (r *Runner) startPrometheusServer(_ context.Context) (*http.Server, error) {
-	addr := os.Getenv("PDCP_METRICS_ADDR")
+	addr := envconfig.MetricsAddr()
 	if addr == "" {
 		return nil, nil
 	}
@@ -49,11 +43,8 @@ func (r *Runner) startPrometheusServer(_ context.Context) (*http.Server, error) 
 }
 
 // servePrometheusMetrics writes the current group-metrics snapshot in
-// Prometheus text exposition format. Each metric carries HELP and TYPE
-// comments so the meaning is self-documenting at the scrape target.
-//
-// Returns 503 if the metrics collector is not yet initialised (NATS not
-// connected); HPA scrapers should treat that as "no signal yet".
+// Prometheus text format. Returns 503 before NATS is connected so HPA
+// scrapers treat it as "no signal yet".
 func (r *Runner) servePrometheusMetrics(w http.ResponseWriter, _ *http.Request) {
 	collector := r.groupMetrics.Load()
 	if collector == nil {
@@ -116,9 +107,7 @@ func writeCounter(w io.Writer, name, help string, value float64) {
 		name, help, name, name, formatFloat(value))
 }
 
-// formatFloat renders an integer value without a decimal point and a real
-// float with as few digits as needed. Prometheus accepts either, but integer
-// values render cleanly without the trailing ".000000".
+// formatFloat renders integer values as integers and real floats compactly.
 func formatFloat(v float64) string {
 	if v == float64(int64(v)) {
 		return fmt.Sprintf("%d", int64(v))

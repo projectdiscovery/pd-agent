@@ -1,120 +1,43 @@
 package pkg
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"time"
 
 	"log/slog"
 
 	"github.com/projectdiscovery/pd-agent/pkg/client"
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
+	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
-	"github.com/projectdiscovery/utils/conversion"
-	envutil "github.com/projectdiscovery/utils/env"
 	fileutil "github.com/projectdiscovery/utils/file"
-	mapsutil "github.com/projectdiscovery/utils/maps"
-	osutils "github.com/projectdiscovery/utils/os"
 	sliceutil "github.com/projectdiscovery/utils/slice"
-	stringsutil "github.com/projectdiscovery/utils/strings"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/tidwall/gjson"
 )
 
-// verifyToolInPath checks if a tool exists in the system PATH
-func verifyToolInPath(toolName string) error {
-	_, err := exec.LookPath(toolName)
-	if err != nil {
-		return fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
-	}
-	return nil
-}
-
-// checkToolInPath checks if a tool exists in the system PATH, handling Windows .exe extension
-func checkToolInPath(toolName string) (string, error) {
-	if osutils.IsWindows() {
-		toolName = toolName + ".exe"
-	}
-	path, err := exec.LookPath(toolName)
-	if err != nil {
-		return "", fmt.Errorf("tool '%s' not found in PATH: %w", toolName, err)
-	}
-	return path, nil
-}
-
-// PrerequisiteCheckResult represents the result of checking a single prerequisite
-type PrerequisiteCheckResult struct {
-	ToolName string
-	Found    bool
-	Path     string
-	Error    error
-}
-
-// CheckPrerequisites checks if all required prerequisites are installed
-// Returns a map of tool names to their check results
-func CheckPrerequisites(tools []string) map[string]PrerequisiteCheckResult {
-	results := make(map[string]PrerequisiteCheckResult)
-
-	for _, tool := range tools {
-		path, err := checkToolInPath(tool)
-		result := PrerequisiteCheckResult{
-			ToolName: tool,
-			Found:    err == nil,
-			Path:     path,
-			Error:    err,
-		}
-		results[tool] = result
-	}
-
-	return results
-}
-
-// CheckAllPrerequisites checks the default set of prerequisites: dnsx, nuclei, httpx, naabu, nmap
-func CheckAllPrerequisites() map[string]PrerequisiteCheckResult {
-	prerequisites := []string{"dnsx", "nuclei", "httpx", "naabu", "nmap"}
-	return CheckPrerequisites(prerequisites)
-}
-
 func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, error) {
-	// Verify tool exists in PATH
-	if err := verifyToolInPath(task.Tool.String()); err != nil {
-		return nil, nil, err
-	}
-
 	if task.Options.ScanID != "" {
-		envs, args, outputFile, removeFunc, err := parseScanArgs(ctx, task)
-		if err != nil {
-			return nil, nil, err
+		if task.Tool != types.Nuclei {
+			return nil, nil, fmt.Errorf("scan path: unsupported tool %q (only nuclei is wired)", task.Tool.String())
 		}
-		defer removeFunc()
-
-		taskResult, err := runCommand(ctx, envs, args)
-		if err != nil {
-			return nil, nil, err
-		}
-
-		ExtractUnresponsiveHosts(taskResult)
-
-		var outputFiles []string
-		if outputFile != "" {
-			outputFiles = []string{outputFile}
-		}
-		return taskResult, outputFiles, nil
+		return runNucleiScan(ctx, task)
 	} else if task.Options.EnumerationID != "" {
-		// Enumeration pipeline: linear flow, each step gates the next.
-		//
-		//   1. dnsx       → resolve hostnames (skip if all IPs)
-		//   2. port scan  → find open ports (always runs)
-		//   3. httpx      → probe web services (only on open ports)
-		//   4. httpx -screenshot → screenshot (only on confirmed web services)
-		//   5. tlsx       → TLS scan (only on open ports)
-
+		// Enumeration pipeline: each step gates the next.
+		//   dnsx -> port scan -> httpx (+screenshot) -> tlsx
 		steps := task.Options.Steps
 		wantScreenshot := sliceutil.Contains(steps, "http_screenshot")
 		manualAssetId := task.Options.EnumerationID
@@ -123,30 +46,37 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		hosts := task.Options.Hosts
 		enumID := task.Options.EnumerationID
 
-		// --- Step 1: DNS resolve (skip if all targets are IPs) ---
 		if sliceutil.Contains(steps, "dns_resolve") {
 			ips, hostnames := splitIPsAndHostnames(hosts)
 			if len(hostnames) == 0 {
-				slog.Info("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
+				slog.Debug("skipping dnsx, all targets are IPs", "ip_count", len(ips), "enumeration_id", enumID)
 			} else {
-				of, err := runEnumTool(ctx, task, "dnsx", hostnames, nil, &manualAssetId, &outputFiles)
+				_, err := runEmbeddedTool(ctx, task, "dnsx", func(ctx context.Context, outputFile string) error {
+					_, err := runtools.RunDnsx(ctx, hostnames, runtools.DnsxOptions{OutputFile: outputFile})
+					return err
+				}, &manualAssetId, &outputFiles)
 				if err != nil {
 					return nil, nil, err
 				}
-				// dnsx doesn't change the host list for subsequent tools
-				_ = of
 			}
 		}
 
-		// --- Step 2: Port scan (always — use step's naabu or quick filter) ---
 		var hostsWithOpenPorts []string
 		if sliceutil.Contains(steps, "port_scan") {
-			// Full port scan via naabu
-			var naabuArgs []string
-			if sliceutil.Contains(steps, "ports_service_scan") {
-				naabuArgs = []string{"-nmap-cli", "nmap -sV -Pn"}
-			}
-			of, err := runEnumTool(ctx, task, "naabu", hosts, naabuArgs, &manualAssetId, &outputFiles)
+			serviceVersion := sliceutil.Contains(steps, "ports_service_scan")
+			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
+				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
+					OutputFile:        outputFile,
+					SkipHostDiscovery: true,
+					ServiceVersion:    serviceVersion,
+				})
+				// naabu returns an error when no ports are found; downstream
+				// steps short-circuit on an empty hostsWithOpenPorts list.
+				if err != nil {
+					slog.Warn("naabu enumeration finished with error", "error", err)
+				}
+				return nil
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -159,7 +89,7 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				}
 			}
 		} else {
-			// No port_scan step — quick filter on HTTP ports (80, 443, 8443)
+			// Quick HTTP-port filter (80, 443, 8443) when no naabu step.
 			filtered, err := quickPortFilter(ctx, hosts, enumID)
 			if err != nil {
 				slog.Warn("quick port filter failed, proceeding with all hosts", "error", err)
@@ -169,30 +99,25 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			}
 		}
 
+		if len(hostsWithOpenPorts) == 0 {
+			slog.Debug("port scan complete, no open ports, skipping downstream",
+				"original_hosts", len(hosts), "enumeration_id", enumID)
+			return nil, outputFiles, nil
+		}
 		slog.Info("port scan complete",
 			"original_hosts", len(hosts),
 			"hosts_with_open_ports", len(hostsWithOpenPorts),
 			"enumeration_id", enumID)
 
-		if len(hostsWithOpenPorts) == 0 {
-			slog.Info("no open ports found, skipping httpx/tlsx/screenshot", "enumeration_id", enumID)
-			return nil, outputFiles, nil
-		}
-
-		// --- Step 3: httpx probe (on open ports only, no screenshot) ---
 		var webServices []string
 		if sliceutil.Contains(steps, "http_probe") {
-			of, err := runEnumTool(ctx, task, "httpx", hostsWithOpenPorts, []string{"-irr"}, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "httpx", func(ctx context.Context, outputFile string) error {
+				_, urls, err := runtools.RunHttpx(ctx, hostsWithOpenPorts, runtools.HttpxOptions{OutputFile: outputFile})
+				webServices = urls
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
-			}
-			if of != "" {
-				c, err := fileutil.ReadFile(of)
-				if err == nil {
-					for line := range c {
-						webServices = append(webServices, line)
-					}
-				}
 			}
 			slog.Info("httpx probe complete",
 				"input_hosts", len(hostsWithOpenPorts),
@@ -200,11 +125,16 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				"enumeration_id", enumID)
 		}
 
-		// --- Step 4: httpx screenshot (only on confirmed web services) ---
 		if wantScreenshot && len(webServices) > 0 {
 			slog.Info("running httpx screenshot on confirmed web services",
 				"web_services", len(webServices), "enumeration_id", enumID)
-			_, err := runEnumTool(ctx, task, "httpx", webServices, []string{"-screenshot", "-irr"}, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "httpx-screenshot", func(ctx context.Context, outputFile string) error {
+				_, _, err := runtools.RunHttpx(ctx, webServices, runtools.HttpxOptions{
+					OutputFile: outputFile,
+					Screenshot: true,
+				})
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -212,9 +142,11 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			slog.Info("skipping httpx screenshot, no web services found", "enumeration_id", enumID)
 		}
 
-		// --- Step 5: TLS scan (on open ports only) ---
 		if sliceutil.Contains(steps, "tls_scan") {
-			_, err := runEnumTool(ctx, task, "tlsx", hostsWithOpenPorts, nil, &manualAssetId, &outputFiles)
+			_, err := runEmbeddedTool(ctx, task, "tlsx", func(ctx context.Context, outputFile string) error {
+				_, err := runtools.RunTlsx(ctx, hostsWithOpenPorts, runtools.TlsxOptions{OutputFile: outputFile})
+				return err
+			}, &manualAssetId, &outputFiles)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -226,107 +158,340 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 	return nil, nil, nil
 }
 
-// runEnumTool executes a single enumeration tool and handles output file, dashboard
-// upload, and asset ID tracking. Returns the output file path (if any).
-func runEnumTool(
+// runEmbeddedTool resolves an output path, invokes runFn, and uploads the
+// result when the task is dashboard-bound. Returns the output file path.
+func runEmbeddedTool(
 	ctx context.Context,
 	task *types.Task,
 	toolName string,
-	hosts []string,
-	extraArgs []string,
+	runFn func(ctx context.Context, outputFile string) error,
 	manualAssetId *string,
 	outputFiles *[]string,
 ) (string, error) {
-	if err := verifyToolInPath(toolName); err != nil {
-		return "", err
-	}
-
-	currentTask := *task
-	currentTask.Options.Hosts = hosts
-
-	envs, args, outputFile, removeFunc, err := parseGenericArgs(&currentTask)
-	if err != nil {
-		return "", err
-	}
-	defer removeFunc()
-	args[0] = toolName
-
-	// Output file
+	var outputFile string
 	if task.Options.Output != "" {
 		_ = fileutil.CreateFolder(task.Options.Output)
-		suffix := toolName
-		if sliceutil.Contains(extraArgs, "-screenshot") {
-			suffix = toolName + "-screenshot"
-		}
-		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", suffix))
-		args = append(args, "-o", outputFile)
-	}
-
-	// httpx/naabu always need an output file so we can read results for the next step.
-	if outputFile == "" && (toolName == "httpx" || toolName == "naabu") {
-		tmpOut, err := fileutil.GetTempFileName()
+		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", toolName))
+	} else {
+		tmp, err := fileutil.GetTempFileName()
 		if err != nil {
 			return "", fmt.Errorf("create temp output file for %s: %w", toolName, err)
 		}
-		outputFile = tmpOut
-		args = append(args, "-o", outputFile)
+		outputFile = tmp
 	}
 
-	// Dashboard upload flags for tools that support it.
-	hasDashboardUpload := stringsutil.EqualFoldAny(toolName, "httpx", "naabu", "tlsx")
-	if hasDashboardUpload && (task.Options.EnumerationID != "" || task.Options.TeamID != "") {
-		args = append(args,
-			"-team-id", os.Getenv("PDCP_TEAM_ID"),
-			"-dashboard",
-			"-asset-id", *manualAssetId,
-		)
+	slog.Info("running embedded tool", "tool", toolName, "output", outputFile)
+	if err := runFn(ctx, outputFile); err != nil {
+		return outputFile, err
 	}
 
-	// Extra tool-specific args
-	args = append(args, extraArgs...)
+	*outputFiles = append(*outputFiles, outputFile)
 
-	slog.Info("running enumeration tool", "tool", toolName, "hosts", len(hosts), "args_count", len(args))
-
-	if _, err := runCommand(ctx, envs, args); err != nil {
-		return "", err
+	if task.Options.EnumerationID == "" && task.Options.TeamID == "" {
+		return outputFile, nil
 	}
-
-	if outputFile != "" {
-		*outputFiles = append(*outputFiles, outputFile)
+	info, err := os.Stat(outputFile)
+	if err != nil || info.Size() == 0 {
+		return outputFile, nil
 	}
-
-	// Manual upload: only if we didn't pass -dashboard to the tool,
-	// and only if the output file is non-empty.
-	if !sliceutil.Contains(args, "-dashboard") && outputFile != "" {
-		info, err := os.Stat(outputFile)
-		if err == nil && info.Size() > 0 {
-			assetId, err := uploadToCloudWithId(ctx, task, outputFile, task.Options.EnumerationID)
-			if err == nil {
-				*manualAssetId = assetId
-			} else {
-				assetId, err = uploadToCloud(ctx, task, outputFile)
-				if err != nil {
-					return outputFile, err
-				}
-				*manualAssetId = assetId
-			}
-		}
+	assetId, err := uploadToCloudWithId(ctx, task, outputFile, *manualAssetId)
+	if err == nil {
+		*manualAssetId = assetId
+		return outputFile, nil
 	}
-
+	assetId, err = uploadToCloud(ctx, task, outputFile)
+	if err != nil {
+		return outputFile, err
+	}
+	*manualAssetId = assetId
 	return outputFile, nil
 }
 
-// splitIPsAndHostnames separates a list of hosts into IP addresses and hostnames.
-// Handles host:port format — strips port before checking.
+// runNucleiScan runs nuclei via pkg/runtools and uploads the JSONL output
+// for dashboard-bound tasks.
+func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []string, error) {
+	if len(task.Options.Hosts) == 0 {
+		return nil, nil, fmt.Errorf("nuclei scan: no targets")
+	}
+
+	// Naming the file after the chunk id gives the upload step a traceable filename.
+	outputName := task.Id
+	if outputName == "" {
+		outputName = "nuclei"
+	}
+	outputName += ".jsonl"
+
+	var outputFile string
+	if task.Options.Output != "" {
+		_ = fileutil.CreateFolder(task.Options.Output)
+		outputFile = filepath.Join(task.Options.Output, outputName)
+	} else {
+		dir, err := os.MkdirTemp("", "pd-agent-nuclei-*")
+		if err != nil {
+			return nil, nil, fmt.Errorf("create temp output dir for nuclei: %w", err)
+		}
+		outputFile = filepath.Join(dir, outputName)
+	}
+
+	opts := runtools.NucleiOptions{
+		OutputFile:           outputFile,
+		Targets:              task.Options.Hosts,
+		Templates:            task.Options.Templates,
+		ScanID:               task.Options.ScanID,
+		TeamID:               task.Options.TeamID,
+		AllowLocalFileAccess: true,
+		MatcherStatus:        true,
+		EnableCodeTemplates:  hasMoreThan2GBRAM(),
+		Headless:             hasMoreThan8GBRAM() && isAMD64(),
+	}
+
+	// task.Options.Config is base64'd RuntimeConfig YAML for the SDK's
+	// WithConfigBytes (tag/severity/rate-limit merging).
+	if task.Options.Config != "" {
+		decoded, err := base64.StdEncoding.DecodeString(task.Options.Config)
+		if err != nil {
+			slog.Warn("nuclei scan: failed to base64-decode task.Options.Config; running without overrides",
+				"scan_id", task.Options.ScanID, "error", err)
+		} else {
+			opts.ConfigYAML = decoded
+		}
+	}
+
+	// Reporting config (nuclei -rc): tracker credentials for auto-filing
+	// Jira/Linear/GitHub issues on matches. PDCP_REPORTING_CONFIG (local
+	// YAML) wins over the work-message base64 so operators can keep creds
+	// off the platform.
+	if path := envconfig.ReportingConfigPath(); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			opts.ReportingConfigYAML = data
+			slog.Info("nuclei scan: loaded reporting config from env (overriding work message)",
+				"scan_id", task.Options.ScanID, "path", path, "bytes", len(data))
+		} else {
+			slog.Warn("nuclei scan: PDCP_REPORTING_CONFIG read failed",
+				"path", path, "error", err)
+		}
+	} else if task.Options.ReportConfig != "" {
+		decoded, err := base64.StdEncoding.DecodeString(task.Options.ReportConfig)
+		if err != nil {
+			slog.Warn("nuclei scan: failed to base64-decode task.Options.ReportConfig; reporting disabled for this scan",
+				"scan_id", task.Options.ScanID, "error", err)
+		} else {
+			opts.ReportingConfigYAML = decoded
+			slog.Info("nuclei scan: loaded reporting config from work message",
+				"scan_id", task.Options.ScanID, "bytes", len(decoded))
+		}
+	}
+
+	slog.Info("running embedded nuclei",
+		"scan_id", task.Options.ScanID,
+		"targets", len(opts.Targets),
+		"templates", len(opts.Templates),
+		"output", outputFile,
+		"code", opts.EnableCodeTemplates,
+		"headless", opts.Headless,
+		"config_bytes", len(opts.ConfigYAML),
+	)
+
+	// Match upload is handled by the nuclei SDK via WithPDCPUpload.
+	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
+		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
+	}
+
+	// Raw scan-log upload (full JSONL, matched + unmatched). Opt-in via
+	// PDCP_ENABLE_SCAN_LOG_UPLOAD; default off so agents without storage
+	// provisioned don't hammer the API with rejected uploads.
+	if envconfig.ScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
+		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
+			slog.Warn("nuclei scan: scan-log upload failed",
+				"scan_id", task.Options.ScanID,
+				"history_id", task.Options.HistoryID,
+				"chunk_id", task.Id,
+				"error", err)
+		}
+	}
+
+	// Empty TaskResult: embedded path doesn't capture stdout/stderr, so
+	// ExtractUnresponsiveHosts has no input until we hook nuclei's logger.
+	return &types.TaskResult{}, []string{outputFile}, nil
+}
+
+// signedUploadResponse mirrors /v1/scans/{scan_id}/scan_log/upload-url.
+// Headers are authoritative: set them verbatim on the PUT and add nothing
+// else, since the SigV4 signature covers headers.
+type signedUploadResponse struct {
+	UploadURL  string            `json:"upload_url"`
+	Method     string            `json:"method"`
+	Headers    map[string]string `json:"headers"`
+	MaxBytes   int64             `json:"max_bytes"`
+	ObjectPath string            `json:"object_path"`
+	ExpiresAt  time.Time         `json:"expires_at"`
+}
+
+// uploadNucleiOutputViaSignedURL ships the per-chunk output via:
+//  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N with {"filename": ...}
+//  2. PUT gzipped bytes to the signed URL with the response Headers verbatim.
+//
+// Gzipped as an opaque .gz blob (no Content-Encoding) so the SigV4 signed
+// headers never need to cover Content-Encoding; server gunzips on read.
+func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
+	info, err := os.Stat(outputFile)
+	if err != nil {
+		return fmt.Errorf("stat output: %w", err)
+	}
+	if info.Size() == 0 {
+		slog.Debug("nuclei scan: output file empty, skipping scan-log upload",
+			"scan_id", task.Options.ScanID, "chunk_id", task.Id)
+		return nil
+	}
+
+	// Gzip into a sibling temp so we can stat for ContentLength. Unique name
+	// keeps a redelivered chunk from clobbering a still-PUTting goroutine.
+	gzFile, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+"-*.gz")
+	if err != nil {
+		return fmt.Errorf("create gz tempfile: %w", err)
+	}
+	gzPath := gzFile.Name()
+	_ = gzFile.Close()
+	defer func() { _ = os.Remove(gzPath) }()
+	gzSize, err := gzipFile(outputFile, gzPath)
+	if err != nil {
+		return fmt.Errorf("gzip output: %w", err)
+	}
+
+	slog.Debug("nuclei scan: gzipped scan-log",
+		"scan_id", task.Options.ScanID, "chunk_id", task.Id,
+		"raw_bytes", info.Size(), "gz_bytes", gzSize)
+
+	filename := task.Id + ".jsonl.gz"
+	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, envconfig.APIKey())
+	if err != nil {
+		return fmt.Errorf("auth client: %w", err)
+	}
+
+	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
+	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
+		envconfig.APIServer(), task.Options.ScanID, task.Options.HistoryID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("build upload-url request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("get upload-url: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("upload-url status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var signed signedUploadResponse
+	if err := json.Unmarshal(respBody, &signed); err != nil {
+		return fmt.Errorf("decode upload-url response: %w", err)
+	}
+	if signed.UploadURL == "" || signed.Method == "" {
+		return fmt.Errorf("upload-url response missing url/method")
+	}
+	if signed.MaxBytes > 0 && gzSize > signed.MaxBytes {
+		return fmt.Errorf("gzipped output %d bytes exceeds signed-url max %d", gzSize, signed.MaxBytes)
+	}
+
+	f, err := os.Open(gzPath)
+	if err != nil {
+		return fmt.Errorf("open gz: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	putReq, err := http.NewRequestWithContext(ctx, signed.Method, signed.UploadURL, f)
+	if err != nil {
+		return fmt.Errorf("build PUT: %s", stripSignedURL(err))
+	}
+	putReq.ContentLength = gzSize
+	for k, v := range signed.Headers {
+		putReq.Header.Set(k, v)
+	}
+
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil {
+		return fmt.Errorf("PUT: %s", stripSignedURL(err))
+	}
+	defer func() { _ = putResp.Body.Close() }()
+
+	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(putResp.Body)
+		return fmt.Errorf("PUT status %d: %s", putResp.StatusCode, string(body))
+	}
+	_, _ = io.Copy(io.Discard, putResp.Body)
+
+	slog.Info("nuclei scan: output file uploaded",
+		"scan_id", task.Options.ScanID,
+		"history_id", task.Options.HistoryID,
+		"chunk_id", task.Id,
+		"raw_bytes", info.Size(),
+		"gz_bytes", gzSize,
+		"object_path", signed.ObjectPath)
+	return nil
+}
+
+// stripSignedURL drops the URL from a *url.Error so SigV4/GCS HMAC query
+// signatures never reach the logs. Keeps operation and underlying cause.
+func stripSignedURL(err error) string {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Sprintf("%s: %s", ue.Op, ue.Err)
+	}
+	return err.Error()
+}
+
+// gzipFile streams src through gzip into dst at BestSpeed (nuclei JSONL
+// compresses ~10x even at level 1) and returns the dst size.
+func gzipFile(src, dst string) (int64, error) {
+	in, err := os.Open(src)
+	if err != nil {
+		return 0, fmt.Errorf("open src: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.Create(dst)
+	if err != nil {
+		return 0, fmt.Errorf("create dst: %w", err)
+	}
+	gzw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
+	if err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip writer: %w", err)
+	}
+	if _, err := io.Copy(gzw, in); err != nil {
+		_ = gzw.Close()
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip copy: %w", err)
+	}
+	if err := gzw.Close(); err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("gzip close: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return 0, fmt.Errorf("close dst: %w", err)
+	}
+	st, err := os.Stat(dst)
+	if err != nil {
+		return 0, fmt.Errorf("stat dst: %w", err)
+	}
+	return st.Size(), nil
+}
+
+// splitIPsAndHostnames separates IPs from hostnames; strips port if present.
 func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
 	for _, h := range hosts {
-		// Strip port if present (e.g., "10.0.0.1:8080" → "10.0.0.1")
 		host := h
 		if hostOnly, _, err := net.SplitHostPort(h); err == nil {
 			host = hostOnly
 		}
 		if net.ParseIP(host) != nil {
-			ips = append(ips, h) // keep original (with port if present)
+			ips = append(ips, h)
 		} else {
 			hostnames = append(hostnames, h)
 		}
@@ -334,9 +499,8 @@ func splitIPsAndHostnames(hosts []string) (ips, hostnames []string) {
 	return ips, hostnames
 }
 
-// quickPortFilter runs a lightweight naabu scan on HTTP default ports (80, 443, 8443)
-// to check which hosts are alive before launching expensive tools like httpx with Chrome.
-// Returns host:port pairs for hosts with at least one open port.
+// quickPortFilter runs naabu on 80/443/8443 to drop dead hosts before launching
+// heavy tools like httpx+Chrome. Returns host:port pairs.
 func quickPortFilter(ctx context.Context, hosts []string, enumID string) ([]string, error) {
 	httpPorts := []string{"80", "443", "8443"}
 	hostPorts, err := runNaabuScan(ctx, hosts, httpPorts, enumID, "quick-filter")
@@ -352,20 +516,6 @@ func quickPortFilter(ctx context.Context, hosts []string, enumID string) ([]stri
 	return out, nil
 }
 
-func ExtractUnresponsiveHosts(taskResult *types.TaskResult) {
-	fields := strings.Fields(taskResult.Stdout + taskResult.Stderr)
-	for i := 0; i < len(fields)-1; i++ {
-		if stringsutil.EqualFoldAny(fields[i], "skipped") {
-			host := fields[i+1]
-			// Split host:port into host only since other templates will check the same combinations
-			if parts := strings.Split(host, ":"); len(parts) > 0 {
-				host = parts[0]
-			}
-			_ = UnresponsiveHosts.Set(host, struct{}{})
-		}
-	}
-}
-
 func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (string, error) {
 	slog.Debug("uploading to cloud", "file", outputFile)
 	f, err := os.Open(outputFile)
@@ -375,7 +525,7 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 	defer func() {
 		_ = f.Close()
 	}()
-	apiURL := fmt.Sprintf("%s/v1/assets", PCDPApiServer)
+	apiURL := fmt.Sprintf("%s/v1/assets", envconfig.APIServer())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, f)
 	if err != nil {
 		return "", err
@@ -386,7 +536,7 @@ func uploadToCloud(ctx context.Context, _ *types.Task, outputFile string) (strin
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(envconfig.TeamID(), envconfig.APIKey())
 	if err != nil {
 		return "", err
 	}
@@ -411,7 +561,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	defer func() {
 		_ = f.Close()
 	}()
-	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", PCDPApiServer, assetId)
+	apiURL := fmt.Sprintf("%s/v1/assets/%s/contents?upload_type=append", envconfig.APIServer(), assetId)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, f)
 	if err != nil {
 		return "", err
@@ -422,7 +572,7 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 
 	req.Header.Set("Content-Type", "application/octet-stream")
 
-	client, err := client.CreateAuthenticatedClient(os.Getenv("PDCP_TEAM_ID"), os.Getenv("PDCP_API_KEY"))
+	client, err := client.CreateAuthenticatedClient(envconfig.TeamID(), envconfig.APIKey())
 	if err != nil {
 		return "", err
 	}
@@ -435,102 +585,17 @@ func uploadToCloudWithId(ctx context.Context, _ *types.Task, outputFile string, 
 	return assetId, nil
 }
 
-func parseScanArgs(ctx context.Context, task *types.Task) (envs, args []string, outputFile string, removeFunc func(), err error) {
-	args = append(args, task.Tool.String())
-
-	tmpInputFile, tmpConfigFile, inputRemoveFunc, err := prepareInput(task)
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	var tmpTemplatesFile string
-	if len(task.Options.Templates) > 0 {
-		// Create temporary file for templates to avoid command line length limits
-		tmpTemplatesFile, err = fileutil.GetTempFileName()
-		if err != nil {
-			inputRemoveFunc()
-			return nil, nil, "", nil, fmt.Errorf("failed to create temp file for templates: %w", err)
-		}
-
-		// Write templates to file, one per line (standard format for nuclei template files)
-		templatesContent := strings.Join(task.Options.Templates, "\n")
-		if err := os.WriteFile(tmpTemplatesFile, conversion.Bytes(templatesContent), os.ModePerm); err != nil {
-			inputRemoveFunc()
-			_ = os.RemoveAll(tmpTemplatesFile)
-			return nil, nil, "", nil, fmt.Errorf("failed to write templates to temp file: %w", err)
-		}
-
-		args = append(args, "-templates", tmpTemplatesFile)
-	}
-
-	if task.Options.TeamID != "" {
-		args = append(args, "-team-id", task.Options.TeamID)
-	}
-
-	args = append(args, "-l", tmpInputFile)
-
-	if tmpConfigFile != "" {
-		args = append(args, "-config", tmpConfigFile)
-	}
-
-	if task.Options.ScanID != "" || task.Options.TeamID != "" {
-		envs = getEnvs()
-		args = append(args,
-			"-dashboard",
-			"-scan-id", task.Options.ScanID,
-		)
-	}
-
-	if task.Tool == types.Nuclei {
-		// Always add -lfa flag
-		args = append(args, "-lfa")
-		// Always add log upload flags
-		args = append(args, "-ms")    // matcher-status
-		args = append(args, "-jsonl") // JSON lines format
-		// Enable -code only if there are more than 2GB of RAM
-		if hasMoreThan2GBRAM() {
-			args = append(args, "-code")
-		}
-		// Enable -headless only if there are more than 8GB of RAM and architecture is AMD64
-		if hasMoreThan8GBRAM() && isAMD64() {
-			args = append(args, "-headless")
-		}
-	}
-
-	if task.Options.Output != "" {
-		_ = fileutil.CreateFolder(task.Options.Output)
-		outputFile = filepath.Join(task.Options.Output, fmt.Sprintf("%s.output", args[0]))
-		args = append(args, "-o", outputFile)
-	}
-
-	// Create combined remove function that cleans up all temporary files
-	// Note: outputFile is NOT deleted here - it will be processed and deleted separately
-	removeFunc = func() {
-		inputRemoveFunc()
-		if tmpTemplatesFile != "" {
-			_ = os.RemoveAll(tmpTemplatesFile)
-		}
-	}
-
-	return envs, args, outputFile, removeFunc, nil
-}
-
-// getTotalRAM returns the total physical/installed RAM in bytes (not virtual memory)
-// Returns 0 and an error if unable to determine RAM
-// Note: mem.VirtualMemory().Total returns the total physical RAM installed on the system
+// getTotalRAM returns total installed physical RAM in bytes.
 func getTotalRAM() (uint64, error) {
 	vmStat, err := mem.VirtualMemory()
 	if err != nil {
 		return 0, err
 	}
-	// Total field represents the total physical RAM installed, not virtual memory
 	return vmStat.Total, nil
 }
 
-// hasMoreThan2GBRAM checks if the system has more than 2GB of RAM
-// Returns true if RAM > 2GB, false otherwise or if unable to determine
 func hasMoreThan2GBRAM() bool {
-	const minRAMBytes = 2 * 1024 * 1024 * 1024 // 2GB in bytes
+	const minRAMBytes = 2 * 1024 * 1024 * 1024
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
@@ -541,10 +606,8 @@ func hasMoreThan2GBRAM() bool {
 	return totalRAM > minRAMBytes
 }
 
-// hasMoreThan8GBRAM checks if the system has more than 8GB of RAM
-// Returns true if RAM > 8GB, false otherwise or if unable to determine
 func hasMoreThan8GBRAM() bool {
-	const minRAMBytes = 8 * 1024 * 1024 * 1024 // 8GB in bytes
+	const minRAMBytes = 8 * 1024 * 1024 * 1024
 
 	totalRAM, err := getTotalRAM()
 	if err != nil {
@@ -555,158 +618,6 @@ func hasMoreThan8GBRAM() bool {
 	return totalRAM > minRAMBytes
 }
 
-// isAMD64 checks if the system architecture is AMD64 (x86_64)
-// Returns true if architecture is amd64, false otherwise
 func isAMD64() bool {
 	return runtime.GOARCH == "amd64"
-}
-
-var UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
-
-func init() {
-	UnresponsiveHosts = mapsutil.NewSyncLockMap[string, struct{}]()
-}
-
-func prepareInput(task *types.Task) (
-	string, // input list
-	string, // config
-	func(), // remove function
-	error, // error
-) {
-	tmpInputFile, err := fileutil.GetTempFileName()
-	if err != nil {
-		return "", "", nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	var filteredHosts []string
-	for _, host := range task.Options.Hosts {
-		if UnresponsiveHosts.Has(host) {
-			continue
-		}
-
-		filteredHosts = append(filteredHosts, host)
-	}
-
-	allTargets := strings.Join(filteredHosts, "\n")
-	if err := os.WriteFile(tmpInputFile, conversion.Bytes(allTargets), os.ModePerm); err != nil {
-		return "", "", nil, fmt.Errorf("failed to write to temp file: %w", err)
-	}
-
-	var tmpConfigFile string
-	if task.Options.Config != "" {
-		tmpConfigFile, err = fileutil.GetTempFileName()
-		if err != nil {
-			return "", "", nil, fmt.Errorf("failed to create temp file: %w", err)
-		}
-		if err := os.WriteFile(tmpConfigFile, conversion.Bytes(task.Options.Config), os.ModePerm); err != nil {
-			return "", "", nil, fmt.Errorf("failed to write to temp file: %w", err)
-		}
-	}
-
-	removeFunc := func() {
-		_ = os.RemoveAll(tmpInputFile)
-		if tmpConfigFile != "" {
-			_ = os.RemoveAll(tmpConfigFile)
-		}
-	}
-	return tmpInputFile, tmpConfigFile, removeFunc, nil
-}
-
-func getEnvs() []string {
-	defaultPDCPDashboardURL := envutil.GetEnvOrDefault("PDCP_DASHBOARD_URL", "https://cloud.projectdiscovery.io")
-	defaultPDCPAPIServer := envutil.GetEnvOrDefault("PDCP_API_SERVER", "https://api.projectdiscovery.io")
-	envs := []string{
-		"PDCP_DASHBOARD_URL=" + defaultPDCPDashboardURL,
-		"PDCP_API_SERVER=" + defaultPDCPAPIServer,
-		"PDCP_API_KEY=" + os.Getenv("PDCP_API_KEY"),
-		"HOME=" + os.Getenv("HOME"),
-		"PDCP_TEAM_ID=" + os.Getenv("PDCP_TEAM_ID"),
-		"PATH=" + os.Getenv("PATH"),
-	}
-	if runtime.GOOS == "windows" {
-		// Without these, Go's os.TempDir() falls through to C:\Windows (read-only)
-		// and tools like naabu fail to create their working directories.
-		for _, k := range []string{"TEMP", "TMP", "USERPROFILE", "SystemRoot", "SystemDrive", "APPDATA", "LOCALAPPDATA", "ProgramData", "ProgramFiles", "windir"} {
-			if v := os.Getenv(k); v != "" {
-				envs = append(envs, k+"="+v)
-			}
-		}
-	}
-	return envs
-}
-
-func runCommand(ctx context.Context, envs, args []string) (*types.TaskResult, error) {
-	slog.Debug("running tool", "cmd", args[0])
-
-	// Prepare the command
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-
-	cmd.Env = append(cmd.Env, envs...)
-
-	// Set up stdin, stdout, and stderr pipes
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
-	}
-
-	// Start the command
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start tool '%s': %w", args[0], err)
-	}
-
-	// Read stdout and stderr
-	stdoutOutput, err := io.ReadAll(stdout)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read stdout: %w", err)
-	}
-
-	taskResult := &types.TaskResult{
-		Stdout: string(stdoutOutput),
-	}
-
-	stderrOutput, err := io.ReadAll(stderr)
-	if err != nil {
-		return taskResult, nil
-	}
-
-	taskResult.Stderr = string(stderrOutput)
-
-	// Wait for the command to finish
-	if err := cmd.Wait(); err != nil {
-		// -----------
-		// Recoverable error, return the task result with the error
-		// NUCLEI
-		// - [FTL] Could not run nuclei: no templates provided for scan => no templates compatible with provided flags
-		if strings.Contains(taskResult.Stderr, "no templates provided for scan") {
-			return taskResult, nil
-		}
-		return taskResult, fmt.Errorf("failed to execute tool '%s': %w\nStdout: %s\nStderr: %s", args[0], err, string(stdoutOutput), string(stderrOutput))
-	}
-
-	slog.Debug("tool execution completed", "cmd", args[0])
-
-	return taskResult, nil
-}
-
-func parseGenericArgs(task *types.Task) (envs, args []string, outputFile string, removeFunc func(), err error) {
-	envs = getEnvs()
-
-	args = append(args, task.Tool.String())
-
-	tmpFile, _, removeFunc, err := prepareInput(task)
-	if err != nil {
-		return nil, nil, "", nil, fmt.Errorf("failed to create temp file: %w", err)
-	}
-
-	args = append(args,
-		"-silent",
-		"-l", tmpFile,
-		// "-verbose",
-	)
-
-	return envs, args, outputFile, removeFunc, nil
 }

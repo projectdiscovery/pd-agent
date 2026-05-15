@@ -1,5 +1,5 @@
-// Package selfupdate handles downloading a new pd-agent binary from GitHub
-// releases and replacing the running binary via rename + syscall.Exec.
+// Package selfupdate downloads a new pd-agent binary from GitHub releases
+// and replaces the running binary via rename + syscall.Exec.
 package selfupdate
 
 import (
@@ -18,14 +18,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/tidwall/gjson"
 )
 
-// PreflightEnvVar is set on the new binary's environment during a self-update
-// preflight. The new binary should exit 0 cleanly soon after parsing flags
-// (and any other safe init that does not touch shared state). Callers use
-// this to detect "binary won't even start with the current args" before
-// committing to swap, so a broken update does not brick the agent.
+// PreflightEnvVar signals the new binary to exit 0 after flag parsing so the
+// caller can detect a broken update before swapping the live binary.
 const PreflightEnvVar = "PDCP_PREFLIGHT"
 
 const (
@@ -38,12 +36,12 @@ const (
 
 var httpClient = &http.Client{Timeout: httpTimeout}
 
-// UpdateRequest is the payload from the NATS RPC update command.
+// UpdateRequest is the NATS RPC payload for the update command.
 type UpdateRequest struct {
-	Version string `json:"version"` // e.g. "v1.2.3" or "latest"
+	Version string `json:"version"` // "v1.2.3" or "latest"
 }
 
-// UpdateResult is returned to the caller before the process restarts.
+// UpdateResult is returned before the process restarts.
 type UpdateResult struct {
 	AgentID        string `json:"agent_id"`
 	Status         string `json:"status"`
@@ -52,34 +50,26 @@ type UpdateResult struct {
 	Message        string `json:"message,omitempty"`
 }
 
-// DownloadAndVerify resolves the requested version, downloads the binary from
-// GitHub, and verifies it with -version. Returns the path to the verified temp
-// binary. The caller is responsible for calling Apply or cleaning up the file.
-//
-// This phase is safe to run while the agent is still fully operational — no
-// connections are drained, no work is interrupted.
-//
-// Set PDCP_UPDATE_URL to override the download URL (for local testing):
-//
-//	PDCP_UPDATE_URL=http://localhost:9999/pd-agent_2.0.0_macos_arm64.zip
+// DownloadAndVerify resolves the requested version, downloads the binary,
+// and verifies it with -version. Returns the path to the verified temp binary;
+// caller must call Apply or clean it up. Safe to run while the agent is live.
+// PDCP_UPDATE_URL overrides the download URL.
 func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion string) (string, error) {
 	if IsContainer() {
-		return "", fmt.Errorf("running in a container — update the image instead of self-updating")
+		return "", fmt.Errorf("running in a container, update the image instead of self-updating")
 	}
 
 	targetVersion := requestedVersion
 	downloadURL := ""
 	var err error
 
-	// Check for URL override (local testing / staging).
-	if overrideURL := os.Getenv("PDCP_UPDATE_URL"); overrideURL != "" {
+	if overrideURL := envconfig.UpdateURL(); overrideURL != "" {
 		downloadURL = overrideURL
 		if targetVersion == "" || targetVersion == "latest" {
 			targetVersion = "override"
 		}
 		slog.Info("selfupdate: using PDCP_UPDATE_URL override", "url", downloadURL)
 	} else {
-		// Resolve from GitHub releases.
 		if requestedVersion == "latest" || requestedVersion == "" {
 			targetVersion, downloadURL, err = resolveLatest()
 		} else {
@@ -111,16 +101,11 @@ func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion str
 	return newBinary, nil
 }
 
-// Prevalidate runs the new binary with the exact args Apply will exec with
-// (current os.Args + injected --agent-id) and PDCP_PREFLIGHT=1 in the env.
-// If the binary exits within preflightWindow, the update is aborted with the
-// captured stderr so the running agent can keep serving instead of getting
-// bricked.
-//
-// A binary that respects PreflightEnvVar exits 0 cleanly after flag parsing.
-// Older binaries that do not honor the var either run normally (and would
-// conflict with the live agent's NATS session) or die fast on flag mismatches.
-// In both cases an early exit is treated as a failed preflight.
+// Prevalidate runs the new binary with the Apply-time args and
+// PDCP_PREFLIGHT=1, aborting if it exits inside preflightWindow. A binary that
+// honors PreflightEnvVar exits 0 quickly; an older binary either runs normally
+// (and clashes with the live NATS session) or dies on flag mismatches, so any
+// early exit fails the preflight.
 func Prevalidate(newBinaryPath, agentID string) error {
 	const preflightWindow = 15 * time.Second
 
@@ -148,7 +133,7 @@ func Prevalidate(newBinaryPath, agentID string) error {
 		if err != nil {
 			return fmt.Errorf("preflight: new binary exited early: %v (stderr: %s)", err, out)
 		}
-		return fmt.Errorf("preflight: new binary exited cleanly without honoring %s — likely an older build (stderr: %s)", PreflightEnvVar, out)
+		return fmt.Errorf("preflight: new binary exited cleanly without honoring %s, likely an older build (stderr: %s)", PreflightEnvVar, out)
 	case <-time.After(preflightWindow):
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
@@ -157,16 +142,11 @@ func Prevalidate(newBinaryPath, agentID string) error {
 	}
 }
 
-// Apply replaces the running binary with the new one and restarts via
-// syscall.Exec. Call this AFTER draining connections and in-flight work.
-// agentID is injected into the restart args so the new process keeps the same ID.
-//
-// On success, this function does not return — the process is replaced.
-// On failure, it returns an error and cleans up.
-//
-// The previous binary is left at execPath + ".old" so an operator can revert
-// if the new binary turns out to be broken. CleanupOldBinary should be called
-// from the new process after a startup-success milestone (e.g., NATS RPC up).
+// Apply replaces the running binary and restarts via syscall.Exec. Call only
+// after draining work. Returns only on failure; on success the process is
+// replaced. agentID is injected into restart args so the new process keeps
+// the same identity. The old binary is left at execPath+".old" for rollback;
+// CleanupOldBinary removes it once the new process reaches a healthy state.
 func Apply(newBinaryPath, currentVersion, agentID string) error {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -177,7 +157,6 @@ func Apply(newBinaryPath, currentVersion, agentID string) error {
 		return fmt.Errorf("resolve symlinks: %w", err)
 	}
 
-	// Replace: rename current → .old, move new → current.
 	backupPath := execPath + ".old"
 	if err := os.Rename(execPath, backupPath); err != nil {
 		return fmt.Errorf("backup current binary: %w", err)
@@ -195,22 +174,15 @@ func Apply(newBinaryPath, currentVersion, agentID string) error {
 
 	slog.Info("selfupdate: binary replaced, restarting", "path", execPath, "backup", backupPath, "agent_id", agentID)
 
-	// Remove the temp source. Backup at execPath+".old" is intentionally kept
-	// for recovery; CleanupOldBinary deletes it after the new process proves healthy.
+	// Backup at execPath+".old" is kept for rollback; CleanupOldBinary removes it later.
 	_ = os.Remove(newBinaryPath)
 
-	// Build restart args: inject --agent-id so the new process keeps the same identity.
 	args := ensureArg(os.Args, "--agent-id", agentID)
-
-	// Exec replaces the current process with the new binary.
-	// Same PID, same env, args with persisted agent ID.
 	return syscall.Exec(execPath, args, os.Environ())
 }
 
-// CleanupOldBinary removes execPath+".old" if present. Call this from the
-// running agent after it has reached a startup-success milestone (NATS up,
-// agent registered) so a failed update can be recovered by booting from the
-// backup until then.
+// CleanupOldBinary removes execPath+".old". Call after the new process
+// reaches a healthy startup milestone (NATS up, registered).
 func CleanupOldBinary() {
 	execPath, err := os.Executable()
 	if err != nil {
@@ -222,7 +194,7 @@ func CleanupOldBinary() {
 	}
 	backupPath := execPath + ".old"
 	if _, err := os.Stat(backupPath); err != nil {
-		return // nothing to clean up
+		return
 	}
 	if err := os.Remove(backupPath); err != nil {
 		slog.Warn("selfupdate: failed to remove .old backup", "path", backupPath, "error", err)
@@ -231,7 +203,6 @@ func CleanupOldBinary() {
 	slog.Info("selfupdate: removed .old backup after successful startup", "path", backupPath)
 }
 
-// resolveLatest fetches the latest release tag and download URL from GitHub.
 func resolveLatest() (version, downloadURL string, err error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", githubRepo)
 	resp, err := httpClient.Get(apiURL)
@@ -261,7 +232,6 @@ func resolveLatest() (version, downloadURL string, err error) {
 	return version, downloadURL, nil
 }
 
-// resolveVersion fetches a specific release by tag and returns the download URL.
 func resolveVersion(tag string) (downloadURL string, err error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/tags/%s", githubRepo, tag)
 	resp, err := httpClient.Get(apiURL)
@@ -286,7 +256,7 @@ func resolveVersion(tag string) (downloadURL string, err error) {
 	return downloadURL, nil
 }
 
-// osName maps runtime.GOOS to the naming convention used in GitHub release assets.
+// osName maps runtime.GOOS to the GitHub release asset naming convention.
 func osName() string {
 	switch runtime.GOOS {
 	case "darwin":
@@ -296,7 +266,6 @@ func osName() string {
 	}
 }
 
-// findAssetURL searches release JSON for a zip matching the current OS/arch.
 func findAssetURL(releaseJSON []byte) string {
 	osArch := fmt.Sprintf("%s_%s", osName(), runtime.GOARCH)
 	var url string
@@ -312,8 +281,6 @@ func findAssetURL(releaseJSON []byte) string {
 	return url
 }
 
-// downloadBinary fetches a zip from the URL, extracts the binary, and returns
-// the path to the extracted temp file.
 func downloadBinary(ctx context.Context, url string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -330,7 +297,6 @@ func downloadBinary(ctx context.Context, url string) (string, error) {
 		return "", fmt.Errorf("download returned %d", resp.StatusCode)
 	}
 
-	// Save zip to temp file.
 	tmpZip, err := os.CreateTemp("", "pd-agent-update-*.zip")
 	if err != nil {
 		return "", err
@@ -343,11 +309,9 @@ func downloadBinary(ctx context.Context, url string) (string, error) {
 	}
 	tmpZip.Close()
 
-	// Extract the binary from the zip.
 	return extractBinaryFromZip(tmpZip.Name())
 }
 
-// extractBinaryFromZip opens a zip and extracts the pd-agent binary to a temp file.
 func extractBinaryFromZip(zipPath string) (string, error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
@@ -390,15 +354,13 @@ func extractBinaryFromZip(zipPath string) (string, error) {
 	return "", fmt.Errorf("binary %s not found in zip", binaryName)
 }
 
-// verifyBinary runs the new binary with -version to check it's not corrupt.
-// If the binary doesn't support -version (older versions), just check it's executable.
+// verifyBinary runs the new binary with -version to confirm it's executable.
+// Older builds without -version pass through with a warning.
 func verifyBinary(path string) error {
 	cmd := exec.Command(path, "-version")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		outStr := string(output)
-		// Older binaries don't have -version flag — that's OK, just means
-		// we can't verify the version string. The binary is still valid.
 		if strings.Contains(outStr, "flag provided but not defined") {
 			slog.Warn("selfupdate: binary does not support -version (older version), skipping version check")
 			return nil
@@ -409,7 +371,7 @@ func verifyBinary(path string) error {
 	return nil
 }
 
-// copyFile copies src to dst. Uses a temp file + rename for atomicity.
+// copyFile copies src to dst via a temp file in the same directory for an atomic rename.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -417,7 +379,6 @@ func copyFile(src, dst string) error {
 	}
 	defer in.Close()
 
-	// Write to temp file in same directory as dst (for atomic rename).
 	dir := filepath.Dir(dst)
 	tmp, err := os.CreateTemp(dir, ".pd-agent-install-*")
 	if err != nil {
@@ -434,37 +395,32 @@ func copyFile(src, dst string) error {
 	return os.Rename(tmp.Name(), dst)
 }
 
-// ensureArg adds or updates a --key=value arg in the args slice.
-// If --key already exists (as --key=old or --key old), it's updated.
-// If not, --key=value is appended.
+// ensureArg adds or updates a --key=value entry, handling both "--key value"
+// and "--key=value" forms.
 func ensureArg(args []string, key, value string) []string {
 	prefix := key + "="
 	for i, arg := range args {
 		if arg == key && i+1 < len(args) {
-			// --key value (two separate args)
 			result := make([]string, len(args))
 			copy(result, args)
 			result[i+1] = value
 			return result
 		}
 		if strings.HasPrefix(arg, prefix) {
-			// --key=value (single arg)
 			result := make([]string, len(args))
 			copy(result, args)
 			result[i] = prefix + value
 			return result
 		}
 	}
-	// Not found — append.
 	result := make([]string, len(args)+1)
 	copy(result, args)
 	result[len(args)] = prefix + value
 	return result
 }
 
-// IsContainer checks if we're running inside a Docker/k8s container.
+// IsContainer reports whether the process runs inside a Docker/k8s container.
 func IsContainer() bool {
-	// Kubernetes injects this env var into every pod.
 	if os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
 		return true
 	}
@@ -478,7 +434,7 @@ func IsContainer() bool {
 			return true
 		}
 	}
-	// cgroup v2: check for container runtime in /proc/1/mountinfo
+	// cgroup v2 path.
 	data, err = os.ReadFile("/proc/self/mountinfo")
 	if err == nil {
 		s := string(data)

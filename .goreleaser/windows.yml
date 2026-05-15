@@ -6,17 +6,19 @@ before:
 project_name: pd-agent
 builds:
   - id: pd-agent-windows
+    flags:
+      - -trimpath
     ldflags:
       - -s -w
     binary: pd-agent
-    # env:
-    # - CGO_ENABLED=1 # necessary only with winpcap
+    env:
+      - CGO_ENABLED=0
     main: ./cmd/pd-agent
     goos:
       - windows
+    # arm64 omitted: Mzack9999/gopacket/pcap has no defs_windows_arm64.go.
     goarch:
       - amd64
-      - arm64
       - 386
 archives:
 - formats:

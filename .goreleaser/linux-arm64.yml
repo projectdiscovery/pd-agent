@@ -6,11 +6,13 @@ before:
 project_name: pd-agent
 builds:
   - id: pd-agent-linux-arm64
+    flags:
+      - -trimpath
     ldflags:
       - -s -w
     binary: pd-agent
     env:
-      - CGO_ENABLED=1
+      - CGO_ENABLED=0
     main: ./cmd/pd-agent
     goos:
       - linux

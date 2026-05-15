@@ -1,38 +1,30 @@
 FROM --platform=linux/amd64 golang:1.25 AS builder
 
-RUN apt-get update && apt-get install -y git libpcap-dev
+RUN apt-get update && apt-get install -y git
 
-# Tools dependencies
-# dnsx
-RUN go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest
-# naabu
-RUN go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest
-# httpx
-RUN go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
-# tlsx
-RUN go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest
-# nuclei
-RUN go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+ENV CGO_ENABLED=0
 
-
-# Copy source code
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# Build pd-agent binary
-# CGO_ENABLED=1 is required for libpcap/gopacket support (passive discovery feature)
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
+# Build pd-agent. All PD scanners (nuclei/naabu/httpx/dnsx/tlsx) are linked
+# into the binary via pkg/runtools, so this is the only artifact we need to
+# ship. Mzack9999/gopacket dlopens libpcap at runtime via purego, so no cgo
+# or libpcap headers are needed at build time; features that need libpcap
+# warn-and-skip at runtime if the lib is missing.
+RUN GOOS=linux go build -trimpath -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
 
 FROM --platform=linux/amd64 ubuntu:latest
-# install dependencies
-# required: libpcap-dev, chrome
+# Runtime dependencies: Chrome for nuclei/httpx headless screenshots, plus
+# ca-certificates for outbound TLS. naabu does service-version detection
+# natively (nmap-service-probes parsed in-process), so no nmap binary is
+# required. libpcap is intentionally not installed: naabu's syn-scan warns
+# and skips when it's missing. Users who want libpcap-backed features can
+# extend this image with `apt install libpcap0.8`.
 RUN apt update && apt install -y \
-    bind9-dnsutils \
     ca-certificates \
-    nmap \
-    libpcap-dev \
     wget \
     gnupg \
     && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
@@ -42,33 +34,20 @@ RUN apt update && apt install -y \
     && apt clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Set environment variables for Chrome
 ENV CHROME_BIN=/usr/bin/google-chrome-stable
 ENV CHROME_PATH=/usr/bin/
 ENV CHROME_NO_SANDBOX=true
 
-# Copy tools binaries
-COPY --from=builder /go/bin/dnsx /usr/local/bin/
-COPY --from=builder /go/bin/naabu /usr/local/bin/
-COPY --from=builder /go/bin/httpx /usr/local/bin/
-COPY --from=builder /go/bin/tlsx /usr/local/bin/
-COPY --from=builder /go/bin/nuclei /usr/local/bin/
-
-# Copy agent binary
 COPY --from=builder /go/bin/pd-agent /usr/local/bin/pd-agent
 
-# Create writable output directory for existing ubuntu user (UID 1000)
+# Writable output directory for the ubuntu user (UID 1000)
 RUN mkdir -p /home/ubuntu/output && \
     chown -R ubuntu:ubuntu /home/ubuntu
 
-# Set default environment variables (can be overridden at runtime)
 ENV PDCP_API_KEY=""
 ENV PDCP_TEAM_ID=""
 
-# Switch to non-root user
 USER ubuntu
 WORKDIR /home/ubuntu
 
-# ENTRYPOINT allows passing command-line arguments at runtime
-# Environment variables should be passed via -e flags or docker-compose
 ENTRYPOINT ["pd-agent"]
