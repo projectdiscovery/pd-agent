@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1773,9 +1774,16 @@ var isRegistered bool
 func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	r.inRequestCount++
 
-	endpoint := fmt.Sprintf("%s/v1/agents/%s", envconfig.APIServer(), r.options.AgentId)
-	headers := map[string]string{"x-api-key": envconfig.APIKey()}
-	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, headers)
+	agentNetwork := r.options.AgentNetwork
+	if agentNetwork == "" {
+		agentNetwork = "default"
+	}
+	endpoint := fmt.Sprintf("%s/v1/agents/%s?agent_network=%s",
+		envconfig.APIServer(),
+		url.PathEscape(r.options.AgentId),
+		url.QueryEscape(agentNetwork),
+	)
+	resp := r.makeRequest(ctx, http.MethodGet, endpoint, nil, nil)
 
 	switch {
 	case resp.Error != nil:
@@ -1841,7 +1849,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 
 	req.URL.RawQuery = q.Encode()
 
-	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, headers)
+	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, nil)
 	if inResp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /in endpoint: %v", inResp.Error))
 		return inResp.Error
@@ -1891,10 +1899,22 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	return nil
 }
 
-// Out deregisters the agent.
+// Out deregisters the agent. Best-effort: must not block shutdown.
 func (r *Runner) Out(ctx context.Context) error {
-	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s", envconfig.APIServer(), r.options.AgentId)
-	resp := r.makeRequest(ctx, http.MethodPost, endpoint, nil, nil)
+	if r.options.AgentNetwork == "" {
+		r.logHelper("DEBUG", "skipping /out: agent_network unknown; TTL will clean up")
+		return nil
+	}
+
+	outCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	endpoint := fmt.Sprintf("%s/v1/agents/out?id=%s&agent_network=%s",
+		envconfig.APIServer(),
+		url.QueryEscape(r.options.AgentId),
+		url.QueryEscape(r.options.AgentNetwork),
+	)
+	resp := r.makeRequest(outCtx, http.MethodPost, endpoint, nil, nil)
 	if resp.Error != nil {
 		r.logHelper("ERROR", fmt.Sprintf("failed to call /out endpoint: %v", resp.Error))
 		return resp.Error
