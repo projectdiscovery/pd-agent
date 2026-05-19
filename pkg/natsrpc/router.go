@@ -125,9 +125,10 @@ func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 		return
 	}
 
-	// Postgres jsonb rejects NUL bytes; handlers that surface raw protocol
-	// (nuclei UDP/DNS/code dumps, httpx titles from binary responses, etc.)
-	// can sneak it in. Strip at the boundary so no handler has to remember.
+	// Some downstream JSON stores reject NUL bytes; handlers that surface raw
+	// protocol bytes (nuclei UDP/DNS/code dumps, httpx titles from binary
+	// responses, etc.) can sneak them in. Strip at the boundary so no
+	// handler has to remember.
 	data = stripJSONNul(data, method)
 
 	slog.Info("NATS RPC: request completed", "method", method, "duration", duration)
