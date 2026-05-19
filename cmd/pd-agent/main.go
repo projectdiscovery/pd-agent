@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	json "github.com/json-iterator/go"
 	"io"
 	"log/slog"
 	"net"
@@ -24,6 +23,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	json "github.com/json-iterator/go"
 
 	"go.uber.org/automaxprocs/maxprocs"
 
@@ -1294,7 +1295,7 @@ func (r *Runner) processJetStreamEnumeration(ctx context.Context, work *natsrpc.
 						steps = strings.Split(enrichmentSteps, ",")
 					}
 				}
-				r.executeEnumeration(ctx, work.ScanID, chunk.ChunkID, steps, chunk.Targets)
+				r.executeEnumeration(ctx, work.ScanID, chunk.ChunkID, steps, chunk.Targets, work.EnumerationPorts)
 				return nil
 			},
 		)
@@ -1682,8 +1683,8 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 }
 
 // executeEnumeration runs an enumeration chunk through pkg.Run.
-func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string) {
-	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d", enumID, metaID, len(steps), len(assets)))
+func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string, ports string) {
+	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d, ports=%s", enumID, metaID, len(steps), len(assets), ports))
 
 	var outputDir string
 	if r.options.AgentOutput != "" {
@@ -1694,12 +1695,13 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 	task := &types.Task{
 		Tool: types.Nuclei,
 		Options: types.Options{
-			Hosts:         assets,
-			Steps:         steps,
-			Silent:        true,
-			EnumerationID: enumID,
-			TeamID:        r.options.TeamID,
-			Output:        outputDir,
+			Hosts:            assets,
+			Steps:            steps,
+			Silent:           true,
+			EnumerationID:    enumID,
+			TeamID:           r.options.TeamID,
+			Output:           outputDir,
+			EnumerationPorts: ports,
 		},
 		Id: metaID,
 	}

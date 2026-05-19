@@ -64,11 +64,16 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 		var hostsWithOpenPorts []string
 		if sliceutil.Contains(steps, "port_scan") {
 			serviceVersion := sliceutil.Contains(steps, "ports_service_scan")
+			ports := task.Options.EnumerationPorts
+			if ports == "" {
+				ports = "top-100"
+			}
 			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
 				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
 					OutputFile:        outputFile,
 					SkipHostDiscovery: true,
 					ServiceVersion:    serviceVersion,
+					Ports:             ports,
 				})
 				// naabu returns an error when no ports are found; downstream
 				// steps short-circuit on an empty hostsWithOpenPorts list.
