@@ -151,15 +151,16 @@ type RuntimeInfo struct {
 // work and chunks share a single group-level stream; consumers scope reads
 // via FilterSubject.
 type WorkMessage struct {
-	Type          string   `json:"type"`           // "scan" or "enumeration"
-	ScanID        string   `json:"scan_id"`        // scan_id or enumeration_id
-	ChunkSubject  string   `json:"chunk_subject"`  // subject filter for chunks
-	ChunkConsumer string   `json:"chunk_consumer"` // shared consumer name
-	ChunkCount    int      `json:"chunk_count,omitempty"`
-	Config        string   `json:"config,omitempty"`        // base64 scan configuration
-	ReportConfig  string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration
-	HistoryID     int64    `json:"history_id,omitempty"`
-	Steps         []string `json:"steps,omitempty"` // enumeration steps
+	Type             string   `json:"type"`           // "scan" or "enumeration"
+	ScanID           string   `json:"scan_id"`        // scan_id or enumeration_id
+	ChunkSubject     string   `json:"chunk_subject"`  // subject filter for chunks
+	ChunkConsumer    string   `json:"chunk_consumer"` // shared consumer name
+	ChunkCount       int      `json:"chunk_count,omitempty"`
+	Config           string   `json:"config,omitempty"`        // base64 scan configuration
+	ReportConfig     string   `json:"report_config,omitempty"` // base64 nuclei reporting (-rc) configuration
+	HistoryID        int64    `json:"history_id,omitempty"`
+	Steps            []string `json:"steps,omitempty"` // enumeration steps
+	EnumerationPorts string   `json:"enumeration_ports,omitempty"`
 }
 
 // ChunkMessage is a single unit of work decoded from the group stream.

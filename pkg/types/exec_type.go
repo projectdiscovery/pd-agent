@@ -68,6 +68,7 @@ type Options struct {
 	HistoryID    int64
 
 	// Enumeration
-	EnumerationID string
-	Steps         []string
+	EnumerationID    string
+	Steps            []string
+	EnumerationPorts string
 }
