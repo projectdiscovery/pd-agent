@@ -1,14 +1,15 @@
 package natsrpc
 
 import (
+	"bytes"
 	"context"
-	json "github.com/json-iterator/go"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	json "github.com/json-iterator/go"
 	"github.com/nats-io/nats.go"
 )
 
@@ -124,11 +125,27 @@ func (r *Router) dispatch(msg *nats.Msg, subjectPrefix string) {
 		return
 	}
 
+	// Some downstream JSON stores reject NUL bytes; handlers that surface raw
+	// protocol bytes (nuclei UDP/DNS/code dumps, httpx titles from binary
+	// responses, etc.) can sneak them in. Strip at the boundary so no
+	// handler has to remember.
+	data = stripJSONNul(data, method)
+
 	slog.Info("NATS RPC: request completed", "method", method, "duration", duration)
 	r.respond(msg, Response{
 		Status: "ok",
 		Data:   data,
 	})
+}
+
+var jsonNulEscape = []byte("\\u0000")
+
+func stripJSONNul(data []byte, method string) []byte {
+	if !bytes.Contains(data, jsonNulEscape) {
+		return data
+	}
+	slog.Warn("natsrpc: stripping NUL bytes from response", "method", method)
+	return bytes.ReplaceAll(data, jsonNulEscape, nil)
 }
 
 // respond marshals resp as JSON and sends it via msg.Respond.
