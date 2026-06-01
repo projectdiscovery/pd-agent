@@ -1,3 +1,4 @@
+version: 2
 env:
   - GO111MODULE=on
 before:
@@ -7,7 +8,7 @@ project_name: pd-agent
 builds:
   - id: pd-agent-linux
     ldflags:
-      - -s -w
+      - -s -w -X main.Version={{ .Tag }}
     binary: pd-agent
     env:
       - CGO_ENABLED=0
