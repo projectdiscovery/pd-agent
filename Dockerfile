@@ -4,6 +4,8 @@ RUN apt-get update && apt-get install -y git
 
 ENV CGO_ENABLED=0
 
+ARG VERSION=dev
+
 WORKDIR /build
 COPY go.mod go.sum ./
 RUN go mod download
@@ -14,7 +16,7 @@ COPY . .
 # ship. Mzack9999/gopacket dlopens libpcap at runtime via purego, so no cgo
 # or libpcap headers are needed at build time; features that need libpcap
 # warn-and-skip at runtime if the lib is missing.
-RUN GOOS=linux go build -trimpath -ldflags="-s -w" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
+RUN GOOS=linux go build -trimpath -ldflags="-s -w -X main.Version=${VERSION}" -o /go/bin/pd-agent ./cmd/pd-agent/main.go
 
 FROM --platform=linux/amd64 ubuntu:latest
 # Runtime dependencies: Chrome for nuclei/httpx headless screenshots, plus
