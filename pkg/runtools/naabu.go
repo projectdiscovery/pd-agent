@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/projectdiscovery/goflags"
@@ -19,7 +20,8 @@ import (
 type NaabuOptions struct {
 	// OutputFile receives one "host:port" line per open port. Required.
 	OutputFile string
-	// Ports is a comma-separated list (e.g. "80,443,8443"); empty uses naabu's top-1000.
+	// Ports is the control-plane port spec: "top-<N>" (e.g. "top-100"), "full",
+	// or a literal list/range ("80,443", "1-1000"). Empty uses naabu's default.
 	Ports             string
 	SkipHostDiscovery bool
 	// ServiceVersion enables nmap-service-probes scanning (no external nmap binary).
@@ -47,7 +49,6 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	var mu sync.Mutex
 	naabuOpts := &runner.Options{
 		Host:              goflags.StringSlice(hosts),
-		Ports:             opts.Ports,
 		SkipHostDiscovery: opts.SkipHostDiscovery,
 		ServiceVersion:    opts.ServiceVersion,
 		ServiceDiscovery:  opts.ServiceDiscovery,
@@ -69,6 +70,7 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 			}
 		},
 	}
+	setNaabuPorts(naabuOpts, opts.Ports)
 
 	r, err := runner.NewRunner(naabuOpts)
 	if err != nil {
@@ -81,4 +83,22 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 		return opts.OutputFile, fmt.Errorf("naabu enumeration: %w", err)
 	}
 	return opts.OutputFile, nil
+}
+
+// setNaabuPorts routes the control-plane port spec to the right naabu field.
+// "top-<N>" and "full" select naabu's top-ports list (-top-ports); a literal
+// list/range goes to -p. Passing "top-100" to Ports makes naabu read it as a
+// range and fail with "invalid port number: 'top'".
+func setNaabuPorts(o *runner.Options, spec string) {
+	spec = strings.TrimSpace(spec)
+	switch {
+	case spec == "":
+		// leave naabu's default
+	case strings.EqualFold(spec, "full"):
+		o.TopPorts = "full"
+	case strings.HasPrefix(spec, "top-"):
+		o.TopPorts = strings.TrimPrefix(spec, "top-")
+	default:
+		o.Ports = spec
+	}
 }
