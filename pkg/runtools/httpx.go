@@ -18,8 +18,7 @@ type HttpxOptions struct {
 	Concurrency int
 	Timeout     time.Duration
 	Screenshot  bool
-	// ScreenshotTimeout bounds each headless screenshot. First-time runs need
-	// longer because Chrome has to download.
+	// ScreenshotTimeout bounds each headless screenshot.
 	ScreenshotTimeout time.Duration
 	// DisableStdout suppresses httpx's per-result stdout writes.
 	DisableStdout    bool
@@ -56,6 +55,7 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 		Timeout:            int(opts.Timeout.Seconds()),
 		Screenshot:         opts.Screenshot,
 		ScreenshotTimeout:  opts.ScreenshotTimeout,
+		UseInstalledChrome: systemChromeAvailable(),
 		DisableStdout:      opts.DisableStdout,
 		StoreResponseDir:   opts.StoreResponseDir,
 		StatusCode:         true,

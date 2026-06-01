@@ -37,6 +37,12 @@ func EnsureAll() (failed []string) {
 func warmupBrowser() error {
 	slog.Info("prereq: validating browser (embedded httpx screenshot probe)...")
 
+	if path, ok := runtools.SystemChromePath(); ok {
+		slog.Info("prereq: using system browser", "path", path)
+	} else {
+		slog.Info("prereq: no system browser found, go-rod will download Chrome (amd64 only)")
+	}
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		_, _ = w.Write([]byte(`<html><body><h1>pd-agent warmup</h1></body></html>`))
@@ -70,15 +76,24 @@ func warmupBrowser() error {
 	})
 	if runErr != nil {
 		msg := runErr.Error()
-		if strings.Contains(msg, "cannot open shared object") ||
+		switch {
+		case strings.Contains(msg, "cannot open shared object") ||
 			strings.Contains(msg, "Failed to launch the browser") ||
-			strings.Contains(msg, "error while loading shared libraries") {
+			strings.Contains(msg, "error while loading shared libraries"):
 			slog.Error("prereq: browser validation failed, missing Chrome dependencies",
 				"error", msg,
 				"hint", "install Chrome deps: sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 libnspr4 libnss3 libxcomposite1 libxfixes3 libxshmfence1 libxkbcommon0")
 			return fmt.Errorf("missing Chrome shared libraries")
+		case strings.Contains(msg, "browser is not installed") ||
+			strings.Contains(msg, "find a browser binary") ||
+			strings.Contains(msg, "find a valid URL to download"):
+			slog.Error("prereq: browser validation failed, no chrome/chromium found",
+				"error", msg,
+				"hint", "install a system browser (e.g. sudo apt-get install -y chromium); pd-agent only auto-downloads Chrome on amd64, so arm64 hosts must have one installed")
+			return fmt.Errorf("no chrome/chromium browser available")
+		default:
+			slog.Warn("prereq: browser validation httpx probe had non-fatal error", "error", msg)
 		}
-		slog.Warn("prereq: browser validation httpx probe had non-fatal error", "error", msg)
 	}
 
 	if shotPath := readFirstScreenshotPath(tmpPath); shotPath != "" {
@@ -89,7 +104,7 @@ func warmupBrowser() error {
 	}
 
 	slog.Error("prereq: browser validation failed, screenshot was not written",
-		"hint", "Chrome may need more time on first launch (it downloads ~150MB); rerun, or pre-install Chrome via go-rod's manager")
+		"hint", "ensure a system chromium/chrome is installed and on PATH (the docker image ships /usr/bin/chromium)")
 	return fmt.Errorf("screenshot not produced")
 }
 

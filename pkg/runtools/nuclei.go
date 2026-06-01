@@ -97,7 +97,7 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		}))
 	}
 	if opts.Headless {
-		sdkOpts = append(sdkOpts, nuclei.EnableHeadlessWithOpts(nil))
+		sdkOpts = append(sdkOpts, nuclei.EnableHeadlessWithOpts(&nuclei.HeadlessOpts{UseChrome: systemChromeAvailable()}))
 	}
 	if opts.MatcherStatus {
 		sdkOpts = append(sdkOpts, nuclei.EnableMatcherStatus())
