@@ -16,7 +16,7 @@
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PDCP_AGENT_NAME` | hostname | Display name in the cloud UI. |
-| `PDCP_AGENT_NETWORK` | `default` | Network name the agent lives in. Scans from the cloud are routed to agents by network. |
+| `PDCP_AGENT_NETWORK` | **required** | Network name the agent lives in. Scans from the cloud are routed to agents by network, so every agent must set this. |
 | `AGENT_NETWORK` | — | Legacy alias for `PDCP_AGENT_NETWORK`. `PDCP_AGENT_NETWORK` wins if both are set. |
 | `PDCP_AGENT_OUTPUT` | — (temp dir) | Folder where the agent stashes per-chunk scan output before uploading. Each chunk gets its own subdirectory: `<PDCP_AGENT_OUTPUT>/<chunk-id>/`. Files are deleted after upload unless `PDCP_KEEP_OUTPUT_FILES=true`. If unset, the embedded scanners write to the OS temp directory. |
 
@@ -83,7 +83,7 @@ Every flag has an equivalent env var. Use whichever fits your deployment style �
 | `-verbose` | | `PDCP_VERBOSE` | Verbose logging. |
 | `-keep-output-files` | | `PDCP_KEEP_OUTPUT_FILES` | Keep output files after processing. |
 | `-agent-output` | | `PDCP_AGENT_OUTPUT` | Output folder for per-chunk scan files. |
-| `-agent-network` | `-an` | `PDCP_AGENT_NETWORK` | Network the agent belongs to. Scans are routed by this name. |
+| `-agent-network` | `-an` | `PDCP_AGENT_NETWORK` | **Required.** Network the agent belongs to. Scans are routed by this name. |
 | `-agent-name` | | `PDCP_AGENT_NAME` | Display name. |
 | `-agent-id` | | — | Pin the agent ID (auto-generated and persisted across self-updates if empty). |
 | `-chunk-parallelism` | `-c` | `PDCP_CHUNK_PARALLELISM` | Chunks per scan in parallel. |

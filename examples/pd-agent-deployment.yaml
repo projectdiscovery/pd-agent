@@ -62,13 +62,14 @@ spec:
         fsGroup: 1000
       containers:
       - name: pd-agent
-        image: projectdiscovery/pd-agent:latest
+        image: ghcr.io/projectdiscovery/pd-agent:latest
         securityContext:
           capabilities:
             add: ["NET_RAW", "NET_ADMIN"]
         imagePullPolicy: Always
         args:
-          - -agent-networks
+          # Required: network name scans are routed to
+          - -agent-network
           - kube-prod-cluster
         env:
           # Sensitive data from Secret

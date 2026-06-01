@@ -24,7 +24,7 @@ docker run -d --name pd-agent \
   --network host --cap-add NET_RAW --cap-add NET_ADMIN \
   -e PDCP_API_KEY=your-api-key \
   -e PDCP_TEAM_ID=your-team-id \
-  projectdiscovery/pd-agent:latest \
+  ghcr.io/projectdiscovery/pd-agent:latest \
   -agent-network prod-vpc
 ```
 
@@ -32,7 +32,7 @@ docker run -d --name pd-agent \
 - `NET_RAW` / `NET_ADMIN` enable `naabu` SYN scanning. Drop them if you only need full-connect scans.
 - Image ships with Chrome (for `nuclei` / `httpx` headless screenshots) and trusts the system CA bundle.
 
-Image: <https://hub.docker.com/r/projectdiscovery/pd-agent>
+Image: <https://github.com/projectdiscovery/pd-agent/pkgs/container/pd-agent>
 
 ---
 
@@ -55,7 +55,7 @@ kubectl -n pd-agent logs -l app=pd-agent -f
 
 Before applying, open the manifest and adjust:
 
-- `args:` — set `-agent-network` to the name you want to route scans to (e.g. the cluster identifier).
+- `args:` — set the required `-agent-network` to the name you want to route scans to (e.g. the cluster identifier).
 - `replicas:` — start with 1, scale based on [`docs/scaling.md`](scaling.md).
 - `resources:` — defaults are fine for ≤100 hosts; large scans benefit from more memory.
 
@@ -82,7 +82,7 @@ sudo systemctl enable --now pd-agent
 sudo journalctl -u pd-agent -f
 ```
 
-Unit file: [`examples/pd-agent.service`](../examples/pd-agent.service). Replace the placeholder env vars before enabling.
+Unit file: [`examples/pd-agent.service`](../examples/pd-agent.service). Customize the placeholder vars for your setup before enabling: `PDCP_API_KEY`, `PDCP_TEAM_ID`, and `PDCP_AGENT_NETWORK` (required; the network scans are routed to).
 
 ---
 
@@ -106,7 +106,7 @@ launchctl load ~/Library/LaunchAgents/com.projectdiscovery.pd-agent.plist
 tail -f ~/.pd-agent/logs/stdout.log
 ```
 
-Plist: [`examples/com.projectdiscovery.pd-agent.plist`](../examples/com.projectdiscovery.pd-agent.plist).
+Plist: [`examples/com.projectdiscovery.pd-agent.plist`](../examples/com.projectdiscovery.pd-agent.plist). Customize the placeholders for your setup: the `PDCP_*` credentials and the required `-agent-network` value (the network scans are routed to).
 
 ---
 
