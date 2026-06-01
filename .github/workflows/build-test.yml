@@ -5,6 +5,7 @@ on:
     paths:
       - '**.go'
       - '**.mod'
+      - 'Dockerfile'
   workflow_dispatch:
 
 permissions:
@@ -47,3 +48,27 @@ jobs:
       - name: Race Condition Tests
         run: go build -race .
         working-directory: cmd/pd-agent/
+
+  build-image:
+    name: Build Image
+    needs: [lint]
+    runs-on: ubuntu-latest-16-cores
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+          build-args: |
+            VERSION=pr-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
