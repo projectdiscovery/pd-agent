@@ -9,33 +9,6 @@ cmd/fleetx/fleetx
 cmd/pd-agent/pd-agent
 output/*
 
-# Local runtime and scratch
-.claude/
-REVIEW.md
-chrome-ps-aux.txt
-ubisoft.txt
-
-# SQLite runtime files
-pd-agent-*.db
-pd-agent-*.db-shm
-pd-agent-*.db-wal
-
-# Local binaries at repo root
-/pd-agent-linux-amd64
-/pd-agent-linux-arm64
-/pd-agent-windows-amd64.exe
-/interactsh-debug
-
-# Scan logs
-scan-*.log
-
-# Local helper scripts at repo root
-/bench-create.sh
-/bench-create-multi.sh
-/cidr-ip.sh
-/start.sh
-/start-mac.sh
-/ssh-config
 
 # Local build artifacts
 /build/
@@ -48,3 +21,6 @@ scan-*.log
 !/docs/configuration.md
 /pd-agent-deployment.yaml
 /pd-agent-deployment-prod.yaml
+
+local/
+.claude/
