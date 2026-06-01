@@ -8,6 +8,9 @@ on:
       - '**.yml'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   release-test-mac:
     runs-on: macos-latest
