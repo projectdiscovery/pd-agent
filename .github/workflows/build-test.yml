@@ -40,9 +40,7 @@ jobs:
       - name: Test
         run: go test ./...
         working-directory: .
-        env:
-          PDCP_API_KEY: "${{ secrets.PDCP_API_KEY }}"
-          
+
       - name: Race Condition Tests
         run: go build -race .
         working-directory: cmd/pd-agent/
