@@ -33,7 +33,7 @@ Nuclei, httpx, naabu, dnsx, and tlsx are all built into the agent — there's no
      --network host --cap-add NET_RAW --cap-add NET_ADMIN \
      -e PDCP_API_KEY=your-api-key \
      -e PDCP_TEAM_ID=your-team-id \
-     projectdiscovery/pd-agent:latest \
+     ghcr.io/projectdiscovery/pd-agent:latest \
      -agent-network prod-vpc
    ```
 

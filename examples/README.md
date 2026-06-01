@@ -61,8 +61,7 @@ The deployment manifest includes everything needed: namespace, service account, 
 
 Edit `pd-agent-deployment.yaml` to update:
 - **Namespace**: Change `pd-agent` to your desired namespace (update in all resources)
-- **Agent tags** (line 72): Change `production` to your desired tag
-- **Agent networks** (line 74): Change `kube-prod-cluster` to your cluster identifier
+- **Agent network** (line 72, required): Change `kube-prod-cluster` to the network name you want to route scans to
 - **Replicas**: Change `1` to your desired number of replicas
 
 **2. Create secret:**

@@ -6,9 +6,11 @@ After=network.target
 Type=simple
 User=pd-agent
 Group=pd-agent
+# Customize these for your setup:
 Environment="PDCP_API_KEY=your-api-key"
 Environment="PDCP_TEAM_ID=your-team-id"
-Environment="PDCP_AGENT_TAGS=production"
+# Required: network name scans are routed to
+Environment="PDCP_AGENT_NETWORK=production"
 ExecStart=/usr/local/bin/pd-agent -agent-output /var/lib/pd-agent/output -verbose
 Restart=always
 RestartSec=10
