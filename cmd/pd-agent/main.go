@@ -56,13 +56,15 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ensureNucleiTemplates installs or updates nuclei templates. Stale templates
-// cause "file not found" errors when the cloud sends paths missing locally.
+// ensureNucleiTemplates installs or updates nuclei templates, exiting the
+// process on failure. Without a complete template set the agent would emit
+// "file not found" errors mid-scan for every cloud-sent path missing locally,
+// so a failed install/update is fatal rather than a silent degrade.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
-		slog.Warn("Could not determine nuclei template directory, skipping template download")
-		return
+		slog.Error("Could not determine nuclei template directory")
+		os.Exit(1)
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
@@ -73,7 +75,7 @@ func ensureNucleiTemplates() {
 
 	if err := runtools.UpdateNucleiTemplates(); err != nil {
 		slog.Error("Failed to update nuclei templates", "error", err)
-		return
+		os.Exit(1)
 	}
 	slog.Info("Nuclei templates are up to date", "path", templateDir)
 }
