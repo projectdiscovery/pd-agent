@@ -80,6 +80,24 @@ func ensureNucleiTemplates() {
 	slog.Info("Nuclei templates are up to date", "path", templateDir)
 }
 
+// templateUpdateMu serializes template refreshes so concurrent scans
+// (ScanParallelism > 1) never rewrite the shared template dir at once.
+var templateUpdateMu sync.Mutex
+
+// refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
+// run, so a long-lived agent picks up releases without a restart. Non-fatal:
+// boot already guaranteed a usable set, so a transient update failure logs and
+// proceeds on the existing templates rather than dropping the scan.
+func refreshTemplatesForScan(scanID string) {
+	templateUpdateMu.Lock()
+	defer templateUpdateMu.Unlock()
+
+	if err := runtools.UpdateNucleiTemplates(); err != nil {
+		slog.Warn("Failed to refresh nuclei templates before scan, using existing set",
+			"scan_id", scanID, "error", err)
+	}
+}
+
 // Version is set at build time via -ldflags "-X main.Version=v1.0.0".
 var Version = "dev"
 
@@ -1223,6 +1241,8 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 	if r.agentDB != nil {
 		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
 	}
+
+	refreshTemplatesForScan(work.ScanID)
 
 	err := func() error {
 		creds := r.GetNATSCredentials()
