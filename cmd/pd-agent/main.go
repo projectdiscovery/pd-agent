@@ -56,13 +56,15 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ensureNucleiTemplates installs or updates nuclei templates. Stale templates
-// cause "file not found" errors when the cloud sends paths missing locally.
+// ensureNucleiTemplates installs or updates nuclei templates, exiting the
+// process on failure. Without a complete template set the agent would emit
+// "file not found" errors mid-scan for every cloud-sent path missing locally,
+// so a failed install/update is fatal rather than a silent degrade.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
-		slog.Warn("Could not determine nuclei template directory, skipping template download")
-		return
+		slog.Error("Could not determine nuclei template directory")
+		os.Exit(1)
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
@@ -73,9 +75,27 @@ func ensureNucleiTemplates() {
 
 	if err := runtools.UpdateNucleiTemplates(); err != nil {
 		slog.Error("Failed to update nuclei templates", "error", err)
-		return
+		os.Exit(1)
 	}
 	slog.Info("Nuclei templates are up to date", "path", templateDir)
+}
+
+// templateUpdateMu serializes template refreshes so concurrent scans
+// (ScanParallelism > 1) never rewrite the shared template dir at once.
+var templateUpdateMu sync.Mutex
+
+// refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
+// run, so a long-lived agent picks up releases without a restart. Non-fatal:
+// boot already guaranteed a usable set, so a transient update failure logs and
+// proceeds on the existing templates rather than dropping the scan.
+func refreshTemplatesForScan(scanID string) {
+	templateUpdateMu.Lock()
+	defer templateUpdateMu.Unlock()
+
+	if err := runtools.UpdateNucleiTemplates(); err != nil {
+		slog.Warn("Failed to refresh nuclei templates before scan, using existing set",
+			"scan_id", scanID, "error", err)
+	}
 }
 
 // Version is set at build time via -ldflags "-X main.Version=v1.0.0".
@@ -1222,6 +1242,8 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
 	}
 
+	refreshTemplatesForScan(work.ScanID)
+
 	err := func() error {
 		creds := r.GetNATSCredentials()
 		chunkConsumer := work.ChunkConsumer
@@ -1881,13 +1903,14 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		r.natsCreds = agentInResp.Nats
 		r.natsCredsMu.Unlock()
 
+		durlAvailable := agentInResp.Nats.DebugUploadURL != ""
 		if prev == nil {
-			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s)",
-				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s, debug_upload_url_available=%t)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339), durlAvailable))
 			r.onNATSCredentialsReceived(true)
 		} else if !prev.ExpiresAt.Equal(agentInResp.Nats.ExpiresAt) {
-			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s)",
-				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s, debug_upload_url_available=%t)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339), durlAvailable))
 			r.onNATSCredentialsReceived(false)
 		}
 	}
@@ -2459,7 +2482,13 @@ func (r *Runner) uploadDebugDB() {
 	creds := r.natsCreds
 	r.natsCredsMu.RUnlock()
 
-	if creds == nil || creds.DebugUploadURL == "" {
+	var durl string
+	if creds != nil {
+		durl = creds.DebugUploadURL
+	}
+	slog.Info("agentdb: debug upload URL availability", "available", durl != "")
+
+	if durl == "" {
 		slog.Debug("agentdb: no debug upload URL, skipping DB upload")
 		return
 	}
@@ -2495,7 +2524,7 @@ func (r *Runner) uploadDebugDB() {
 	uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, creds.DebugUploadURL, f)
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, durl, f)
 	if err != nil {
 		slog.Warn("agentdb: failed to create upload request", "error", err)
 		return
