@@ -1903,13 +1903,14 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		r.natsCreds = agentInResp.Nats
 		r.natsCredsMu.Unlock()
 
+		durlAvailable := agentInResp.Nats.DebugUploadURL != ""
 		if prev == nil {
-			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s)",
-				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("received NATS credentials (expires_at=%s, debug_upload_url_available=%t)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339), durlAvailable))
 			r.onNATSCredentialsReceived(true)
 		} else if !prev.ExpiresAt.Equal(agentInResp.Nats.ExpiresAt) {
-			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s)",
-				agentInResp.Nats.ExpiresAt.Format(time.RFC3339)))
+			r.logHelper("INFO", fmt.Sprintf("NATS credentials refreshed (expires_at=%s, debug_upload_url_available=%t)",
+				agentInResp.Nats.ExpiresAt.Format(time.RFC3339), durlAvailable))
 			r.onNATSCredentialsReceived(false)
 		}
 	}
@@ -2481,7 +2482,13 @@ func (r *Runner) uploadDebugDB() {
 	creds := r.natsCreds
 	r.natsCredsMu.RUnlock()
 
-	if creds == nil || creds.DebugUploadURL == "" {
+	var durl string
+	if creds != nil {
+		durl = creds.DebugUploadURL
+	}
+	slog.Info("agentdb: debug upload URL availability", "available", durl != "")
+
+	if durl == "" {
 		slog.Debug("agentdb: no debug upload URL, skipping DB upload")
 		return
 	}
@@ -2517,7 +2524,7 @@ func (r *Runner) uploadDebugDB() {
 	uploadCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, creds.DebugUploadURL, f)
+	req, err := http.NewRequestWithContext(uploadCtx, http.MethodPut, durl, f)
 	if err != nil {
 		slog.Warn("agentdb: failed to create upload request", "error", err)
 		return
