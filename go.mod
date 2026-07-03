@@ -23,7 +23,7 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
 	go.uber.org/automaxprocs v1.6.0
-	golang.org/x/sys v0.43.0
+	golang.org/x/sys v0.45.0
 	google.golang.org/protobuf v1.36.11
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.2
@@ -415,14 +415,14 @@ require (
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	goftp.io/server/v2 v2.0.1 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.50.0 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
 	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/net v0.53.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/term v0.42.0 // indirect
-	golang.org/x/text v0.36.0 // indirect
+	golang.org/x/term v0.43.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6 // indirect
