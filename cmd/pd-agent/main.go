@@ -47,6 +47,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg/validate"
 	fileutil "github.com/projectdiscovery/utils/file"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
@@ -341,9 +342,11 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	if r.options.AgentName == "" {
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			r.options.AgentName = hostname
-		} else {
+		// Hostnames routinely break the name rules (".local" suffix, spaces): coerce, never reject.
+		if hostname, err := os.Hostname(); err == nil {
+			r.options.AgentName = validate.SanitizeName(hostname)
+		}
+		if r.options.AgentName == "" {
 			r.options.AgentName = r.options.AgentId
 		}
 	}
@@ -1827,12 +1830,21 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		} else {
 			agentInfo := response.Agent
 			if agentInfo.AgentNetwork != "" && agentInfo.AgentNetwork != r.options.AgentNetwork {
-				r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.AgentNetwork, r.options.AgentNetwork))
-				r.options.AgentNetwork = agentInfo.AgentNetwork
+				// Keep the local value rather than kill a running agent over a bad response.
+				if serverNetwork, err := validate.Name("agent_network", agentInfo.AgentNetwork); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent_network from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), serverNetwork, r.options.AgentNetwork))
+					r.options.AgentNetwork = serverNetwork
+				}
 			}
 			if agentInfo.Name != "" && agentInfo.Name != r.options.AgentName {
-				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.Name, r.options.AgentName))
-				r.options.AgentName = agentInfo.Name
+				if serverName, err := validate.Name("name", agentInfo.Name); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent name from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), serverName, r.options.AgentName))
+					r.options.AgentName = serverName
+				}
 			}
 			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", agentInfo.LastUpdate.Format(time.RFC3339)))
 		}
@@ -2357,6 +2369,22 @@ func parseOptions() *Options {
 
 	if options.AgentNetwork == "" {
 		options.AgentNetwork = "default"
+	}
+	agentNetwork, err := validate.Name("agent-network", options.AgentNetwork)
+	if err != nil {
+		slog.Error("invalid agent network", "error", err)
+		os.Exit(1)
+	}
+	options.AgentNetwork = agentNetwork
+
+	// An empty name is derived from the hostname later; only explicit input is checked here.
+	if options.AgentName != "" {
+		agentName, err := validate.Name("agent-name", options.AgentName)
+		if err != nil {
+			slog.Error("invalid agent name", "error", err)
+			os.Exit(1)
+		}
+		options.AgentName = agentName
 	}
 
 	// 0 = auto-detect for chunks.
