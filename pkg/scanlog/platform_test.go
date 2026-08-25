@@ -1,4 +1,4 @@
-package pkg
+package scanlog
 
 import (
 	"compress/gzip"
@@ -15,8 +15,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-
-	"github.com/projectdiscovery/pd-agent/pkg/types"
 )
 
 const testScanLogLine = `{"template-id":"test","host":"example.com","matched-at":"example.com:443"}` + "\n"
@@ -121,15 +119,17 @@ func writeOutput(t *testing.T, content string) string {
 	return path
 }
 
-func testTask() *types.Task {
-	return &types.Task{
-		Id: "chunk-abc123",
-		Options: types.Options{
-			TeamID:    "team-1",
-			ScanID:    "scan-9",
-			HistoryID: 42,
-		},
+func testMeta() Meta {
+	return Meta{
+		TeamID:    "team-1",
+		ScanID:    "scan-9",
+		ChunkID:   "chunk-abc123",
+		HistoryID: 42,
 	}
+}
+
+func uploadToPlatform(ctx context.Context, outputFile string) error {
+	return Upload(ctx, []Uploader{NewPlatformUploader()}, testMeta(), outputFile)
 }
 
 func gunzip(t *testing.T, b []byte) string {
@@ -146,12 +146,11 @@ func gunzip(t *testing.T, b []byte) string {
 	return string(out)
 }
 
-func TestUploadNucleiOutputViaSignedURL(t *testing.T) {
+func TestPlatformUploader(t *testing.T) {
 	srv := newScanLogServer(t)
 	outputFile := writeOutput(t, testScanLogLine)
-	task := testTask()
 
-	if err := uploadNucleiOutputViaSignedURL(context.Background(), task, outputFile); err != nil {
+	if err := uploadToPlatform(context.Background(), outputFile); err != nil {
 		t.Fatalf("upload: %v", err)
 	}
 
@@ -219,35 +218,7 @@ func TestUploadNucleiOutputViaSignedURL(t *testing.T) {
 	}
 }
 
-func TestUploadNucleiOutputViaSignedURLEmptyFile(t *testing.T) {
-	srv := newScanLogServer(t)
-	outputFile := writeOutput(t, "")
-
-	if err := uploadNucleiOutputViaSignedURL(context.Background(), testTask(), outputFile); err != nil {
-		t.Fatalf("upload: %v", err)
-	}
-	if n := len(srv.presigns()); n != 0 {
-		t.Errorf("presign requests = %d, want 0 for an empty output", n)
-	}
-	if n := len(srv.puts()); n != 0 {
-		t.Errorf("PUT requests = %d, want 0 for an empty output", n)
-	}
-}
-
-func TestUploadNucleiOutputViaSignedURLMissingFile(t *testing.T) {
-	newScanLogServer(t)
-	missing := filepath.Join(t.TempDir(), "absent.jsonl")
-
-	err := uploadNucleiOutputViaSignedURL(context.Background(), testTask(), missing)
-	if err == nil {
-		t.Fatal("expected an error for a missing output file")
-	}
-	if !strings.Contains(err.Error(), "stat output") {
-		t.Errorf("error = %v, want it to mention stat output", err)
-	}
-}
-
-func TestUploadNucleiOutputViaSignedURLPresignFailures(t *testing.T) {
+func TestPlatformUploaderPresignFailures(t *testing.T) {
 	tests := []struct {
 		name     string
 		response func(putURL string) (int, any)
@@ -290,7 +261,7 @@ func TestUploadNucleiOutputViaSignedURLPresignFailures(t *testing.T) {
 			srv.response = tt.response
 			outputFile := writeOutput(t, testScanLogLine)
 
-			err := uploadNucleiOutputViaSignedURL(context.Background(), testTask(), outputFile)
+			err := uploadToPlatform(context.Background(), outputFile)
 			if err == nil {
 				t.Fatalf("expected an error containing %q", tt.wantErr)
 			}
@@ -304,7 +275,7 @@ func TestUploadNucleiOutputViaSignedURLPresignFailures(t *testing.T) {
 	}
 }
 
-func TestUploadNucleiOutputViaSignedURLPutStatus(t *testing.T) {
+func TestPlatformUploaderPutStatus(t *testing.T) {
 	tests := []struct {
 		name    string
 		code    int
@@ -324,7 +295,7 @@ func TestUploadNucleiOutputViaSignedURLPutStatus(t *testing.T) {
 			srv.putBody = tt.body
 			outputFile := writeOutput(t, testScanLogLine)
 
-			err := uploadNucleiOutputViaSignedURL(context.Background(), testTask(), outputFile)
+			err := uploadToPlatform(context.Background(), outputFile)
 			switch {
 			case tt.wantErr == "" && err != nil:
 				t.Fatalf("upload: %v", err)
@@ -338,7 +309,7 @@ func TestUploadNucleiOutputViaSignedURLPutStatus(t *testing.T) {
 }
 
 // A transport failure must not put the signed URL's HMAC query into the error.
-func TestUploadNucleiOutputViaSignedURLDoesNotLeakSignature(t *testing.T) {
+func TestPlatformUploaderDoesNotLeakSignature(t *testing.T) {
 	const signature = "0123456789abcdefdeadbeef"
 
 	srv := newScanLogServer(t)
@@ -351,7 +322,7 @@ func TestUploadNucleiOutputViaSignedURLDoesNotLeakSignature(t *testing.T) {
 	}
 	outputFile := writeOutput(t, testScanLogLine)
 
-	err := uploadNucleiOutputViaSignedURL(context.Background(), testTask(), outputFile)
+	err := uploadToPlatform(context.Background(), outputFile)
 	if err == nil {
 		t.Fatal("expected a transport error")
 	}
@@ -407,47 +378,5 @@ func TestStripSignedURL(t *testing.T) {
 				t.Errorf("stripSignedURL() = %q, must not contain %q", got, tt.notWant)
 			}
 		})
-	}
-}
-
-func TestGzipFile(t *testing.T) {
-	dir := t.TempDir()
-	src := filepath.Join(dir, "in.jsonl")
-	dst := filepath.Join(dir, "out.gz")
-
-	content := strings.Repeat(testScanLogLine, 200)
-	if err := os.WriteFile(src, []byte(content), 0o600); err != nil {
-		t.Fatalf("write src: %v", err)
-	}
-
-	size, err := gzipFile(src, dst)
-	if err != nil {
-		t.Fatalf("gzipFile: %v", err)
-	}
-
-	st, err := os.Stat(dst)
-	if err != nil {
-		t.Fatalf("stat dst: %v", err)
-	}
-	if size != st.Size() {
-		t.Errorf("returned size = %d, want %d", size, st.Size())
-	}
-	if size >= int64(len(content)) {
-		t.Errorf("gz size %d not smaller than raw %d", size, len(content))
-	}
-
-	raw, err := os.ReadFile(dst)
-	if err != nil {
-		t.Fatalf("read dst: %v", err)
-	}
-	if got := gunzip(t, raw); got != content {
-		t.Error("round-tripped content differs from source")
-	}
-}
-
-func TestGzipFileMissingSource(t *testing.T) {
-	dir := t.TempDir()
-	if _, err := gzipFile(filepath.Join(dir, "absent"), filepath.Join(dir, "out.gz")); err == nil {
-		t.Fatal("expected an error for a missing source")
 	}
 }
