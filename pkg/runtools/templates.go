@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/disk"
 	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
 	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
@@ -181,25 +182,48 @@ func LastKnownTemplateTag() (string, time.Time) {
 	return latestTag, latestTagAt
 }
 
-// MissingTemplates returns the repo-relative paths absent from the template
-// directory. Absolute paths are skipped: private templates are materialized
-// into a per-chunk temp dir and are not part of the public set.
+// MissingTemplates returns the requested definitions nuclei cannot resolve. It
+// defers to nuclei's own resolver rather than stat'ing paths: the resolver globs,
+// walks directories and resolves relative paths, so a stat loop reports a glob
+// entry as missing while the scan expands it happily.
 func MissingTemplates(required []string) []string {
 	dir := TemplateDir()
-	if dir == "" {
+	if dir == "" || len(required) == 0 {
 		return nil
 	}
 
-	var missing []string
-	for _, path := range required {
-		if path == "" || filepath.IsAbs(path) {
+	_, errs := disk.NewCatalog(dir).GetTemplatesPath(required)
+	if len(errs) == 0 {
+		return nil
+	}
+
+	// Walk the input, not the map: map order is random and these paths reach
+	// logs and error messages.
+	missing := make([]string, 0, len(errs))
+	seen := make(map[string]struct{}, len(errs))
+	for _, def := range required {
+		if _, bad := errs[def]; !bad {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(dir, path)); err != nil {
-			missing = append(missing, path)
+		if _, dup := seen[def]; dup {
+			continue
 		}
+		seen[def] = struct{}{}
+		missing = append(missing, def)
 	}
 	return missing
+}
+
+// AnyPublic reports whether any definition belongs to the shared template
+// directory. Private templates are absolute paths in a per-chunk temp dir, and
+// reinstalling the public set cannot conjure one of those.
+func AnyPublic(definitions []string) bool {
+	for _, def := range definitions {
+		if def != "" && !filepath.IsAbs(def) {
+			return true
+		}
+	}
+	return false
 }
 
 // safeToReplace rejects template directories that would make removal

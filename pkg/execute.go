@@ -296,14 +296,16 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// silently, reporting a clean scan that never ran those checks. The repair is
 	// queued for the next scan rather than run here.
 	if missing := runtools.VerifyTemplatesFor(opts.Templates); len(missing) > 0 {
-		runtools.RequestTemplateRepair(fmt.Sprintf("%d templates missing on scan %s", len(missing), task.Options.ScanID))
+		if runtools.AnyPublic(missing) {
+			runtools.RequestTemplateRepair(fmt.Sprintf("%d templates unresolved on scan %s", len(missing), task.Options.ScanID))
+		}
 
 		shown := missing
 		if len(shown) > 3 {
 			shown = shown[:3]
 		}
 		if !envconfig.AllowMissingTemplates() {
-			return nil, nil, fmt.Errorf("nuclei scan: %d of %d requested templates missing from %s (e.g. %v); a reinstall is queued for the next scan, or set %s=true to scan with an incomplete set",
+			return nil, nil, fmt.Errorf("nuclei scan: %d of %d requested templates could not be resolved under %s (e.g. %v); a reinstall is queued for the next scan, or set %s=true to scan with an incomplete set",
 				len(missing), len(opts.Templates), runtools.TemplateDir(), shown, envconfig.KeyAllowMissingTemplates)
 		}
 		slog.Error("nuclei scan: scanning with an incomplete template set",

@@ -70,36 +70,6 @@ func writeTemplate(t *testing.T, dir, rel string) {
 	}
 }
 
-func TestMissingTemplates(t *testing.T) {
-	dir := stubTemplates(t, "v10.4.8")
-	writeTemplate(t, dir, "http/cves/2026/CVE-2026-1.yaml")
-
-	absent := filepath.Join(t.TempDir(), "private", "priv.yaml")
-	writeTemplate(t, filepath.Dir(absent), "priv.yaml")
-
-	required := []string{
-		"http/cves/2026/CVE-2026-1.yaml", // present
-		"http/cves/2026/CVE-2026-2.yaml", // missing
-		"http/cves/2025/CVE-2025-9.yaml", // missing
-		absent,                           // absolute: private template, not ours to verify
-		"",                               // ignored
-	}
-
-	got := MissingTemplates(required)
-	want := []string{"http/cves/2026/CVE-2026-2.yaml", "http/cves/2025/CVE-2025-9.yaml"}
-	if strings.Join(got, ",") != strings.Join(want, ",") {
-		t.Errorf("MissingTemplates() = %v, want %v", got, want)
-	}
-}
-
-// A private template living outside the public dir must never trigger a repair.
-func TestMissingTemplatesIgnoresAbsolutePaths(t *testing.T) {
-	stubTemplates(t, "v10.4.8")
-	if got := MissingTemplates([]string{"/tmp/pd-agent-priv-x/my-check.yaml"}); got != nil {
-		t.Errorf("MissingTemplates() = %v, want nil for absolute paths", got)
-	}
-}
-
 func TestLatestTemplateTagCaches(t *testing.T) {
 	stubTemplates(t, "v10.4.5")
 
@@ -779,5 +749,69 @@ func TestRepairWaitsForAnInFlightTemplateLoad(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("repair never completed after the load finished")
+	}
+}
+
+// Resolution must match what the scan will actually do, so it defers to nuclei's
+// resolver instead of stat'ing paths.
+func TestMissingTemplatesUsesNucleiResolver(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	writeTemplate(t, dir, "http/cves/2024/CVE-2024-1.yaml")
+	writeTemplate(t, dir, "http/cves/2024/CVE-2024-2.yaml")
+
+	tests := []struct {
+		name  string
+		input string
+		want  bool // reported missing
+	}{
+		{name: "literal present", input: "http/cves/2024/CVE-2024-1.yaml", want: false},
+		{name: "literal absent", input: "http/cves/2024/CVE-2024-9.yaml", want: true},
+		// Regression: the stat loop called this missing, hard-failing the chunk
+		// and queueing a reinstall, while nuclei expands it to two templates.
+		{name: "glob that matches", input: "http/cves/2024/*.yaml", want: false},
+		{name: "glob with no match", input: "http/cves/2099/*.yaml", want: true},
+		{name: "directory", input: "http/cves/2024", want: false},
+		{name: "extensionless", input: "http/cves/2024/CVE-2024-1", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := len(MissingTemplates([]string{tt.input})) > 0
+			if got != tt.want {
+				t.Errorf("MissingTemplates(%q) missing = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMissingTemplatesPreservesInputOrderAndDedupes(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	writeTemplate(t, dir, "http/present.yaml")
+
+	got := MissingTemplates([]string{"b.yaml", "http/present.yaml", "a.yaml", "b.yaml"})
+	if strings.Join(got, ",") != "b.yaml,a.yaml" {
+		t.Errorf("MissingTemplates() = %v, want [b.yaml a.yaml]", got)
+	}
+}
+
+// Reinstalling the public set cannot produce a private template, so an absent
+// one must not queue a repair even though it is reported.
+func TestAnyPublic(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  bool
+	}{
+		{name: "relative", input: []string{"http/x.yaml"}, want: true},
+		{name: "absolute only", input: []string{"/tmp/pd-agent-priv-x/my-check.yaml"}, want: false},
+		{name: "mixed", input: []string{"/tmp/priv/a.yaml", "http/x.yaml"}, want: true},
+		{name: "empty", input: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AnyPublic(tt.input); got != tt.want {
+				t.Errorf("AnyPublic(%v) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
 	}
 }
