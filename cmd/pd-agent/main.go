@@ -1815,6 +1815,23 @@ func (r *Runner) In(ctx context.Context) error {
 
 var isRegistered bool
 
+// heartbeatQuery builds the /in query string. Every heartbeat carries the
+// running version so the platform can record which build an agent is on
+// without broadcasting a health-check RPC to ask.
+func heartbeatQuery(options *Options, version string, networkSubnets []string) url.Values {
+	q := url.Values{}
+	q.Set("os", runtime.GOOS)
+	q.Set("arch", runtime.GOARCH)
+	q.Set("id", options.AgentId)
+	q.Set("name", options.AgentName)
+	q.Set("agent_network", options.AgentNetwork)
+	q.Set("version", version)
+	if len(networkSubnets) > 0 {
+		q.Set("network_subnets", strings.Join(networkSubnets, ","))
+	}
+	return q
+}
+
 // inFunctionTickCallback runs one register/heartbeat cycle: GET /v1/agents/{id}
 // to sync server-authoritative state, then POST /v1/agents/in to refresh the
 // 7-minute Redis TTL and obtain NATS credentials.
@@ -1888,22 +1905,14 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		return err
 	}
 
-	q := req.URL.Query()
-	q.Add("os", runtime.GOOS)
-	q.Add("arch", runtime.GOARCH)
-	q.Add("id", r.options.AgentId)
-	q.Add("name", r.options.AgentName)
-	q.Add("agent_network", r.options.AgentNetwork)
-
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
 		r.logHelper("DEBUG", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
-		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
 		r.logHelper("INFO", "No network subnets discovered")
 	}
 
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = heartbeatQuery(r.options, Version, networkSubnets).Encode()
 
 	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, nil)
 	if inResp.Error != nil {
@@ -1948,7 +1957,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	if !isRegistered {
-		r.logHelper("INFO", "agent registered successfully")
+		r.logHelper("INFO", fmt.Sprintf("agent registered successfully (version=%s)", Version))
 		isRegistered = true
 	}
 
