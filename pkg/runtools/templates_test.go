@@ -8,11 +8,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
 // stubTemplates points nuclei's config at a temp dir and swaps the network and
@@ -48,7 +50,7 @@ func stubTemplates(t *testing.T, version string) string {
 func resetLatestTagCache() {
 	latestTagMu.Lock()
 	defer latestTagMu.Unlock()
-	latestTag, latestTagAt = "", time.Time{}
+	latestTag, latestTagAt, latestTagTry, latestTagErr = "", time.Time{}, time.Time{}, nil
 }
 
 func writeTemplate(t *testing.T, dir, rel string) {
@@ -129,35 +131,194 @@ func TestLatestTemplateTagError(t *testing.T) {
 	stubTemplates(t, "v10.4.5")
 	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("no network") }
 
-	if _, err := LatestTemplateTag(context.Background()); err == nil {
+	_, err := LatestTemplateTag(context.Background())
+	if err == nil {
 		t.Fatal("expected an error when the release API is unreachable")
+	}
+	if !errors.Is(err, ErrFreshnessUnknown) {
+		t.Errorf("err = %v, want it to wrap ErrFreshnessUnknown", err)
+	}
+}
+
+// Without caching failures a rate-limited fleet retries on every scan and keeps
+// its own quota exhausted.
+func TestLatestTemplateTagCachesFailures(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+
+	calls := 0
+	fetchLatestTag = func(context.Context) (string, error) {
+		calls++
+		return "", errors.New("api down")
+	}
+	base := time.Now()
+	nowFn = func() time.Time { return base }
+
+	for range 3 {
+		if _, err := LatestTemplateTag(context.Background()); err == nil {
+			t.Fatal("expected the failure to surface")
+		}
+	}
+	if calls != 1 {
+		t.Errorf("fetches = %d, want 1 within the failure TTL", calls)
+	}
+
+	nowFn = func() time.Time { return base.Add(latestTagFailTTL + time.Second) }
+	if _, err := LatestTemplateTag(context.Background()); err == nil {
+		t.Fatal("expected the failure to surface after the TTL")
+	}
+	if calls != 2 {
+		t.Errorf("fetches = %d, want 2 after the failure TTL expires", calls)
+	}
+}
+
+// A transient outage must not pin the agent to the cached failure.
+func TestLatestTemplateTagRecoversAfterFailure(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+
+	fail := true
+	fetchLatestTag = func(context.Context) (string, error) {
+		if fail {
+			return "", errors.New("api down")
+		}
+		return "v10.4.8", nil
+	}
+	base := time.Now()
+	nowFn = func() time.Time { return base }
+
+	if _, err := LatestTemplateTag(context.Background()); err == nil {
+		t.Fatal("expected the first lookup to fail")
+	}
+
+	fail = false
+	nowFn = func() time.Time { return base.Add(latestTagFailTTL + time.Second) }
+	tag, err := LatestTemplateTag(context.Background())
+	if err != nil {
+		t.Fatalf("LatestTemplateTag after recovery: %v", err)
+	}
+	if tag != "v10.4.8" {
+		t.Errorf("tag = %q, want v10.4.8", tag)
+	}
+}
+
+// stubLatestURL points the release lookup at a test server for one test.
+func stubLatestURL(t *testing.T, h http.HandlerFunc) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	prev := templatesLatestURL
+	templatesLatestURL = srv.URL
+	t.Cleanup(func() {
+		templatesLatestURL = prev
+		srv.Close()
+	})
+}
+
+func serveTag(tag string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": tag})
 	}
 }
 
 func TestFetchLatestTagFromGitHub(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]string{"tag_name": "v10.4.8"})
-	}))
-	defer srv.Close()
+	t.Setenv(envconfig.KeyGitHubToken, "")
 
-	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("do: %v", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	var gotAuth string
+	stubLatestURL(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		serveTag("v10.4.8")(w, r)
+	})
 
-	var release struct {
-		TagName string `json:"tag_name"`
+	tag, err := fetchLatestTagFromGitHub(context.Background())
+	if err != nil {
+		t.Fatalf("fetchLatestTagFromGitHub: %v", err)
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		t.Fatalf("decode: %v", err)
+	if tag != "v10.4.8" {
+		t.Errorf("tag = %q, want v10.4.8", tag)
 	}
-	if release.TagName != "v10.4.8" {
-		t.Errorf("tag_name = %q, want v10.4.8", release.TagName)
+	if gotAuth != "" {
+		t.Errorf("Authorization = %q, want none when no token is set", gotAuth)
+	}
+}
+
+// The lookup must spend the same token the downloads already use, or an
+// authenticated agent still burns the 60/hr unauthenticated per-IP budget.
+func TestFetchLatestTagFromGitHubSendsToken(t *testing.T) {
+	t.Setenv(envconfig.KeyGitHubToken, "ghp_example")
+
+	var gotAuth string
+	stubLatestURL(t, func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		serveTag("v10.4.8")(w, r)
+	})
+
+	if _, err := fetchLatestTagFromGitHub(context.Background()); err != nil {
+		t.Fatalf("fetchLatestTagFromGitHub: %v", err)
+	}
+	if gotAuth != "Bearer ghp_example" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer ghp_example")
+	}
+}
+
+// The lookup gates agent startup, so it must never run on a client that can
+// hang forever. http.DefaultClient has no timeout.
+func TestLatestTagClientHasTimeout(t *testing.T) {
+	if latestTagClient.Timeout == 0 {
+		t.Fatal("latestTagClient has no timeout; a stalled connection would hang boot")
+	}
+}
+
+func rateLimitedHandler(reset time.Time) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Reset", strconv.FormatInt(reset.Unix(), 10))
+		w.WriteHeader(http.StatusForbidden)
+	}
+}
+
+func TestFetchLatestTagFromGitHubRateLimited(t *testing.T) {
+	t.Setenv(envconfig.KeyGitHubToken, "")
+	stubLatestURL(t, rateLimitedHandler(time.Now().Add(20*time.Minute)))
+
+	_, err := fetchLatestTagFromGitHub(context.Background())
+	if !errors.Is(err, ErrGitHubRateLimited) {
+		t.Fatalf("err = %v, want ErrGitHubRateLimited", err)
+	}
+	if !strings.Contains(err.Error(), envconfig.KeyGitHubToken) {
+		t.Errorf("err = %q, want it to name %s as the fix", err, envconfig.KeyGitHubToken)
+	}
+	if !strings.Contains(err.Error(), "resets in") {
+		t.Errorf("err = %q, want the reset window", err)
+	}
+}
+
+// With a token already set, telling the operator to set one is useless advice.
+func TestFetchLatestTagFromGitHubRateLimitedWithToken(t *testing.T) {
+	t.Setenv(envconfig.KeyGitHubToken, "ghp_example")
+	stubLatestURL(t, rateLimitedHandler(time.Now().Add(20*time.Minute)))
+
+	_, err := fetchLatestTagFromGitHub(context.Background())
+	if !errors.Is(err, ErrGitHubRateLimited) {
+		t.Fatalf("err = %v, want ErrGitHubRateLimited", err)
+	}
+	if !strings.Contains(err.Error(), "also exhausted") {
+		t.Errorf("err = %q, want it to say the configured token is exhausted", err)
+	}
+}
+
+// A bad token also answers 403; only quota exhaustion sets Remaining: 0, and
+// the two need opposite advice.
+func TestFetchLatestTagFromGitHubForbiddenIsNotRateLimit(t *testing.T) {
+	t.Setenv(envconfig.KeyGitHubToken, "ghp_bad")
+	stubLatestURL(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "59")
+		w.WriteHeader(http.StatusForbidden)
+	})
+
+	_, err := fetchLatestTagFromGitHub(context.Background())
+	if err == nil {
+		t.Fatal("expected an error for 403")
+	}
+	if errors.Is(err, ErrGitHubRateLimited) {
+		t.Errorf("err = %v, want a plain status error, not a rate-limit diagnosis", err)
 	}
 }
 
@@ -255,8 +416,17 @@ func TestEnsureLatestTemplatesPropagatesTagFailure(t *testing.T) {
 	incrementalUpdate = func() error { t.Fatal("must not update blind"); return nil }
 	freshInstall = func() error { t.Fatal("must not reinstall blind"); return nil }
 
-	if _, _, err := EnsureLatestTemplates(context.Background()); err == nil {
+	from, _, err := EnsureLatestTemplates(context.Background())
+	if err == nil {
 		t.Fatal("expected the release-API failure to surface")
+	}
+	// ensureNucleiTemplates keys off both of these to warn-and-continue rather
+	// than ground an agent whose templates are already on disk.
+	if !errors.Is(err, ErrFreshnessUnknown) {
+		t.Errorf("err = %v, want it to wrap ErrFreshnessUnknown", err)
+	}
+	if from != "v10.4.5" {
+		t.Errorf("from = %q, want the installed version so the caller can tell templates exist", from)
 	}
 }
 
@@ -327,7 +497,7 @@ func TestReinstallTemplatesRestoresOnFailure(t *testing.T) {
 
 	freshInstall = func() error { return errors.New("download failed") }
 
-	if err := ReinstallTemplates(context.Background()); err == nil {
+	if err := reinstallTemplates(); err == nil {
 		t.Fatal("expected the download failure to surface")
 	}
 	// A failed repair must not leave the agent with zero templates.
@@ -365,5 +535,91 @@ func TestSafeToReplace(t *testing.T) {
 				t.Errorf("safeToReplace(%q) error = %v, wantErr %v", tt.dir, err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// A tag resolved minutes ago still beats no comparison at all, so an outage
+// must not throw it away.
+func TestLatestTemplateTagKeepsLastKnownTagOnFailure(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+
+	base := time.Now()
+	nowFn = func() time.Time { return base }
+	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
+	if _, err := LatestTemplateTag(context.Background()); err != nil {
+		t.Fatalf("first lookup: %v", err)
+	}
+
+	nowFn = func() time.Time { return base.Add(latestTagTTL + time.Second) }
+	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
+	if _, err := LatestTemplateTag(context.Background()); err == nil {
+		t.Fatal("expected the failure to surface rather than a stale tag posing as fresh")
+	}
+
+	tag, at := LastKnownTemplateTag()
+	if tag != "v10.4.8" {
+		t.Errorf("LastKnownTemplateTag() = %q, want the retained v10.4.8", tag)
+	}
+	if !at.Equal(base) {
+		t.Errorf("resolved-at = %v, want the original success time %v", at, base)
+	}
+}
+
+// With the release API down, an agent must still update toward the last known
+// release instead of standing still.
+func TestEnsureLatestTemplatesFallsBackToLastKnownTag(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+
+	base := time.Now()
+	nowFn = func() time.Time { return base }
+	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
+	if _, err := LatestTemplateTag(context.Background()); err != nil {
+		t.Fatalf("seed lookup: %v", err)
+	}
+
+	nowFn = func() time.Time { return base.Add(latestTagTTL + latestTagFailTTL + time.Second) }
+	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
+	incrementalUpdate = func() error {
+		config.DefaultConfig.TemplateVersion = "v10.4.8"
+		return nil
+	}
+	freshInstall = func() error { t.Fatal("must not reinstall when the incremental update works"); return nil }
+
+	from, to, err := EnsureLatestTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLatestTemplates: %v", err)
+	}
+	if from != "v10.4.5" || to != "v10.4.8" {
+		t.Errorf("versions = %s -> %s, want v10.4.5 -> v10.4.8 via the last known tag", from, to)
+	}
+}
+
+// No lookup has ever succeeded, so there is nothing to fall back to.
+func TestEnsureLatestTemplatesFailsWithoutAnyKnownTag(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
+	incrementalUpdate = func() error { t.Fatal("must not update blind"); return nil }
+	freshInstall = func() error { t.Fatal("must not reinstall blind"); return nil }
+
+	if _, _, err := EnsureLatestTemplates(context.Background()); !errors.Is(err, ErrFreshnessUnknown) {
+		t.Fatalf("err = %v, want ErrFreshnessUnknown", err)
+	}
+}
+
+// Secondary rate limits answer with Retry-After and leave X-RateLimit-Remaining
+// alone, so keying only on Remaining misses them.
+func TestFetchLatestTagFromGitHubSecondaryRateLimit(t *testing.T) {
+	t.Setenv(envconfig.KeyGitHubToken, "")
+	stubLatestURL(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	_, err := fetchLatestTagFromGitHub(context.Background())
+	if !errors.Is(err, ErrGitHubRateLimited) {
+		t.Fatalf("err = %v, want ErrGitHubRateLimited", err)
+	}
+	if !strings.Contains(err.Error(), "retry after 60s") {
+		t.Errorf("err = %q, want the Retry-After window", err)
 	}
 }

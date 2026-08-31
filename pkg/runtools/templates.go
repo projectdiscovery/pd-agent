@@ -19,11 +19,13 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 )
 
+// templatesLatestURL is a var only so tests can point it at httptest.
+var templatesLatestURL = "https://api.github.com/repos/projectdiscovery/nuclei-templates/releases/latest"
+
 const (
-	templatesLatestURL = "https://api.github.com/repos/projectdiscovery/nuclei-templates/releases/latest"
-	latestTagTTL       = 15 * time.Minute
-	latestTagFailTTL   = 2 * time.Minute
-	latestTagTimeout   = 30 * time.Second
+	latestTagTTL     = 15 * time.Minute
+	latestTagFailTTL = 2 * time.Minute
+	latestTagTimeout = 30 * time.Second
 )
 
 // ErrFreshnessUnknown reports that the newest release could not be resolved.
@@ -45,9 +47,12 @@ var latestTagClient = &http.Client{Timeout: latestTagTimeout}
 var templateMu sync.Mutex
 
 var (
-	latestTagMu  sync.Mutex
-	latestTag    string
-	latestTagAt  time.Time
+	latestTagMu sync.Mutex
+	latestTag   string    // last tag resolved successfully
+	latestTagAt time.Time // when latestTag was resolved
+	// latestTagTry is the last attempt, successful or not. Separate from
+	// latestTagAt so a retained stale tag is never served as if it were fresh.
+	latestTagTry time.Time
 	latestTagErr error
 )
 
@@ -109,7 +114,12 @@ func isRateLimited(resp *http.Response) bool {
 	if resp.StatusCode != http.StatusForbidden && resp.StatusCode != http.StatusTooManyRequests {
 		return false
 	}
-	return resp.Header.Get("X-RateLimit-Remaining") == "0"
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+		return true
+	}
+	// Secondary limits leave X-RateLimit-Remaining untouched and answer with
+	// Retry-After instead.
+	return resp.Header.Get("Retry-After") != ""
 }
 
 // rateLimitAdvice names the fix and, when GitHub says so, when the quota returns.
@@ -119,6 +129,8 @@ func rateLimitAdvice(resp *http.Response) string {
 		if wait := time.Until(time.Unix(sec, 0)); wait > 0 {
 			fmt.Fprintf(&b, ", resets in %s", wait.Round(time.Second))
 		}
+	} else if retry := resp.Header.Get("Retry-After"); retry != "" {
+		fmt.Fprintf(&b, ", retry after %ss", retry)
 	}
 	if envconfig.GitHubToken() == "" {
 		fmt.Fprintf(&b, "; set %s to raise the limit from 60/hr per IP to 5000/hr", envconfig.KeyGitHubToken)
@@ -141,18 +153,29 @@ func LatestTemplateTag(ctx context.Context) (string, error) {
 	}
 	// Cache failures too, briefly: without this a rate-limited fleet retries on
 	// every scan and keeps its own quota exhausted.
-	if latestTagErr != nil && nowFn().Sub(latestTagAt) < latestTagFailTTL {
+	if latestTagErr != nil && nowFn().Sub(latestTagTry) < latestTagFailTTL {
 		return "", latestTagErr
 	}
 
+	latestTagTry = nowFn()
 	tag, err := fetchLatestTag(ctx)
 	if err != nil {
-		latestTag, latestTagAt = "", nowFn()
+		// latestTag is deliberately kept: a tag resolved minutes ago is still
+		// the best comparison available, and callers may fall back to it.
 		latestTagErr = fmt.Errorf("%w: %w", ErrFreshnessUnknown, err)
 		return "", latestTagErr
 	}
 	latestTag, latestTagAt, latestTagErr = tag, nowFn(), nil
 	return tag, nil
+}
+
+// LastKnownTemplateTag returns the most recent successfully resolved release
+// and when it was resolved, so a caller can still compare versions while the
+// release API is unreachable. Empty when no lookup has ever succeeded.
+func LastKnownTemplateTag() (string, time.Time) {
+	latestTagMu.Lock()
+	defer latestTagMu.Unlock()
+	return latestTag, latestTagAt
 }
 
 // MissingTemplates returns the repo-relative paths absent from the template
@@ -198,12 +221,14 @@ func safeToReplace(dir string) error {
 	return nil
 }
 
-// ReinstallTemplates discards the template directory and downloads the current
+// reinstallTemplates discards the template directory and downloads the current
 // release. It is the only repair for a recorded version that is current while
 // files are absent, and it runs regardless of nuclei's update-check flag
 // (FreshInstallIfNotExists gates on directory existence, not that flag). The
 // old directory moves aside first so a failed download leaves templates intact.
-func ReinstallTemplates(_ context.Context) error {
+//
+// Callers must hold templateMu.
+func reinstallTemplates() error {
 	dir := TemplateDir()
 	if err := safeToReplace(dir); err != nil {
 		return err
@@ -260,7 +285,13 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 
 	latest, err := LatestTemplateTag(ctx)
 	if err != nil {
-		return from, from, err
+		stale, at := LastKnownTemplateTag()
+		if stale == "" {
+			return from, from, err
+		}
+		slog.Warn("nuclei templates: release lookup failed, comparing against the last known release",
+			"release", stale, "resolved_ago", nowFn().Sub(at).Round(time.Second), "error", err)
+		latest = stale
 	}
 	if from == latest {
 		return from, latest, nil
@@ -275,13 +306,13 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 	if updateErr := incrementalUpdate(); updateErr != nil {
 		slog.Warn("nuclei templates: incremental update failed, reinstalling",
 			"from", from, "to", latest, "error", updateErr)
-		if err := ReinstallTemplates(ctx); err != nil {
+		if err := reinstallTemplates(); err != nil {
 			return from, InstalledTemplateVersion(), err
 		}
 	} else if got := InstalledTemplateVersion(); got != latest {
 		slog.Warn("nuclei templates: update did not land the expected version, reinstalling",
 			"want", latest, "got", got)
-		if err := ReinstallTemplates(ctx); err != nil {
+		if err := reinstallTemplates(); err != nil {
 			return from, InstalledTemplateVersion(), err
 		}
 	}
@@ -316,7 +347,7 @@ func EnsureTemplatesFor(ctx context.Context, required []string) ([]string, error
 		"missing_count", len(missing), "sample", sample(missing, 3),
 		"installed_version", InstalledTemplateVersion())
 
-	if err := ReinstallTemplates(ctx); err != nil {
+	if err := reinstallTemplates(); err != nil {
 		return missing, err
 	}
 

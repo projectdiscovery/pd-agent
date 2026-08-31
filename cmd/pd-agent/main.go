@@ -57,10 +57,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ensureNucleiTemplates installs or updates nuclei templates, exiting the
-// process on failure. Without a complete template set the agent would emit
-// "file not found" errors mid-scan for every cloud-sent path missing locally,
-// so a failed install/update is fatal rather than a silent degrade.
+// ensureNucleiTemplates installs or updates nuclei templates. Without a set the
+// agent would emit "file not found" errors mid-scan for every cloud-sent path
+// missing locally, so templateBootFatal decides what is worth aborting for.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
@@ -76,7 +75,12 @@ func ensureNucleiTemplates() {
 
 	from, to, err := runtools.EnsureLatestTemplates(context.Background())
 	if err != nil {
-		slog.Error("Failed to update nuclei templates", "error", err, "version", from)
+		if !templateBootFatal(err, from) {
+			slog.Warn("Could not confirm the newest nuclei-templates release, continuing on the installed set",
+				"path", templateDir, "version", from, "error", err)
+			return
+		}
+		slog.Error("Failed to install nuclei templates", "error", err, "version", from)
 		os.Exit(1)
 	}
 	if from == to {
@@ -84,6 +88,17 @@ func ensureNucleiTemplates() {
 	} else {
 		slog.Info("Nuclei templates updated", "path", templateDir, "from", from, "to", to)
 	}
+}
+
+// templateBootFatal reports whether a boot-time template failure should stop
+// the agent. A set that could not be confirmed as newest is still usable, so
+// an unreachable release API must not ground a fleet; having no templates at
+// all is fatal. The lookup and the download carry their own 30s timeouts.
+func templateBootFatal(err error, installed string) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, runtools.ErrFreshnessUnknown) || installed == ""
 }
 
 // refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
