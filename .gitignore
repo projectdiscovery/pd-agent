@@ -24,3 +24,7 @@ output/*
 
 local/
 .claude/
+
+# local run artifacts
+scan-auto*.log
+.agents/

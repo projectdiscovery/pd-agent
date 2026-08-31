@@ -20,7 +20,8 @@ type NucleiOptions struct {
 	OutputFile string
 	// Targets is the list of hosts/URLs to scan. Required.
 	Targets []string
-	// Templates lists template paths or IDs; empty runs the default set.
+	// Templates lists template file or directory paths, globs included; empty
+	// runs the default set. Template IDs are a separate nuclei option.
 	Templates []string
 	// ScanID and TeamID stamp dashboard-upload metadata into output.
 	ScanID               string

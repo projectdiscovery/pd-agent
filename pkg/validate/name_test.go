@@ -1,8 +1,9 @@
 package validate
 
-import "strings"
-
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestName(t *testing.T) {
 	tests := []struct {

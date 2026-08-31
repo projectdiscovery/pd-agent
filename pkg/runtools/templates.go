@@ -62,14 +62,23 @@ var (
 // Swappable for tests; the real ones download ~150MB or hit the network.
 var (
 	fetchLatestTag       = fetchLatestTagFromGitHub
-	incrementalUpdate    = func() error { return (&installer.TemplateManager{}).UpdateIfOutdated() }
 	freshInstall         = func() error { return (&installer.TemplateManager{}).FreshInstallIfNotExists() }
 	writeTemplatesConfig = func() error { return config.DefaultConfig.WriteTemplatesConfig() }
 	nowFn                = time.Now
 )
 
-// TemplateDir returns the directory nuclei loads public templates from.
-func TemplateDir() string { return config.DefaultConfig.TemplatesDirectory }
+// TemplateDir returns the directory nuclei loads public templates from. It
+// takes the read lock: a staged install repoints this global while it downloads,
+// so an unlocked reader can see a path that is about to be deleted.
+func TemplateDir() string {
+	templateRW.RLock()
+	defer templateRW.RUnlock()
+	return templateDir()
+}
+
+// templateDir reads the global without locking, for callers already holding
+// templateRW.
+func templateDir() string { return config.DefaultConfig.TemplatesDirectory }
 
 // InstalledTemplateVersion returns the release nuclei recorded on disk. It is
 // advisory only: the version can be current while files are missing.
@@ -182,12 +191,12 @@ func LastKnownTemplateTag() (string, time.Time) {
 	return latestTag, latestTagAt
 }
 
-// MissingTemplates returns the requested definitions nuclei cannot resolve. It
+// missingTemplates returns the requested definitions nuclei cannot resolve. It
 // defers to nuclei's own resolver rather than stat'ing paths: the resolver globs,
 // walks directories and resolves relative paths, so a stat loop reports a glob
 // entry as missing while the scan expands it happily.
-func MissingTemplates(required []string) []string {
-	dir := TemplateDir()
+func missingTemplates(required []string) []string {
+	dir := templateDir()
 	if dir == "" || len(required) == 0 {
 		return nil
 	}
@@ -295,7 +304,7 @@ func dirHasTemplates(dir string) bool {
 //
 // Callers must hold templateRW for writing.
 func installFreshSet() error {
-	dir := TemplateDir()
+	dir := templateDir()
 	if err := safeToReplace(dir); err != nil {
 		return err
 	}
@@ -386,12 +395,12 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 
 	from = InstalledTemplateVersion()
 
-	dir := TemplateDir()
+	dir := templateDir()
 	if dir == "" {
 		return from, from, fmt.Errorf("could not determine nuclei template directory")
 	}
 	if _, statErr := os.Stat(dir); statErr != nil {
-		if err := freshInstall(); err != nil {
+		if err := installFreshSet(); err != nil {
 			return from, from, fmt.Errorf("install templates: %w", err)
 		}
 		return from, InstalledTemplateVersion(), nil
@@ -420,24 +429,13 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 		return from, latest, nil
 	}
 
-	// Hand nuclei the real latest version: its own cached value is what makes
-	// NeedsTemplateUpdate report "current" while releases behind.
-	config.DefaultConfig.LatestNucleiTemplatesVersion = latest
-
+	// A staged install is the only writer: nuclei's own incremental update is
+	// disabled process-wide because it writes the directory without taking this
+	// lock. A full install measures ~6s, so there is nothing to gain from it.
 	slog.Info("nuclei templates: update started", "from", from, "to", latest)
 	start := nowFn()
-	if updateErr := incrementalUpdate(); updateErr != nil {
-		slog.Warn("nuclei templates: incremental update failed, reinstalling",
-			"from", from, "to", latest, "error", updateErr)
-		if err := installFreshSet(); err != nil {
-			return from, InstalledTemplateVersion(), err
-		}
-	} else if got := InstalledTemplateVersion(); got != latest {
-		slog.Warn("nuclei templates: update did not land the expected version, reinstalling",
-			"want", latest, "got", got)
-		if err := installFreshSet(); err != nil {
-			return from, InstalledTemplateVersion(), err
-		}
+	if err := installFreshSet(); err != nil {
+		return from, InstalledTemplateVersion(), err
 	}
 
 	to = InstalledTemplateVersion()
@@ -452,5 +450,7 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 // It never installs: repairs belong at scan scope, before chunks launch, so a
 // bad set cannot have every chunk re-downloading the shared directory.
 func VerifyTemplatesFor(required []string) []string {
-	return MissingTemplates(required)
+	templateRW.RLock()
+	defer templateRW.RUnlock()
+	return missingTemplates(required)
 }

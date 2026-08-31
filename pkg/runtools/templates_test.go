@@ -30,7 +30,7 @@ func stubTemplates(t *testing.T, version string) string {
 	prevDir := config.DefaultConfig.TemplatesDirectory
 	prevVersion := config.DefaultConfig.TemplateVersion
 	prevLatest := config.DefaultConfig.LatestNucleiTemplatesVersion
-	prevFetch, prevUpdate, prevFresh, prevNow := fetchLatestTag, incrementalUpdate, freshInstall, nowFn
+	prevFetch, prevFresh, prevNow := fetchLatestTag, freshInstall, nowFn
 	prevWrite := writeTemplatesConfig
 	writeTemplatesConfig = func() error { return nil }
 
@@ -42,7 +42,7 @@ func stubTemplates(t *testing.T, version string) string {
 		config.DefaultConfig.TemplatesDirectory = prevDir
 		config.DefaultConfig.TemplateVersion = prevVersion
 		config.DefaultConfig.LatestNucleiTemplatesVersion = prevLatest
-		fetchLatestTag, incrementalUpdate, freshInstall, nowFn = prevFetch, prevUpdate, prevFresh, prevNow
+		fetchLatestTag, freshInstall, nowFn = prevFetch, prevFresh, prevNow
 		writeTemplatesConfig = prevWrite
 		resetLatestTagCache()
 	})
@@ -307,19 +307,20 @@ func TestEnsureLatestTemplatesUpdatesWhenBehind(t *testing.T) {
 
 	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
 	updated := false
-	incrementalUpdate = func() error {
+	installStub(t)
+	download := freshInstall
+	freshInstall = func() error {
 		updated = true
 		config.DefaultConfig.TemplateVersion = "v10.4.8"
-		return nil
+		return download()
 	}
-	freshInstall = func() error { t.Fatal("reinstall must not run when the update succeeds"); return nil }
 
 	from, to, err := EnsureLatestTemplates(context.Background())
 	if err != nil {
 		t.Fatalf("EnsureLatestTemplates: %v", err)
 	}
 	if !updated {
-		t.Error("incremental update never ran despite being 3 releases behind")
+		t.Error("no install ran despite being 3 releases behind")
 	}
 	if from != "v10.4.5" || to != "v10.4.8" {
 		t.Errorf("versions = %s -> %s, want v10.4.5 -> v10.4.8", from, to)
@@ -329,8 +330,7 @@ func TestEnsureLatestTemplatesUpdatesWhenBehind(t *testing.T) {
 func TestEnsureLatestTemplatesNoopWhenCurrent(t *testing.T) {
 	stubTemplates(t, "v10.4.8")
 	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
-	incrementalUpdate = func() error { t.Fatal("update must not run when already current"); return nil }
-	freshInstall = func() error { t.Fatal("reinstall must not run when already current"); return nil }
+	freshInstall = func() error { t.Fatal("nothing must install when already current"); return nil }
 
 	from, to, err := EnsureLatestTemplates(context.Background())
 	if err != nil {
@@ -341,26 +341,22 @@ func TestEnsureLatestTemplatesNoopWhenCurrent(t *testing.T) {
 	}
 }
 
-// An update that reports success but leaves the version behind is a lie; fall
-// back to a full reinstall rather than trusting it.
-func TestEnsureLatestTemplatesReinstallsWhenUpdateDoesNotLand(t *testing.T) {
+// An install that reports success but leaves the version behind is a lie, and
+// must not be reported as an upgrade.
+func TestEnsureLatestTemplatesFailsWhenInstallDoesNotLandTheVersion(t *testing.T) {
 	stubTemplates(t, "v10.4.5")
 	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
-	incrementalUpdate = func() error { return nil } // claims success, changes nothing
-	reinstalled := false
-	installStub(t)
-	download := freshInstall
-	freshInstall = func() error {
-		reinstalled = true
-		config.DefaultConfig.TemplateVersion = "v10.4.8"
-		return download()
-	}
+	installStub(t) // writes templates but never sets the version
 
-	if _, to, err := EnsureLatestTemplates(context.Background()); err != nil || to != "v10.4.8" {
-		t.Fatalf("EnsureLatestTemplates = %q, %v; want v10.4.8, nil", to, err)
+	from, to, err := EnsureLatestTemplates(context.Background())
+	if err == nil {
+		t.Fatal("expected an error when the install did not reach the newest release")
 	}
-	if !reinstalled {
-		t.Error("expected a reinstall when the update did not land")
+	if !strings.Contains(err.Error(), "v10.4.8") {
+		t.Errorf("err = %v, want it to name the wanted release", err)
+	}
+	if from != "v10.4.5" || to != "v10.4.5" {
+		t.Errorf("versions = %s -> %s, want both at v10.4.5", from, to)
 	}
 }
 
@@ -374,10 +370,12 @@ func TestEnsureLatestTemplatesInstallsWhenDirMissing(t *testing.T) {
 		return "", nil
 	}
 	installed := false
+	installStub(t)
+	download := freshInstall
 	freshInstall = func() error {
 		installed = true
 		config.DefaultConfig.TemplateVersion = "v10.4.8"
-		return os.MkdirAll(dir, 0o755)
+		return download()
 	}
 
 	if _, to, err := EnsureLatestTemplates(context.Background()); err != nil || to != "v10.4.8" {
@@ -386,13 +384,15 @@ func TestEnsureLatestTemplatesInstallsWhenDirMissing(t *testing.T) {
 	if !installed {
 		t.Error("expected a fresh install for a missing template dir")
 	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Errorf("template dir absent after the install: %v", err)
+	}
 }
 
 func TestEnsureLatestTemplatesPropagatesTagFailure(t *testing.T) {
 	stubTemplates(t, "v10.4.5")
 	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
-	incrementalUpdate = func() error { t.Fatal("must not update blind"); return nil }
-	freshInstall = func() error { t.Fatal("must not reinstall blind"); return nil }
+	freshInstall = func() error { t.Fatal("must not install blind"); return nil }
 
 	from, _, err := EnsureLatestTemplates(context.Background())
 	if err == nil {
@@ -477,11 +477,12 @@ func TestEnsureLatestTemplatesFallsBackToLastKnownTag(t *testing.T) {
 
 	nowFn = func() time.Time { return base.Add(latestTagTTL + latestTagFailTTL + time.Second) }
 	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
-	incrementalUpdate = func() error {
+	installStub(t)
+	download := freshInstall
+	freshInstall = func() error {
 		config.DefaultConfig.TemplateVersion = "v10.4.8"
-		return nil
+		return download()
 	}
-	freshInstall = func() error { t.Fatal("must not reinstall when the incremental update works"); return nil }
 
 	from, to, err := EnsureLatestTemplates(context.Background())
 	if err != nil {
@@ -496,8 +497,7 @@ func TestEnsureLatestTemplatesFallsBackToLastKnownTag(t *testing.T) {
 func TestEnsureLatestTemplatesFailsWithoutAnyKnownTag(t *testing.T) {
 	stubTemplates(t, "v10.4.5")
 	fetchLatestTag = func(context.Context) (string, error) { return "", errors.New("api down") }
-	incrementalUpdate = func() error { t.Fatal("must not update blind"); return nil }
-	freshInstall = func() error { t.Fatal("must not reinstall blind"); return nil }
+	freshInstall = func() error { t.Fatal("must not install blind"); return nil }
 
 	if _, _, err := EnsureLatestTemplates(context.Background()); !errors.Is(err, ErrFreshnessUnknown) {
 		t.Fatalf("err = %v, want ErrFreshnessUnknown", err)
@@ -548,7 +548,6 @@ func TestVerifyTemplatesForNeverInstalls(t *testing.T) {
 	dir := stubTemplates(t, "v10.4.8")
 	writeTemplate(t, dir, "http/present.yaml")
 	freshInstall = func() error { t.Fatal("chunk-scope verification must never install"); return nil }
-	incrementalUpdate = func() error { t.Fatal("chunk-scope verification must never update"); return nil }
 
 	if got := VerifyTemplatesFor([]string{"http/present.yaml"}); got != nil {
 		t.Errorf("VerifyTemplatesFor() = %v, want nil", got)
@@ -776,9 +775,9 @@ func TestMissingTemplatesUsesNucleiResolver(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := len(MissingTemplates([]string{tt.input})) > 0
+			got := len(missingTemplates([]string{tt.input})) > 0
 			if got != tt.want {
-				t.Errorf("MissingTemplates(%q) missing = %v, want %v", tt.input, got, tt.want)
+				t.Errorf("missingTemplates(%q) missing = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}
@@ -788,9 +787,9 @@ func TestMissingTemplatesPreservesInputOrderAndDedupes(t *testing.T) {
 	dir := stubTemplates(t, "v10.4.8")
 	writeTemplate(t, dir, "http/present.yaml")
 
-	got := MissingTemplates([]string{"b.yaml", "http/present.yaml", "a.yaml", "b.yaml"})
+	got := missingTemplates([]string{"b.yaml", "http/present.yaml", "a.yaml", "b.yaml"})
 	if strings.Join(got, ",") != "b.yaml,a.yaml" {
-		t.Errorf("MissingTemplates() = %v, want [b.yaml a.yaml]", got)
+		t.Errorf("missingTemplates() = %v, want [b.yaml a.yaml]", got)
 	}
 }
 
@@ -813,5 +812,59 @@ func TestAnyPublic(t *testing.T) {
 				t.Errorf("AnyPublic(%v) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// blockedByWriteLock reports whether fn waits while a staged install holds the
+// write lock. An unlocked reader sees the repointed global mid-download and
+// concludes every template is missing.
+func blockedByWriteLock(t *testing.T, fn func()) bool {
+	t.Helper()
+
+	templateRW.Lock()
+	done := make(chan struct{})
+	go func() {
+		fn()
+		close(done)
+	}()
+
+	blocked := false
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		blocked = true
+	}
+	templateRW.Unlock()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("call never completed after the write lock was released")
+	}
+	return blocked
+}
+
+func TestVerifyTemplatesForTakesTheReadLock(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	writeTemplate(t, dir, "http/present.yaml")
+
+	var missing []string
+	if !blockedByWriteLock(t, func() { missing = VerifyTemplatesFor([]string{"http/present.yaml"}) }) {
+		t.Error("VerifyTemplatesFor read the template dir during a staged install")
+	}
+	if len(missing) != 0 {
+		t.Errorf("missing = %v, want none once the install finished", missing)
+	}
+}
+
+func TestTemplateDirTakesTheReadLock(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+
+	var got string
+	if !blockedByWriteLock(t, func() { got = TemplateDir() }) {
+		t.Error("TemplateDir read the global during a staged install")
+	}
+	if got != dir {
+		t.Errorf("TemplateDir() = %q, want %q", got, dir)
 	}
 }
