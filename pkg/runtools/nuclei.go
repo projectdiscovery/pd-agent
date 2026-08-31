@@ -11,19 +11,8 @@ import (
 	"sync"
 
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
-	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
-
-// UpdateNucleiTemplates installs nuclei-templates if missing, otherwise
-// updates them. Idempotent.
-func UpdateNucleiTemplates() error {
-	tm := &installer.TemplateManager{}
-	if err := tm.UpdateIfOutdated(); err != nil {
-		return fmt.Errorf("update nuclei templates: %w", err)
-	}
-	return nil
-}
 
 // NucleiOptions configures an embedded nuclei scan.
 type NucleiOptions struct {

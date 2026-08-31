@@ -69,33 +69,38 @@ func ensureNucleiTemplates() {
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
-		slog.Info("Nuclei templates directory exists, checking for updates...", "path", templateDir)
+		slog.Info("Nuclei templates directory exists, checking the newest release...", "path", templateDir)
 	} else {
 		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	}
 
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
-		slog.Error("Failed to update nuclei templates", "error", err)
+	from, to, err := runtools.EnsureLatestTemplates(context.Background())
+	if err != nil {
+		slog.Error("Failed to update nuclei templates", "error", err, "version", from)
 		os.Exit(1)
 	}
-	slog.Info("Nuclei templates are up to date", "path", templateDir)
+	if from == to {
+		slog.Info("Nuclei templates verified against the newest release", "path", templateDir, "version", to)
+	} else {
+		slog.Info("Nuclei templates updated", "path", templateDir, "from", from, "to", to)
+	}
 }
-
-// templateUpdateMu serializes template refreshes so concurrent scans
-// (ScanParallelism > 1) never rewrite the shared template dir at once.
-var templateUpdateMu sync.Mutex
 
 // refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
 // run, so a long-lived agent picks up releases without a restart. Non-fatal:
 // boot already guaranteed a usable set, so a transient update failure logs and
 // proceeds on the existing templates rather than dropping the scan.
-func refreshTemplatesForScan(scanID string) {
-	templateUpdateMu.Lock()
-	defer templateUpdateMu.Unlock()
-
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
+func refreshTemplatesForScan(ctx context.Context, scanID string) {
+	from, to, err := runtools.EnsureLatestTemplates(ctx)
+	if err != nil {
+		// An unreachable release API must not stall scanning; per-chunk
+		// verification still guarantees the templates this scan needs.
 		slog.Warn("Failed to refresh nuclei templates before scan, using existing set",
-			"scan_id", scanID, "error", err)
+			"scan_id", scanID, "version", from, "error", err)
+		return
+	}
+	if from != to {
+		slog.Info("Nuclei templates updated before scan", "scan_id", scanID, "from", from, "to", to)
 	}
 }
 
@@ -1245,7 +1250,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
 	}
 
-	refreshTemplatesForScan(work.ScanID)
+	refreshTemplatesForScan(ctx, work.ScanID)
 
 	err := func() error {
 		creds := r.GetNATSCredentials()

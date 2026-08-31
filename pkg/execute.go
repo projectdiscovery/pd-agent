@@ -292,6 +292,20 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"config_bytes", len(opts.ConfigYAML),
 	)
 
+	// A template the platform scheduled but the agent lacks would be skipped
+	// silently, reporting a clean scan that never ran those checks.
+	if missing, err := runtools.EnsureTemplatesFor(ctx, opts.Templates); err != nil {
+		if !envconfig.AllowMissingTemplates() {
+			return nil, nil, fmt.Errorf("nuclei scan: %w (set %s=true to scan with an incomplete set)",
+				err, envconfig.KeyAllowMissingTemplates)
+		}
+		slog.Error("nuclei scan: scanning with an incomplete template set",
+			"scan_id", task.Options.ScanID,
+			"chunk_id", task.Id,
+			"missing_count", len(missing),
+			"error", err)
+	}
+
 	// Match upload is handled by the nuclei SDK via WithPDCPUpload.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
 		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
