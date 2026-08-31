@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -42,9 +43,10 @@ var ErrGitHubRateLimited = errors.New("github api rate limit exhausted")
 // timeout, and this call gates agent startup.
 var latestTagClient = &http.Client{Timeout: latestTagTimeout}
 
-// templateMu serializes every read-modify-write of the shared template
-// directory: concurrent scans must not update and reinstall at once.
-var templateMu sync.Mutex
+// templateRW guards the shared template directory. Repairs and updates take
+// the write lock; nuclei takes the read lock while loading templates, so a
+// swap can never land mid-load and hand a scan a partial set.
+var templateRW sync.RWMutex
 
 var (
 	latestTagMu sync.Mutex
@@ -58,10 +60,11 @@ var (
 
 // Swappable for tests; the real ones download ~150MB or hit the network.
 var (
-	fetchLatestTag    = fetchLatestTagFromGitHub
-	incrementalUpdate = func() error { return (&installer.TemplateManager{}).UpdateIfOutdated() }
-	freshInstall      = func() error { return (&installer.TemplateManager{}).FreshInstallIfNotExists() }
-	nowFn             = time.Now
+	fetchLatestTag       = fetchLatestTagFromGitHub
+	incrementalUpdate    = func() error { return (&installer.TemplateManager{}).UpdateIfOutdated() }
+	freshInstall         = func() error { return (&installer.TemplateManager{}).FreshInstallIfNotExists() }
+	writeTemplatesConfig = func() error { return config.DefaultConfig.WriteTemplatesConfig() }
+	nowFn                = time.Now
 )
 
 // TemplateDir returns the directory nuclei loads public templates from.
@@ -221,45 +224,132 @@ func safeToReplace(dir string) error {
 	return nil
 }
 
-// reinstallTemplates discards the template directory and downloads the current
-// release. It is the only repair for a recorded version that is current while
-// files are absent, and it runs regardless of nuclei's update-check flag
-// (FreshInstallIfNotExists gates on directory existence, not that flag). The
-// old directory moves aside first so a failed download leaves templates intact.
+// downloadInto installs the current release into staging. FreshInstallIfNotExists
+// has no per-call directory, so nuclei's configured path is pointed at staging
+// for the download. WriteTemplatesConfig marshals the whole config, so the real
+// path is written back afterwards or the next boot would look for staging.
+func downloadInto(staging string) error {
+	live := config.DefaultConfig.TemplatesDirectory
+	config.DefaultConfig.TemplatesDirectory = staging
+	installErr := freshInstall()
+	config.DefaultConfig.TemplatesDirectory = live
+
+	if err := writeTemplatesConfig(); err != nil {
+		slog.Warn("nuclei templates: could not restore the template path in nuclei's config",
+			"path", live, "error", err)
+	}
+	if installErr != nil {
+		return fmt.Errorf("download templates: %w", installErr)
+	}
+	if !dirHasTemplates(staging) {
+		return fmt.Errorf("downloaded set at %s contains no templates", staging)
+	}
+	return nil
+}
+
+// dirHasTemplates reports whether dir holds at least one template, so an empty
+// download is never swapped over a working set.
+func dirHasTemplates(dir string) bool {
+	found := false
+	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".yaml") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+// installFreshSet downloads the current release into a sibling directory and
+// swaps it in. Downloading in place would leave the live directory half-written
+// for the length of the download; here it is only ever replaced by a complete
+// set, and the previous set is kept until the swap succeeds.
 //
-// Callers must hold templateMu.
-func reinstallTemplates() error {
+// Callers must hold templateRW for writing.
+func installFreshSet() error {
 	dir := TemplateDir()
 	if err := safeToReplace(dir); err != nil {
 		return err
 	}
 
-	aside := dir + ".stale-" + strconv.Itoa(os.Getpid())
-	_ = os.RemoveAll(aside)
+	pid := strconv.Itoa(os.Getpid())
+	staging, retired := dir+".incoming-"+pid, dir+".retired-"+pid
+	_ = os.RemoveAll(staging)
+	_ = os.RemoveAll(retired)
+	defer func() {
+		_ = os.RemoveAll(staging)
+		_ = os.RemoveAll(retired)
+	}()
+
+	slog.Info("nuclei templates: download started", "staging", staging)
+	start := nowFn()
+	if err := downloadInto(staging); err != nil {
+		return err
+	}
 
 	moved := false
 	if _, err := os.Stat(dir); err == nil {
-		if err := os.Rename(dir, aside); err != nil {
-			return fmt.Errorf("move stale templates aside: %w", err)
+		if err := os.Rename(dir, retired); err != nil {
+			return fmt.Errorf("retire the previous template set: %w", err)
 		}
 		moved = true
 	}
-
-	slog.Info("nuclei templates: reinstall started", "path", dir)
-	start := nowFn()
-	if err := freshInstall(); err != nil {
+	if err := os.Rename(staging, dir); err != nil {
 		if moved {
-			_ = os.RemoveAll(dir)
-			_ = os.Rename(aside, dir)
+			if restoreErr := os.Rename(retired, dir); restoreErr != nil {
+				slog.Error("nuclei templates: no template set on disk, restore failed",
+					"path", dir, "retired", retired, "error", restoreErr)
+			}
 		}
-		return fmt.Errorf("fresh install templates: %w", err)
+		return fmt.Errorf("swap the new template set into place: %w", err)
 	}
-	if moved {
-		_ = os.RemoveAll(aside)
-	}
-	slog.Info("nuclei templates: reinstall finished",
+
+	slog.Info("nuclei templates: download finished",
 		"path", dir, "version", InstalledTemplateVersion(), "duration", nowFn().Sub(start))
 	return nil
+}
+
+var (
+	repairMu          sync.Mutex
+	repairWanted      bool
+	repairReason      string
+	repairedAtVersion string
+)
+
+// RequestTemplateRepair marks the on-disk set as suspect so the next scan-level
+// refresh reinstalls it before any chunk runs. A repair already attempted at the
+// current release is not retried: reinstalling the same release cannot produce a
+// template that release does not contain.
+func RequestTemplateRepair(reason string) {
+	repairMu.Lock()
+	defer repairMu.Unlock()
+
+	if installed := InstalledTemplateVersion(); installed != "" && installed == repairedAtVersion {
+		slog.Debug("nuclei templates: repair already attempted at this release, not retrying",
+			"version", installed, "reason", reason)
+		return
+	}
+	if !repairWanted {
+		slog.Warn("nuclei templates: repair queued for the next scan", "reason", reason)
+	}
+	repairWanted, repairReason = true, reason
+}
+
+func takeRepairRequest() (string, bool) {
+	repairMu.Lock()
+	defer repairMu.Unlock()
+	return repairReason, repairWanted
+}
+
+func markRepaired() {
+	repairMu.Lock()
+	defer repairMu.Unlock()
+	repairWanted, repairReason = false, ""
+	repairedAtVersion = InstalledTemplateVersion()
 }
 
 // EnsureLatestTemplates brings the template set to the newest published
@@ -267,8 +357,8 @@ func reinstallTemplates() error {
 // installed; a lagging one is updated incrementally; an update that fails to
 // land the expected version falls back to a full reinstall.
 func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
-	templateMu.Lock()
-	defer templateMu.Unlock()
+	templateRW.Lock()
+	defer templateRW.Unlock()
 
 	from = InstalledTemplateVersion()
 
@@ -280,6 +370,15 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 		if err := freshInstall(); err != nil {
 			return from, from, fmt.Errorf("install templates: %w", err)
 		}
+		return from, InstalledTemplateVersion(), nil
+	}
+
+	if reason, wanted := takeRepairRequest(); wanted {
+		slog.Warn("nuclei templates: reinstalling before the scan", "reason", reason)
+		if err := installFreshSet(); err != nil {
+			return from, InstalledTemplateVersion(), err
+		}
+		markRepaired()
 		return from, InstalledTemplateVersion(), nil
 	}
 
@@ -306,13 +405,13 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 	if updateErr := incrementalUpdate(); updateErr != nil {
 		slog.Warn("nuclei templates: incremental update failed, reinstalling",
 			"from", from, "to", latest, "error", updateErr)
-		if err := reinstallTemplates(); err != nil {
+		if err := installFreshSet(); err != nil {
 			return from, InstalledTemplateVersion(), err
 		}
 	} else if got := InstalledTemplateVersion(); got != latest {
 		slog.Warn("nuclei templates: update did not land the expected version, reinstalling",
 			"want", latest, "got", got)
-		if err := reinstallTemplates(); err != nil {
+		if err := installFreshSet(); err != nil {
 			return from, InstalledTemplateVersion(), err
 		}
 	}
@@ -325,42 +424,9 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 	return from, to, nil
 }
 
-// EnsureTemplatesFor guarantees every required public template is on disk.
-// Version equality is not enough: a set at the newest release can still be
-// missing files, and only a reinstall repairs that. Returns the paths still
-// missing after the repair attempt.
-func EnsureTemplatesFor(ctx context.Context, required []string) ([]string, error) {
-	if missing := MissingTemplates(required); len(missing) == 0 {
-		return nil, nil
-	}
-
-	templateMu.Lock()
-	defer templateMu.Unlock()
-
-	// Re-check under the lock: a concurrent chunk may have just repaired it.
-	missing := MissingTemplates(required)
-	if len(missing) == 0 {
-		return nil, nil
-	}
-
-	slog.Warn("nuclei templates: requested templates missing, repairing",
-		"missing_count", len(missing), "sample", sample(missing, 3),
-		"installed_version", InstalledTemplateVersion())
-
-	if err := reinstallTemplates(); err != nil {
-		return missing, err
-	}
-
-	if stillMissing := MissingTemplates(required); len(stillMissing) > 0 {
-		return stillMissing, fmt.Errorf("%d requested templates absent from %s after reinstall",
-			len(stillMissing), InstalledTemplateVersion())
-	}
-	return nil, nil
-}
-
-func sample(items []string, n int) []string {
-	if len(items) <= n {
-		return items
-	}
-	return items[:n]
+// VerifyTemplatesFor returns the requested public templates missing from disk.
+// It never installs: repairs belong at scan scope, before chunks launch, so a
+// bad set cannot have every chunk re-downloading the shared directory.
+func VerifyTemplatesFor(required []string) []string {
+	return MissingTemplates(required)
 }

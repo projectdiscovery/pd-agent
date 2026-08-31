@@ -104,11 +104,22 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		sdkOpts = append(sdkOpts, nuclei.WithPDCPUpload(opts.ScanID, opts.TeamID))
 	}
 
+	// Templates are read from a directory a repair can replace. Hold the read
+	// lock across engine setup and the load so a swap cannot land mid-walk, and
+	// load explicitly: the SDK's lazy load discards its error and a partial set
+	// would otherwise scan clean.
+	templateRW.RLock()
 	ne, err := nuclei.NewNucleiEngineCtx(ctx, sdkOpts...)
 	if err != nil {
+		templateRW.RUnlock()
 		return opts.OutputFile, fmt.Errorf("init nuclei engine: %w", err)
 	}
 	defer ne.Close()
+	loadErr := ne.LoadAllTemplates()
+	templateRW.RUnlock()
+	if loadErr != nil {
+		return opts.OutputFile, fmt.Errorf("load templates: %w", loadErr)
+	}
 
 	ne.LoadTargets(opts.Targets, opts.ProbeNonHttp)
 
