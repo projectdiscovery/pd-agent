@@ -1,27 +1,22 @@
 package pkg
 
 import (
-	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
-	"time"
 
 	"log/slog"
 
 	"github.com/projectdiscovery/pd-agent/pkg/client"
 	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
+	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	fileutil "github.com/projectdiscovery/utils/file"
 	sliceutil "github.com/projectdiscovery/utils/slice"
@@ -297,16 +292,44 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"config_bytes", len(opts.ConfigYAML),
 	)
 
+	// A template the platform scheduled but the agent lacks would be skipped
+	// silently, reporting a clean scan that never ran those checks. The repair is
+	// queued for the next scan rather than run here.
+	if missing := runtools.VerifyTemplatesFor(opts.Templates); len(missing) > 0 {
+		if runtools.AnyPublic(missing) {
+			runtools.RequestTemplateRepair(fmt.Sprintf("%d templates unresolved on scan %s", len(missing), task.Options.ScanID))
+		}
+
+		shown := missing
+		if len(shown) > 3 {
+			shown = shown[:3]
+		}
+		if !envconfig.AllowMissingTemplates() {
+			return nil, nil, fmt.Errorf("nuclei scan: %d of %d requested templates could not be resolved under %s (e.g. %v); a reinstall is queued for the next scan, or set %s=true to scan with an incomplete set",
+				len(missing), len(opts.Templates), runtools.TemplateDir(), shown, envconfig.KeyAllowMissingTemplates)
+		}
+		slog.Error("nuclei scan: scanning with an incomplete template set",
+			"scan_id", task.Options.ScanID,
+			"chunk_id", task.Id,
+			"missing_count", len(missing),
+			"sample", shown)
+	}
+
 	// Match upload is handled by the nuclei SDK via WithPDCPUpload.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
 		return nil, nil, fmt.Errorf("nuclei scan: %w", err)
 	}
 
-	// Raw scan-log upload (full JSONL, matched + unmatched). Opt-in via
-	// PDCP_ENABLE_SCAN_LOG_UPLOAD; default off so agents without storage
-	// provisioned don't hammer the API with rejected uploads.
-	if envconfig.ScanLogUploadEnabled() && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
-		if err := uploadNucleiOutputViaSignedURL(ctx, task, outputFile); err != nil {
+	// Raw scan-log upload (full JSONL, matched + unmatched), best-effort: a
+	// storage failure must not fail the chunk.
+	if dests := scanlog.Destinations(); len(dests) > 0 && task.Options.ScanID != "" && task.Options.HistoryID != 0 {
+		meta := scanlog.Meta{
+			TeamID:    task.Options.TeamID,
+			ScanID:    task.Options.ScanID,
+			ChunkID:   task.Id,
+			HistoryID: task.Options.HistoryID,
+		}
+		if err := scanlog.Upload(ctx, dests, meta, outputFile); err != nil {
 			slog.Warn("nuclei scan: scan-log upload failed",
 				"scan_id", task.Options.ScanID,
 				"history_id", task.Options.HistoryID,
@@ -318,174 +341,6 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// Empty TaskResult: embedded path doesn't capture stdout/stderr, so
 	// ExtractUnresponsiveHosts has no input until we hook nuclei's logger.
 	return &types.TaskResult{}, []string{outputFile}, nil
-}
-
-// signedUploadResponse mirrors /v1/scans/{scan_id}/scan_log/upload-url.
-// Headers are authoritative: set them verbatim on the PUT and add nothing
-// else, since the SigV4 signature covers headers.
-type signedUploadResponse struct {
-	UploadURL  string            `json:"upload_url"`
-	Method     string            `json:"method"`
-	Headers    map[string]string `json:"headers"`
-	MaxBytes   int64             `json:"max_bytes"`
-	ObjectPath string            `json:"object_path"`
-	ExpiresAt  time.Time         `json:"expires_at"`
-}
-
-// uploadNucleiOutputViaSignedURL ships the per-chunk output via:
-//  1. POST /v1/scans/{scan_id}/scan_log/upload-url?history_id=N with {"filename": ...}
-//  2. PUT gzipped bytes to the signed URL with the response Headers verbatim.
-//
-// Gzipped as an opaque .gz blob (no Content-Encoding) so the SigV4 signed
-// headers never need to cover Content-Encoding; server gunzips on read.
-func uploadNucleiOutputViaSignedURL(ctx context.Context, task *types.Task, outputFile string) error {
-	info, err := os.Stat(outputFile)
-	if err != nil {
-		return fmt.Errorf("stat output: %w", err)
-	}
-	if info.Size() == 0 {
-		slog.Debug("nuclei scan: output file empty, skipping scan-log upload",
-			"scan_id", task.Options.ScanID, "chunk_id", task.Id)
-		return nil
-	}
-
-	// Gzip into a sibling temp so we can stat for ContentLength. Unique name
-	// keeps a redelivered chunk from clobbering a still-PUTting goroutine.
-	gzFile, err := os.CreateTemp(filepath.Dir(outputFile), filepath.Base(outputFile)+"-*.gz")
-	if err != nil {
-		return fmt.Errorf("create gz tempfile: %w", err)
-	}
-	gzPath := gzFile.Name()
-	_ = gzFile.Close()
-	defer func() { _ = os.Remove(gzPath) }()
-	gzSize, err := gzipFile(outputFile, gzPath)
-	if err != nil {
-		return fmt.Errorf("gzip output: %w", err)
-	}
-
-	slog.Debug("nuclei scan: gzipped scan-log",
-		"scan_id", task.Options.ScanID, "chunk_id", task.Id,
-		"raw_bytes", info.Size(), "gz_bytes", gzSize)
-
-	filename := task.Id + ".jsonl.gz"
-	httpClient, err := client.CreateAuthenticatedClient(task.Options.TeamID, envconfig.APIKey())
-	if err != nil {
-		return fmt.Errorf("auth client: %w", err)
-	}
-
-	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
-	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
-		envconfig.APIServer(), task.Options.ScanID, task.Options.HistoryID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
-	if err != nil {
-		return fmt.Errorf("build upload-url request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("get upload-url: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("upload-url status %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var signed signedUploadResponse
-	if err := json.Unmarshal(respBody, &signed); err != nil {
-		return fmt.Errorf("decode upload-url response: %w", err)
-	}
-	if signed.UploadURL == "" || signed.Method == "" {
-		return fmt.Errorf("upload-url response missing url/method")
-	}
-	if signed.MaxBytes > 0 && gzSize > signed.MaxBytes {
-		return fmt.Errorf("gzipped output %d bytes exceeds signed-url max %d", gzSize, signed.MaxBytes)
-	}
-
-	f, err := os.Open(gzPath)
-	if err != nil {
-		return fmt.Errorf("open gz: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	putReq, err := http.NewRequestWithContext(ctx, signed.Method, signed.UploadURL, f)
-	if err != nil {
-		return fmt.Errorf("build PUT: %s", stripSignedURL(err))
-	}
-	putReq.ContentLength = gzSize
-	for k, v := range signed.Headers {
-		putReq.Header.Set(k, v)
-	}
-
-	putResp, err := http.DefaultClient.Do(putReq)
-	if err != nil {
-		return fmt.Errorf("PUT: %s", stripSignedURL(err))
-	}
-	defer func() { _ = putResp.Body.Close() }()
-
-	if putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(putResp.Body)
-		return fmt.Errorf("PUT status %d: %s", putResp.StatusCode, string(body))
-	}
-	_, _ = io.Copy(io.Discard, putResp.Body)
-
-	slog.Info("nuclei scan: output file uploaded",
-		"scan_id", task.Options.ScanID,
-		"history_id", task.Options.HistoryID,
-		"chunk_id", task.Id,
-		"raw_bytes", info.Size(),
-		"gz_bytes", gzSize,
-		"object_path", signed.ObjectPath)
-	return nil
-}
-
-// stripSignedURL drops the URL from a *url.Error so SigV4/GCS HMAC query
-// signatures never reach the logs. Keeps operation and underlying cause.
-func stripSignedURL(err error) string {
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		return fmt.Sprintf("%s: %s", ue.Op, ue.Err)
-	}
-	return err.Error()
-}
-
-// gzipFile streams src through gzip into dst at BestSpeed (nuclei JSONL
-// compresses ~10x even at level 1) and returns the dst size.
-func gzipFile(src, dst string) (int64, error) {
-	in, err := os.Open(src)
-	if err != nil {
-		return 0, fmt.Errorf("open src: %w", err)
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return 0, fmt.Errorf("create dst: %w", err)
-	}
-	gzw, err := gzip.NewWriterLevel(out, gzip.BestSpeed)
-	if err != nil {
-		_ = out.Close()
-		return 0, fmt.Errorf("gzip writer: %w", err)
-	}
-	if _, err := io.Copy(gzw, in); err != nil {
-		_ = gzw.Close()
-		_ = out.Close()
-		return 0, fmt.Errorf("gzip copy: %w", err)
-	}
-	if err := gzw.Close(); err != nil {
-		_ = out.Close()
-		return 0, fmt.Errorf("gzip close: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return 0, fmt.Errorf("close dst: %w", err)
-	}
-	st, err := os.Stat(dst)
-	if err != nil {
-		return 0, fmt.Errorf("stat dst: %w", err)
-	}
-	return st.Size(), nil
 }
 
 // splitIPsAndHostnames separates IPs from hostnames; strips port if present.

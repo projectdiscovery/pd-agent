@@ -47,6 +47,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg/validate"
 	fileutil "github.com/projectdiscovery/utils/file"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
@@ -56,10 +57,9 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ensureNucleiTemplates installs or updates nuclei templates, exiting the
-// process on failure. Without a complete template set the agent would emit
-// "file not found" errors mid-scan for every cloud-sent path missing locally,
-// so a failed install/update is fatal rather than a silent degrade.
+// ensureNucleiTemplates installs or updates nuclei templates. Without a set the
+// agent would emit "file not found" errors mid-scan for every cloud-sent path
+// missing locally, so templateBootFatal decides what is worth aborting for.
 func ensureNucleiTemplates() {
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
@@ -68,33 +68,54 @@ func ensureNucleiTemplates() {
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
-		slog.Info("Nuclei templates directory exists, checking for updates...", "path", templateDir)
+		slog.Info("Nuclei templates directory exists, checking the newest release...", "path", templateDir)
 	} else {
 		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	}
 
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
-		slog.Error("Failed to update nuclei templates", "error", err)
+	from, to, err := runtools.EnsureLatestTemplates(context.Background())
+	if err != nil {
+		if !templateBootFatal(err, from) {
+			slog.Warn("Could not confirm the newest nuclei-templates release, continuing on the installed set",
+				"path", templateDir, "version", from, "error", err)
+			return
+		}
+		slog.Error("Failed to install nuclei templates", "error", err, "version", from)
 		os.Exit(1)
 	}
-	slog.Info("Nuclei templates are up to date", "path", templateDir)
+	if from == to {
+		slog.Info("Nuclei templates verified against the newest release", "path", templateDir, "version", to)
+	} else {
+		slog.Info("Nuclei templates updated", "path", templateDir, "from", from, "to", to)
+	}
 }
 
-// templateUpdateMu serializes template refreshes so concurrent scans
-// (ScanParallelism > 1) never rewrite the shared template dir at once.
-var templateUpdateMu sync.Mutex
+// templateBootFatal reports whether a boot-time template failure should stop
+// the agent. A set that could not be confirmed as newest is still usable, so
+// an unreachable release API must not ground a fleet; having no templates at
+// all is fatal. The lookup and the download carry their own 30s timeouts.
+func templateBootFatal(err error, installed string) bool {
+	if err == nil {
+		return false
+	}
+	return !errors.Is(err, runtools.ErrFreshnessUnknown) || installed == ""
+}
 
 // refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
 // run, so a long-lived agent picks up releases without a restart. Non-fatal:
 // boot already guaranteed a usable set, so a transient update failure logs and
 // proceeds on the existing templates rather than dropping the scan.
-func refreshTemplatesForScan(scanID string) {
-	templateUpdateMu.Lock()
-	defer templateUpdateMu.Unlock()
-
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
+func refreshTemplatesForScan(ctx context.Context, scanID string) {
+	from, to, err := runtools.EnsureLatestTemplates(ctx)
+	if err != nil {
+		// An unreachable release API must not stall scanning; per-chunk
+		// verification still guarantees the templates this scan needs.
 		slog.Warn("Failed to refresh nuclei templates before scan, using existing set",
-			"scan_id", scanID, "error", err)
+			"scan_id", scanID, "version", from, "error", err)
+		return
+	}
+	if from != to {
+		slog.Info("Nuclei templates updated before scan", "scan_id", scanID, "from", from, "to", to)
 	}
 }
 
@@ -341,9 +362,11 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	if r.options.AgentName == "" {
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			r.options.AgentName = hostname
-		} else {
+		// Hostnames routinely break the name rules (".local" suffix, spaces): coerce, never reject.
+		if hostname, err := os.Hostname(); err == nil {
+			r.options.AgentName = validate.SanitizeName(hostname)
+		}
+		if r.options.AgentName == "" {
 			r.options.AgentName = r.options.AgentId
 		}
 	}
@@ -1242,7 +1265,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
 	}
 
-	refreshTemplatesForScan(work.ScanID)
+	refreshTemplatesForScan(ctx, work.ScanID)
 
 	err := func() error {
 		creds := r.GetNATSCredentials()
@@ -1792,6 +1815,23 @@ func (r *Runner) In(ctx context.Context) error {
 
 var isRegistered bool
 
+// heartbeatQuery builds the /in query string. Every heartbeat carries the
+// running version so the platform can record which build an agent is on
+// without broadcasting a health-check RPC to ask.
+func heartbeatQuery(options *Options, version string, networkSubnets []string) url.Values {
+	q := url.Values{}
+	q.Set("os", runtime.GOOS)
+	q.Set("arch", runtime.GOARCH)
+	q.Set("id", options.AgentId)
+	q.Set("name", options.AgentName)
+	q.Set("agent_network", options.AgentNetwork)
+	q.Set("version", version)
+	if len(networkSubnets) > 0 {
+		q.Set("network_subnets", strings.Join(networkSubnets, ","))
+	}
+	return q
+}
+
 // inFunctionTickCallback runs one register/heartbeat cycle: GET /v1/agents/{id}
 // to sync server-authoritative state, then POST /v1/agents/in to refresh the
 // 7-minute Redis TTL and obtain NATS credentials.
@@ -1827,12 +1867,21 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		} else {
 			agentInfo := response.Agent
 			if agentInfo.AgentNetwork != "" && agentInfo.AgentNetwork != r.options.AgentNetwork {
-				r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.AgentNetwork, r.options.AgentNetwork))
-				r.options.AgentNetwork = agentInfo.AgentNetwork
+				// Keep the local value rather than kill a running agent over a bad response.
+				if serverNetwork, err := validate.Name("agent_network", agentInfo.AgentNetwork); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent_network from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), serverNetwork, r.options.AgentNetwork))
+					r.options.AgentNetwork = serverNetwork
+				}
 			}
 			if agentInfo.Name != "" && agentInfo.Name != r.options.AgentName {
-				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.Name, r.options.AgentName))
-				r.options.AgentName = agentInfo.Name
+				if serverName, err := validate.Name("name", agentInfo.Name); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent name from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), serverName, r.options.AgentName))
+					r.options.AgentName = serverName
+				}
 			}
 			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", agentInfo.LastUpdate.Format(time.RFC3339)))
 		}
@@ -1856,22 +1905,14 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		return err
 	}
 
-	q := req.URL.Query()
-	q.Add("os", runtime.GOOS)
-	q.Add("arch", runtime.GOARCH)
-	q.Add("id", r.options.AgentId)
-	q.Add("name", r.options.AgentName)
-	q.Add("agent_network", r.options.AgentNetwork)
-
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
 		r.logHelper("DEBUG", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
-		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
 		r.logHelper("INFO", "No network subnets discovered")
 	}
 
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = heartbeatQuery(r.options, Version, networkSubnets).Encode()
 
 	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, nil)
 	if inResp.Error != nil {
@@ -1916,7 +1957,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	if !isRegistered {
-		r.logHelper("INFO", "agent registered successfully")
+		r.logHelper("INFO", fmt.Sprintf("agent registered successfully (version=%s)", Version))
 		isRegistered = true
 	}
 
@@ -2357,6 +2398,22 @@ func parseOptions() *Options {
 
 	if options.AgentNetwork == "" {
 		options.AgentNetwork = "default"
+	}
+	agentNetwork, err := validate.Name("agent-network", options.AgentNetwork)
+	if err != nil {
+		slog.Error("invalid agent network", "error", err)
+		os.Exit(1)
+	}
+	options.AgentNetwork = agentNetwork
+
+	// An empty name is derived from the hostname later; only explicit input is checked here.
+	if options.AgentName != "" {
+		agentName, err := validate.Name("agent-name", options.AgentName)
+		if err != nil {
+			slog.Error("invalid agent name", "error", err)
+			os.Exit(1)
+		}
+		options.AgentName = agentName
 	}
 
 	// 0 = auto-detect for chunks.

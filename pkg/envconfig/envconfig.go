@@ -32,6 +32,14 @@ func APIServer() string { return envutil.GetEnvOrDefault(KeyAPIServer, DefaultAP
 // UpdateURL overrides the self-update download URL; empty resolves via GitHub releases.
 func UpdateURL() string { return envutil.GetEnvOrDefault(KeyUpdateURL, "") }
 
+// KeyGitHubToken is read by projectdiscovery/utils/update for every
+// nuclei-templates download; the agent reuses it for the release lookup so a
+// fleet shares one 5000/hr budget instead of 60/hr per NAT egress IP.
+const KeyGitHubToken = "GITHUB_TOKEN"
+
+// GitHubToken returns GITHUB_TOKEN; empty means unauthenticated GitHub access.
+func GitHubToken() string { return envutil.GetEnvOrDefault(KeyGitHubToken, "") }
+
 // ---------- Agent identity & topology ----------
 
 const (
@@ -104,6 +112,7 @@ const (
 	KeyLocalK8s                = "LOCAL_K8S"
 	KeyDisableDiagnosticUpload = "PDCP_DISABLE_DIAGNOSTIC_UPLOAD"
 	KeyEnableScanLogUpload     = "PDCP_ENABLE_SCAN_LOG_UPLOAD"
+	KeyAllowMissingTemplates   = "PDCP_ALLOW_MISSING_TEMPLATES"
 )
 
 // Verbose returns true when PDCP_VERBOSE is truthy.
@@ -126,6 +135,13 @@ func DisableDiagnosticUpload() bool {
 // provisioned don't hammer the API with rejected uploads.
 func ScanLogUploadEnabled() bool {
 	return envutil.GetEnvOrDefault(KeyEnableScanLogUpload, false)
+}
+
+// AllowMissingTemplates lets a scan run when templates the platform requested
+// are absent even after a reinstall. Off by default: an incomplete set reports
+// a clean scan for checks that never ran.
+func AllowMissingTemplates() bool {
+	return envutil.GetEnvOrDefault(KeyAllowMissingTemplates, false)
 }
 
 // ---------- Observability ----------
