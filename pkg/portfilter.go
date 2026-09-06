@@ -149,7 +149,7 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 	hostPorts := make(map[string][]string)
 
 	// Probe-denied ports are never contacted, even when a template or an
-	// explicit host:port input asks for them (PDCP-110).
+	// explicit host:port input asks for them.
 	targets = runtools.StripDeniedProbePorts(targets)
 	options := &runner.Options{
 		Host:              goflags.StringSlice(targets),
