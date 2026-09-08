@@ -386,9 +386,8 @@ func markRepaired() {
 }
 
 // EnsureLatestTemplates brings the template set to the newest published
-// release, returning the versions before and after. A missing directory is
-// installed; a lagging one is updated incrementally; an update that fails to
-// land the expected version falls back to a full reinstall.
+// release, returning the versions before and after. A missing directory, a
+// queued repair and a lagging release all resolve to the same staged install.
 func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 	templateRW.Lock()
 	defer templateRW.Unlock()
