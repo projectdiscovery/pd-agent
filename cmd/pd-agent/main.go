@@ -61,6 +61,10 @@ import (
 // agent would emit "file not found" errors mid-scan for every cloud-sent path
 // missing locally, so templateBootFatal decides what is worth aborting for.
 func ensureNucleiTemplates() {
+	// Claim the HTTP caps rather than depend on main's call order: an unbounded
+	// download here holds the template write lock and wedges every later scan.
+	runtools.InitNucleiProcess()
+
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
 		slog.Error("Could not determine nuclei template directory")
@@ -75,8 +79,8 @@ func ensureNucleiTemplates() {
 
 	from, to, err := runtools.EnsureLatestTemplates(context.Background())
 	if err != nil {
-		if !templateBootFatal(err, from) {
-			slog.Warn("Could not confirm the newest nuclei-templates release, continuing on the installed set",
+		if !templateBootFatal(err, runtools.HaveUsableTemplates()) {
+			slog.Warn("Nuclei template update failed, continuing on the installed set",
 				"path", templateDir, "version", from, "error", err)
 			return
 		}
@@ -91,14 +95,14 @@ func ensureNucleiTemplates() {
 }
 
 // templateBootFatal reports whether a boot-time template failure should stop
-// the agent. A set that could not be confirmed as newest is still usable, so
-// an unreachable release API must not ground a fleet; having no templates at
-// all is fatal. The lookup and the download carry their own 30s timeouts.
-func templateBootFatal(err error, installed string) bool {
+// the agent. Only the absence of a usable set is worth grounding a fleet for:
+// which step failed says nothing about whether this agent can scan, and a
+// download failure leaves yesterday's working set untouched.
+func templateBootFatal(err error, haveTemplates bool) bool {
 	if err == nil {
 		return false
 	}
-	return !errors.Is(err, runtools.ErrFreshnessUnknown) || installed == ""
+	return !haveTemplates
 }
 
 // refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
@@ -2483,8 +2487,6 @@ func main() {
 	}
 
 	ensureNucleiTemplates()
-
-	runtools.InitNucleiProcess()
 
 	var err error
 	pdcpRunner, err = NewRunner(options)

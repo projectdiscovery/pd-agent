@@ -327,6 +327,61 @@ func TestEnsureLatestTemplatesUpdatesWhenBehind(t *testing.T) {
 	}
 }
 
+// from and latest come from two independent release lookups. Comparing them as
+// strings made any prefix drift look like a version gap and re-downloaded the
+// whole set on every scan.
+func TestEnsureLatestTemplatesToleratesTagPrefixDrift(t *testing.T) {
+	stubTemplates(t, "v10.4.8")
+	fetchLatestTag = func(context.Context) (string, error) { return "10.4.8", nil }
+	freshInstall = func() error { t.Fatal("a bare tag prefix is not a version gap"); return nil }
+
+	from, to, err := EnsureLatestTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLatestTemplates: %v", err)
+	}
+	if from != to {
+		t.Errorf("versions = %s -> %s, want no change", from, to)
+	}
+}
+
+// A release landing between our lookup and nuclei's own can leave the installed
+// set ahead of what we resolved. That is not a reason to reinstall.
+func TestEnsureLatestTemplatesDoesNotDowngrade(t *testing.T) {
+	stubTemplates(t, "v10.5.0")
+	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
+	freshInstall = func() error { t.Fatal("must not reinstall over a newer set"); return nil }
+
+	from, to, err := EnsureLatestTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLatestTemplates: %v", err)
+	}
+	if from != to || to != "v10.5.0" {
+		t.Errorf("versions = %s -> %s, want no change at v10.5.0", from, to)
+	}
+}
+
+// Boot fatality keys off this, and nuclei loads .json templates too: matching
+// only .yaml would read a valid set as empty and ground the agent.
+func TestHaveUsableTemplates(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	if HaveUsableTemplates() {
+		t.Fatal("an empty directory holds no usable templates")
+	}
+
+	// A wiped set can leave repo metadata behind. Counting that as usable boots
+	// an agent that then fails every scan, which is what this guard prevents.
+	writeTemplate(t, dir, ".github/workflows/ci.yaml")
+	writeTemplate(t, dir, "helpers/wordlists/a.yaml")
+	if HaveUsableTemplates() {
+		t.Error("repo metadata is not a template set")
+	}
+
+	writeTemplate(t, dir, "http/cves/2024/CVE-2024-1.json")
+	if !HaveUsableTemplates() {
+		t.Error("a .json template is loadable and must count")
+	}
+}
+
 func TestEnsureLatestTemplatesNoopWhenCurrent(t *testing.T) {
 	stubTemplates(t, "v10.4.8")
 	fetchLatestTag = func(context.Context) (string, error) { return "v10.4.8", nil }
@@ -357,6 +412,32 @@ func TestEnsureLatestTemplatesFailsWhenInstallDoesNotLandTheVersion(t *testing.T
 	}
 	if from != "v10.4.5" || to != "v10.4.5" {
 		t.Errorf("versions = %s -> %s, want both at v10.4.5", from, to)
+	}
+}
+
+// The post-install check compares our resolved tag against the version nuclei
+// records from its own release lookup. String equality there reports a
+// successful install as a failure whenever the two tags differ only by prefix.
+func TestEnsureLatestTemplatesAcceptsAnInstallMatchingBySemver(t *testing.T) {
+	stubTemplates(t, "v10.4.5")
+	fetchLatestTag = func(context.Context) (string, error) { return "10.4.8", nil }
+	installStub(t)
+
+	download := freshInstall
+	freshInstall = func() error {
+		if err := download(); err != nil {
+			return err
+		}
+		config.DefaultConfig.TemplateVersion = "v10.4.8"
+		return nil
+	}
+
+	_, to, err := EnsureLatestTemplates(context.Background())
+	if err != nil {
+		t.Fatalf("EnsureLatestTemplates: %v", err)
+	}
+	if to != "v10.4.8" {
+		t.Errorf("to = %q, want v10.4.8", to)
 	}
 }
 
@@ -398,13 +479,11 @@ func TestEnsureLatestTemplatesPropagatesTagFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the release-API failure to surface")
 	}
-	// ensureNucleiTemplates keys off both of these to warn-and-continue rather
-	// than ground an agent whose templates are already on disk.
 	if !errors.Is(err, ErrFreshnessUnknown) {
 		t.Errorf("err = %v, want it to wrap ErrFreshnessUnknown", err)
 	}
 	if from != "v10.4.5" {
-		t.Errorf("from = %q, want the installed version so the caller can tell templates exist", from)
+		t.Errorf("from = %q, want the installed version reported unchanged", from)
 	}
 }
 
@@ -842,6 +921,21 @@ func blockedByWriteLock(t *testing.T, fn func()) bool {
 		t.Fatal("call never completed after the write lock was released")
 	}
 	return blocked
+}
+
+// Boot exits on a false negative here, and an unlocked read during a staged
+// install sees the repointed global and reports nothing on disk.
+func TestHaveUsableTemplatesTakesTheReadLock(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	writeTemplate(t, dir, "http/present.yaml")
+
+	var have bool
+	if !blockedByWriteLock(t, func() { have = HaveUsableTemplates() }) {
+		t.Error("HaveUsableTemplates read the template dir during a staged install")
+	}
+	if !have {
+		t.Error("once the write lock is released the template on disk must be seen")
+	}
 }
 
 func TestVerifyTemplatesForTakesTheReadLock(t *testing.T) {

@@ -280,15 +280,25 @@ func downloadInto(staging string) error {
 	return nil
 }
 
+// HaveUsableTemplates reports whether the live directory holds a template
+// nuclei could load. This is the only question boot needs answered.
+func HaveUsableTemplates() bool {
+	templateRW.RLock()
+	defer templateRW.RUnlock()
+	return dirHasTemplates(templateDir())
+}
+
 // dirHasTemplates reports whether dir holds at least one template, so an empty
-// download is never swapped over a working set.
+// download is never swapped over a working set. Matching is rooted at dir:
+// IsTemplate on its own skips nuclei's .git/.github/helpers exclusions for
+// absolute paths, counting leftover repo metadata as a usable set.
 func dirHasTemplates(dir string) bool {
 	found := false
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".yaml") {
+		if !d.IsDir() && config.IsTemplateWithRoot(path, dir) {
 			found = true
 			return fs.SkipAll
 		}
@@ -424,8 +434,11 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 			"release", stale, "resolved_ago", nowFn().Sub(at).Round(time.Second), "error", err)
 		latest = stale
 	}
-	if from == latest {
-		return from, latest, nil
+	// from and latest come from two independent release lookups, so compare by
+	// semver: string equality re-downloads the whole set whenever a release
+	// lands between the two calls, or the tag prefixes differ.
+	if !config.IsOutdatedVersion(from, latest) {
+		return from, from, nil
 	}
 
 	// A staged install is the only writer: nuclei's own incremental update is
@@ -438,7 +451,7 @@ func EnsureLatestTemplates(ctx context.Context) (from, to string, err error) {
 	}
 
 	to = InstalledTemplateVersion()
-	if to != latest {
+	if config.IsOutdatedVersion(to, latest) {
 		return from, to, fmt.Errorf("templates still at %s after repair, want %s", to, latest)
 	}
 	slog.Info("nuclei templates: update finished", "from", from, "to", to, "duration", nowFn().Sub(start))
