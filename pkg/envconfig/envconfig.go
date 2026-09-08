@@ -112,7 +112,7 @@ const (
 	KeyLocalK8s                = "LOCAL_K8S"
 	KeyDisableDiagnosticUpload = "PDCP_DISABLE_DIAGNOSTIC_UPLOAD"
 	KeyEnableScanLogUpload     = "PDCP_ENABLE_SCAN_LOG_UPLOAD"
-	KeyAllowMissingTemplates   = "PDCP_ALLOW_MISSING_TEMPLATES"
+	KeyRequireAllTemplates     = "PDCP_REQUIRE_ALL_TEMPLATES"
 )
 
 // Verbose returns true when PDCP_VERBOSE is truthy.
@@ -137,11 +137,12 @@ func ScanLogUploadEnabled() bool {
 	return envutil.GetEnvOrDefault(KeyEnableScanLogUpload, false)
 }
 
-// AllowMissingTemplates lets a scan run when templates the platform requested
-// are absent even after a reinstall. Off by default: an incomplete set reports
-// a clean scan for checks that never ran.
-func AllowMissingTemplates() bool {
-	return envutil.GetEnvOrDefault(KeyAllowMissingTemplates, false)
+// RequireAllTemplates fails a chunk outright when any requested template
+// cannot be resolved, instead of dropping it and scanning the rest. Off by
+// default: losing one check beats losing the whole chunk. Turn it on where a
+// partial scan reported as complete is the worse outcome.
+func RequireAllTemplates() bool {
+	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, false)
 }
 
 // ---------- Observability ----------

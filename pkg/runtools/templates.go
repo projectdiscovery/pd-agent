@@ -361,6 +361,7 @@ var (
 	repairWanted      bool
 	repairReason      string
 	repairedAtVersion string
+	repairFutileAt    string
 )
 
 // RequestTemplateRepair marks the on-disk set as suspect so the next scan-level
@@ -372,8 +373,17 @@ func RequestTemplateRepair(reason string) {
 	defer repairMu.Unlock()
 
 	if installed := InstalledTemplateVersion(); installed != "" && installed == repairedAtVersion {
-		slog.Debug("nuclei templates: repair already attempted at this release, not retrying",
-			"version", installed, "reason", reason)
+		// Reinstalling cannot produce a template this release does not carry, so
+		// the request is dropped. Say so once per release: still missing after a
+		// repair means it will not resolve on its own, unlike a transient gap.
+		if repairFutileAt != installed {
+			repairFutileAt = installed
+			slog.Warn("nuclei templates: still unresolved after a repair at this release, reinstalling cannot fix it",
+				"version", installed, "reason", reason)
+		} else {
+			slog.Debug("nuclei templates: repair already attempted at this release, not retrying",
+				"version", installed, "reason", reason)
+		}
 		return
 	}
 	if !repairWanted {

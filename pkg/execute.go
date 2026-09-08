@@ -282,6 +282,34 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		}
 	}
 
+	// Nuclei skips a template it cannot resolve and still reports success, so the
+	// only thing dropping it here changes is that the chunk no longer aborts:
+	// losing one check beats losing every check this agent could have run.
+	// PDCP_REQUIRE_ALL_TEMPLATES inverts that where a partial scan reported as
+	// complete is the worse outcome.
+	if missing := runtools.VerifyTemplatesFor(opts.Templates); len(missing) > 0 {
+		if runtools.AnyPublic(missing) {
+			runtools.RequestTemplateRepair(fmt.Sprintf("%d templates unresolved on scan %s", len(missing), task.Options.ScanID))
+		}
+
+		requested := len(opts.Templates)
+		kept, err := resolveRequestedTemplates(opts.Templates, missing, envconfig.RequireAllTemplates())
+		if err != nil {
+			return nil, nil, fmt.Errorf("nuclei scan: %w under %s (e.g. %v); a reinstall is queued for the next scan",
+				err, runtools.TemplateDir(), sampleTemplates(missing))
+		}
+		opts.Templates = kept
+
+		slog.Error("nuclei scan: dropped unresolved templates, scanning the rest",
+			"scan_id", task.Options.ScanID,
+			"chunk_id", task.Id,
+			"requested", requested,
+			"dropped", requested-len(kept),
+			"scanning", len(kept),
+			"private_dropped", countPrivate(missing),
+			"sample", sampleTemplates(missing))
+	}
+
 	slog.Info("running embedded nuclei",
 		"scan_id", task.Options.ScanID,
 		"targets", len(opts.Targets),
@@ -291,29 +319,6 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		"headless", opts.Headless,
 		"config_bytes", len(opts.ConfigYAML),
 	)
-
-	// A template the platform scheduled but the agent lacks would be skipped
-	// silently, reporting a clean scan that never ran those checks. The repair is
-	// queued for the next scan rather than run here.
-	if missing := runtools.VerifyTemplatesFor(opts.Templates); len(missing) > 0 {
-		if runtools.AnyPublic(missing) {
-			runtools.RequestTemplateRepair(fmt.Sprintf("%d templates unresolved on scan %s", len(missing), task.Options.ScanID))
-		}
-
-		shown := missing
-		if len(shown) > 3 {
-			shown = shown[:3]
-		}
-		if !envconfig.AllowMissingTemplates() {
-			return nil, nil, fmt.Errorf("nuclei scan: %d of %d requested templates could not be resolved under %s (e.g. %v); a reinstall is queued for the next scan, or set %s=true to scan with an incomplete set",
-				len(missing), len(opts.Templates), runtools.TemplateDir(), shown, envconfig.KeyAllowMissingTemplates)
-		}
-		slog.Error("nuclei scan: scanning with an incomplete template set",
-			"scan_id", task.Options.ScanID,
-			"chunk_id", task.Id,
-			"missing_count", len(missing),
-			"sample", shown)
-	}
 
 	// Match upload is handled by the nuclei SDK via WithPDCPUpload.
 	if _, err := runtools.RunNuclei(ctx, opts); err != nil {
@@ -341,6 +346,60 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 	// Empty TaskResult: embedded path doesn't capture stdout/stderr, so
 	// ExtractUnresponsiveHosts has no input until we hook nuclei's logger.
 	return &types.TaskResult{}, []string{outputFile}, nil
+}
+
+// resolveRequestedTemplates narrows requested to the entries this agent can
+// run. It returns an error when requireAll is set, or when nothing is left to
+// scan; the caller adds the template directory and a sample.
+func resolveRequestedTemplates(requested, missing []string, requireAll bool) ([]string, error) {
+	kept := dropUnresolved(requested, missing)
+	dropped := len(requested) - len(kept)
+
+	if requireAll {
+		return nil, fmt.Errorf("%d of %d requested templates could not be resolved (%s is set)",
+			dropped, len(requested), envconfig.KeyRequireAllTemplates)
+	}
+	if len(kept) == 0 {
+		return nil, fmt.Errorf("none of the %d requested templates could be resolved", len(requested))
+	}
+	return kept, nil
+}
+
+// sampleTemplates caps a path list to keep log lines and errors readable.
+func sampleTemplates(items []string) []string {
+	if len(items) <= 3 {
+		return items
+	}
+	return items[:3]
+}
+
+// countPrivate reports how many entries are absolute paths. A reinstall cannot
+// restore those, so they separate a stale shared directory from per-chunk
+// materialization having gone wrong on this host.
+func countPrivate(items []string) int {
+	n := 0
+	for _, it := range items {
+		if filepath.IsAbs(it) {
+			n++
+		}
+	}
+	return n
+}
+
+// dropUnresolved returns requested without the entries in missing, preserving
+// order so the surviving list still reads like the platform sent it.
+func dropUnresolved(requested, missing []string) []string {
+	drop := make(map[string]struct{}, len(missing))
+	for _, m := range missing {
+		drop[m] = struct{}{}
+	}
+	kept := make([]string, 0, len(requested))
+	for _, tmpl := range requested {
+		if _, bad := drop[tmpl]; !bad {
+			kept = append(kept, tmpl)
+		}
+	}
+	return kept
 }
 
 // splitIPsAndHostnames separates IPs from hostnames; strips port if present.

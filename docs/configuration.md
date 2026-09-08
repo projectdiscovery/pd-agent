@@ -44,8 +44,8 @@ The agent keeps a small rolling log + metrics buffer at `~/.pd-agent/pd-agent-<a
 | --- | --- | --- |
 | `PDCP_VERBOSE` | `false` | Verbose logging. Same as `-verbose`. |
 | `PDCP_KEEP_OUTPUT_FILES` | `false` | Keep per-chunk output files after upload (debugging). Same as `-keep-output-files`. |
+| `PDCP_REQUIRE_ALL_TEMPLATES` | `false` | Fail a chunk when any requested template cannot be resolved, instead of dropping it and scanning the rest. Turn it on where a partial scan reported as complete is worse than a failed chunk. |
 | `PDCP_ENABLE_SCAN_LOG_UPLOAD` | `false` | Upload the gzipped per-scan log to the platform. Off by default — leave off unless the platform has scan-log storage provisioned for your team. |
-| `PDCP_ALLOW_MISSING_TEMPLATES` | `false` | Scan even when templates the platform requested cannot be resolved. Off by default: an incomplete set reports a clean scan for checks that never ran. |
 | `LOCAL_K8S` | `false` | Use `KUBECONFIG` instead of the in-cluster service account when discovering Kubernetes subnets. Strict `true` match. |
 
 ### Networking & API
