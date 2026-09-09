@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 
 	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
+	"github.com/projectdiscovery/pd-agent/pkg/validate"
 )
 
 // Meta identifies the chunk a scan log belongs to.
@@ -21,6 +22,17 @@ type Meta struct {
 	ScanID    string
 	ChunkID   string
 	HistoryID int64
+}
+
+// Validate checks the identifiers that reach an object key or a request URL.
+// natsrpc already rejects these at ingest; this is the second boundary, so a
+// destination added later cannot be the one that forgets.
+func (m Meta) Validate() error {
+	if _, err := validate.PathSegment("scan_id", m.ScanID); err != nil {
+		return err
+	}
+	_, err := validate.PathSegment("chunk_id", m.ChunkID)
+	return err
 }
 
 // Uploader ships one gzipped scan log. Implementations receive an already
@@ -45,6 +57,10 @@ func Destinations() []Uploader {
 func Upload(ctx context.Context, dests []Uploader, m Meta, outputFile string) error {
 	if len(dests) == 0 {
 		return nil
+	}
+
+	if err := m.Validate(); err != nil {
+		return fmt.Errorf("refusing to upload: %w", err)
 	}
 
 	info, err := os.Stat(outputFile)

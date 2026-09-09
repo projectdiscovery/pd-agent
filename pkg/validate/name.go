@@ -59,3 +59,39 @@ func SanitizeName(value string) string {
 	}
 	return out
 }
+
+// MaxPathSegmentLength bounds one path or object-key segment.
+const MaxPathSegmentLength = 200
+
+// PathSegment rejects value if it could escape or corrupt the location it is
+// interpolated into: empty, "." or "..", a path separator, a control
+// character, or a leading dash that would read as a flag. It returns the
+// trimmed value.
+//
+// Distinct from Name deliberately. Name encodes the agent naming rules, which
+// are stricter than safety requires and would reject a legitimate
+// platform-generated identifier containing a dot or longer than 50 characters.
+func PathSegment(field, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	if n := utf8.RuneCountInString(trimmed); n > MaxPathSegmentLength {
+		return "", fmt.Errorf("%s must be at most %d characters, got %d", field, MaxPathSegmentLength, n)
+	}
+	if trimmed == "." || trimmed == ".." {
+		return "", fmt.Errorf("%s must not be %q", field, trimmed)
+	}
+	if strings.ContainsAny(trimmed, `/\`) {
+		return "", fmt.Errorf("%s must not contain a path separator", field)
+	}
+	if strings.HasPrefix(trimmed, "-") {
+		return "", fmt.Errorf("%s must not start with a dash", field)
+	}
+	for _, r := range trimmed {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%s must not contain control characters", field)
+		}
+	}
+	return trimmed, nil
+}

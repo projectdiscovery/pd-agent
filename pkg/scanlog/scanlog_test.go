@@ -178,3 +178,30 @@ func TestUploadRemovesGzTempOnFailure(t *testing.T) {
 		}
 	}
 }
+
+// Second boundary: natsrpc rejects these at ingest, but a destination added
+// later must not be able to be the one that forgets.
+func TestUploadRejectsUnsafeMeta(t *testing.T) {
+	dest := &fakeUploader{name: "fake"}
+	outputFile := writeOutput(t, "line\n")
+
+	for _, m := range []Meta{
+		{ScanID: "../../etc", ChunkID: "c1", HistoryID: 1},
+		{ScanID: "scan-9", ChunkID: "../../root", HistoryID: 1},
+		{ScanID: "", ChunkID: "c1", HistoryID: 1},
+		{ScanID: "scan-9", ChunkID: "", HistoryID: 1},
+	} {
+		if err := Upload(context.Background(), []Uploader{dest}, m, outputFile); err == nil {
+			t.Errorf("Upload() = nil for %+v, want rejected", m)
+		}
+	}
+	if dest.calls != 0 {
+		t.Errorf("destination was called %d times, want 0", dest.calls)
+	}
+}
+
+func TestMetaValidate(t *testing.T) {
+	if err := (Meta{ScanID: "scan-9", ChunkID: "chunk-abc123"}).Validate(); err != nil {
+		t.Errorf("Validate() = %v for a normal meta", err)
+	}
+}
