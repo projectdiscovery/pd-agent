@@ -57,7 +57,14 @@ func Destinations() []Uploader {
 		dests = append(dests, NewPlatformUploader())
 	}
 	if cfg := S3ConfigFromEnv(); cfg.Enabled() {
-		dests = append(dests, NewS3Uploader(cfg))
+		// Boot already rejects a bad config, but the invariant NewS3Uploader
+		// relies on lives in cmd/ rather than here. Re-checking keeps the
+		// package self-contained and skips a destination that could only fail.
+		if err := cfg.Validate(); err != nil {
+			slog.Error("scan-log: skipping the S3 destination", "error", err)
+		} else {
+			dests = append(dests, NewS3Uploader(cfg))
+		}
 	}
 	return dests
 }

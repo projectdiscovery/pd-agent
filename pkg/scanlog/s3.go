@@ -99,17 +99,29 @@ func proxyAwareHTTPClient() *http.Client {
 	transport.ResponseHeaderTimeout = responseHeaderTimeout
 
 	if raw := envconfig.ProxyURL(); raw != "" {
-		if _, err := url.Parse(raw); err != nil {
-			// stripSignedURL, because a url.Error carries the raw URL and a
-			// proxy URL routinely carries basic-auth credentials. Every log
-			// line here is persisted to the agent's uploaded debug DB.
+		// Host, not just a parse error: url.Parse accepts almost anything, and
+		// httpproxy discards its own parse failure (config.init drops
+		// parseProxy's error), so a value it cannot use would otherwise send
+		// every request direct with nothing logged.
+		proxyURL, err := url.Parse(raw)
+		switch {
+		case err != nil:
+			// A url.Error carries the raw URL and a proxy URL routinely
+			// carries basic-auth. Every log line here is persisted to the
+			// agent's uploaded debug DB.
 			slog.Warn("scan-log: ignoring unparseable proxy for S3 uploads",
 				"key", envconfig.KeyProxyURL, "error", stripSignedURL(err))
-		} else {
+		case proxyURL.Host == "":
+			slog.Warn("scan-log: ignoring proxy with no host, uploads will go direct",
+				"key", envconfig.KeyProxyURL)
+		default:
 			cfg := httpproxy.Config{
 				HTTPProxy:  raw,
 				HTTPSProxy: raw,
-				NoProxy:    os.Getenv("NO_PROXY"),
+				// FromEnvironment reads NO_PROXY and no_proxy; reading only the
+				// uppercase form would proxy an in-cluster endpoint the
+				// operator had exempted in lower case.
+				NoProxy: httpproxy.FromEnvironment().NoProxy,
 			}
 			proxyFunc := cfg.ProxyFunc()
 			transport.Proxy = func(req *http.Request) (*url.URL, error) {
@@ -156,12 +168,23 @@ func (u *S3Uploader) Upload(ctx context.Context, m Meta, gzPath string, gzSize i
 	}
 	defer func() { _ = f.Close() }()
 
+	// Measured here rather than trusted from the caller: a ContentLength below
+	// the real body makes net/http send a prefix, which the backend commits as
+	// a complete object and answers 200 before the client notices.
+	st, err := f.Stat()
+	if err != nil {
+		return "", fmt.Errorf("stat gz: %w", err)
+	}
+	if st.Size() != gzSize {
+		return "", fmt.Errorf("gz is %d bytes on disk, caller said %d", st.Size(), gzSize)
+	}
+
 	// The *os.File is handed over unwrapped so the SDK can rewind it to retry.
 	if _, err := u.client().PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(u.cfg.Bucket),
 		Key:           aws.String(key),
 		Body:          f,
-		ContentLength: aws.Int64(gzSize),
+		ContentLength: aws.Int64(st.Size()),
 		ContentType:   aws.String("application/gzip"),
 	}); err != nil {
 		return "", redact("put object", err)

@@ -100,6 +100,12 @@ func TestDestinations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", tt.platform)
 			t.Setenv("PDCP_SCAN_LOG_S3_BUCKET", tt.bucket)
+			// A bucket alone is not a usable config, and Destinations now
+			// skips one that cannot work. Supply the rest so these cases test
+			// destination selection rather than validation.
+			t.Setenv("PDCP_SCAN_LOG_S3_REGION", "us-east-1")
+			t.Setenv("PDCP_SCAN_LOG_S3_ACCESS_KEY_ID", "k")
+			t.Setenv("PDCP_SCAN_LOG_S3_SECRET_ACCESS_KEY", "s")
 
 			got := Destinations()
 			if len(got) != len(tt.want) {
@@ -219,5 +225,20 @@ func TestUploadRejectsUnsafeMeta(t *testing.T) {
 func TestMetaValidate(t *testing.T) {
 	if err := (Meta{ScanID: "scan-9", ChunkID: "chunk-abc123"}).Validate(); err != nil {
 		t.Errorf("Validate() = %v for a normal meta", err)
+	}
+}
+
+// Destinations builds the uploader, and the config invariant it relies on is
+// enforced in cmd/. A config that slipped past boot must not produce a
+// destination that can only fail.
+func TestDestinationsSkipsInvalidS3Config(t *testing.T) {
+	t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", "")
+	t.Setenv("PDCP_SCAN_LOG_S3_BUCKET", "acme-logs")
+	t.Setenv("PDCP_SCAN_LOG_S3_REGION", "") // required alongside a bucket
+	t.Setenv("PDCP_SCAN_LOG_S3_ACCESS_KEY_ID", "k")
+	t.Setenv("PDCP_SCAN_LOG_S3_SECRET_ACCESS_KEY", "s")
+
+	if got := Destinations(); len(got) != 0 {
+		t.Errorf("Destinations() = %d, want 0 for a config that cannot work", len(got))
 	}
 }

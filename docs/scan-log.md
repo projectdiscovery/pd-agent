@@ -53,7 +53,7 @@ INFO scan-log: upload enabled destinations=[s3] s3_bucket=your-bucket
      s3_region=us-east-1 s3_endpoint= s3_path_style=false s3_prefix=scan-logs
 ```
 
-> `destinations=[]` means nothing will upload. Check this line before your first scan.
+> If you see `scan-log: upload disabled, no destinations configured` instead, nothing will upload. Check for one of these two lines before your first scan.
 
 An incomplete S3 config stops the agent at startup with the missing variable named, rather than starting and failing every upload.
 
@@ -116,11 +116,12 @@ Only scans produce a scan log. Enumeration tasks do not.
 
 | | |
 | --- | --- |
-| Maximum object size | 512 MiB gzipped. Rejected before the upload starts, so nothing is transferred |
+| Maximum object size (your bucket) | 512 MiB gzipped. Rejected before the upload starts, so nothing is transferred |
 | Encryption at rest | the bucket default. The agent sets no encryption header |
 | Retention | none. The agent never deletes an object |
-| Outbound proxy | `PROXY_URL` is honoured, and `NO_PROXY` applies |
+| Outbound proxy (your bucket) | `PROXY_URL` is honoured, and `NO_PROXY` / `no_proxy` apply. Unset, the standard `HTTP_PROXY` / `HTTPS_PROXY` variables apply instead |
 | Plaintext endpoints | an `http://` endpoint is allowed and warned about at startup. Scan logs and the signed request cross the network unencrypted |
+| PD-managed storage | proxy behaviour and the size cap differ: it follows the platform's own limit and does not use `PROXY_URL` for the storage leg |
 
 Verified against AWS S3 and MinIO. Cloudflare R2 and GCS interop are expected to work but are untested.
 

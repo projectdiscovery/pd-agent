@@ -80,6 +80,19 @@ func (s *s3Store) config() S3Config {
 	}
 }
 
+// writeGz gzips content to a temp file and returns the path with its real
+// size, so a fixture can never disagree with what Upload measures.
+func writeGz(t *testing.T, content string) (string, int64) {
+	t.Helper()
+	src := writeOutput(t, content)
+	gzPath := src + ".gz"
+	size, err := gzipFile(src, gzPath)
+	if err != nil {
+		t.Fatalf("gzipFile: %v", err)
+	}
+	return gzPath, size
+}
+
 func TestS3UploaderPutsTheObject(t *testing.T) {
 	resetS3ClientCache(t)
 	t.Setenv("PROXY_URL", "")
@@ -198,6 +211,7 @@ func TestS3UploaderRejectsUntrustedIDs(t *testing.T) {
 	resetS3ClientCache(t)
 	t.Setenv("PROXY_URL", "")
 	store := newS3Store(t)
+	gzPath, gzSize := writeGz(t, "line\n")
 
 	tests := []struct {
 		name string
@@ -213,7 +227,7 @@ func TestS3UploaderRejectsUntrustedIDs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			before := len(store.requests())
 			_, err := NewS3Uploader(store.config()).Upload(
-				context.Background(), tt.meta, writeOutput(t, "line\n"), 5)
+				context.Background(), tt.meta, gzPath, gzSize)
 			if err == nil {
 				t.Fatal("Upload() = nil, want the id rejected")
 			}
@@ -244,7 +258,8 @@ func TestS3UploaderTransportErrorDoesNotLeakSignature(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), writeOutput(t, "line\n"), 5)
+	gzPath, gzSize := writeGz(t, "line\n")
+	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), gzPath, gzSize)
 	if err == nil {
 		t.Fatal("Upload() = nil, want a transport failure")
 	}
@@ -490,7 +505,8 @@ func TestS3UploaderTruncatesHugeBackendError(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), writeOutput(t, "line\n"), 5)
+	gzPath, gzSize := writeGz(t, "line\n")
+	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), gzPath, gzSize)
 	if err == nil {
 		t.Fatal("Upload() = nil, want the 500 reported")
 	}
@@ -516,7 +532,8 @@ func TestS3UploaderErrorRemainsInspectable(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), writeOutput(t, "line\n"), 5)
+	gzPath, gzSize := writeGz(t, "line\n")
+	_, err := NewS3Uploader(cfg).Upload(ctx, testMeta(), gzPath, gzSize)
 	if err == nil {
 		t.Fatal("Upload() = nil, want the 403 reported")
 	}
@@ -534,9 +551,10 @@ func TestS3UploaderRejectsOversizeObject(t *testing.T) {
 	resetS3ClientCache(t)
 	t.Setenv("PROXY_URL", "")
 	store := newS3Store(t)
+	gzPath, _ := writeGz(t, "line\n")
 
 	_, err := NewS3Uploader(store.config()).Upload(
-		context.Background(), testMeta(), writeOutput(t, "line\n"), maxS3ObjectBytes+1)
+		context.Background(), testMeta(), gzPath, maxS3ObjectBytes+1)
 	if err == nil {
 		t.Fatal("Upload() = nil, want the size limit enforced before the body is sent")
 	}
@@ -642,5 +660,64 @@ func TestPlaintextWarning(t *testing.T) {
 				t.Errorf("PlaintextWarning() non-empty = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// A ContentLength below the real body makes net/http send a prefix, which the
+// backend commits as a complete object and answers 200 for. The mismatch has
+// to be caught before anything is sent.
+func TestS3UploaderRejectsSizeMismatch(t *testing.T) {
+	resetS3ClientCache(t)
+	t.Setenv("PROXY_URL", "")
+	store := newS3Store(t)
+	gzPath, gzSize := writeGz(t, strings.Repeat("line\n", 40))
+
+	_, err := NewS3Uploader(store.config()).Upload(
+		context.Background(), testMeta(), gzPath, gzSize-1)
+	if err == nil {
+		t.Fatal("Upload() = nil, want the size mismatch caught")
+	}
+	if !strings.Contains(err.Error(), "on disk") {
+		t.Errorf("error = %q, want it to name the on-disk size", err)
+	}
+	if n := len(store.requests()); n != 0 {
+		t.Errorf("%d requests sent despite the mismatch, want 0", n)
+	}
+}
+
+// httpproxy discards its own parse failure, so a proxy value it cannot use
+// would send every request direct with nothing logged.
+func TestProxyWithNoHostIsReported(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	t.Setenv("PROXY_URL", "corp-proxy:3128") // no scheme, so no host
+	transport := proxyAwareHTTPClient().Transport.(*http.Transport)
+
+	if !strings.Contains(buf.String(), "no host") {
+		t.Errorf("expected a warning about the unusable proxy, got %q", buf.String())
+	}
+	if transport.Proxy == nil {
+		t.Error("Proxy = nil; the ambient environment proxy should still apply")
+	}
+}
+
+// NO_PROXY and no_proxy are both honoured by httpproxy and by
+// http.ProxyFromEnvironment. Reading one would proxy an endpoint the operator
+// exempted in the other case.
+func TestProxyHonoursLowercaseNoProxy(t *testing.T) {
+	t.Setenv("PROXY_URL", "http://corp-proxy:3128")
+	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "minio")
+
+	transport := proxyAwareHTTPClient().Transport.(*http.Transport)
+	direct, err := transport.Proxy(&http.Request{URL: mustParse(t, "http://minio:9000/b/k")})
+	if err != nil {
+		t.Fatalf("Proxy: %v", err)
+	}
+	if direct != nil {
+		t.Errorf("minio proxied via %v despite lowercase no_proxy", direct)
 	}
 }
