@@ -140,13 +140,13 @@ func ScanLogUploadEnabled() bool {
 // RequireAllTemplates fails a chunk outright when any requested template
 // cannot be resolved, instead of dropping it and scanning the rest.
 //
-// On by default. Nothing the agent reports carries the dropped count, so a
-// scan that silently skipped most of its checks is indistinguishable from a
-// clean one — and for a vulnerability scanner a false negative nobody can see
-// is worse than a chunk that fails loudly. Set it false to accept partial
-// coverage, e.g. while a template set is being repaired.
+// Off by default, and not for lack of caution: nuclei's loader logs
+// "Could not find template" for an entry it cannot resolve and then scans the
+// rest anyway (catalog/loader.logErroredTemplates), so aborting the chunk
+// prevents no partial scan. It only discards the coverage that did resolve.
+// Turn it on where a partial result reported as complete is the worse outcome.
 func RequireAllTemplates() bool {
-	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, true)
+	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, false)
 }
 
 // ---------- Observability ----------
