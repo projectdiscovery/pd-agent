@@ -33,6 +33,11 @@ func TestEnsureLatestTemplatesLive(t *testing.T) {
 	t.Logf("installed:    %s", InstalledTemplateVersion())
 	t.Logf("latest:       %s", latest)
 
+	// Production calls this from the boot path before any install. Without it
+	// the download runs on nuclei's stock 30s cap, which cannot pull a ~150MB
+	// zipball, so this test could only ever fail on a cold or stale set.
+	InitNucleiProcess()
+
 	from, to, err := EnsureLatestTemplates(ctx)
 	if err != nil {
 		t.Fatalf("EnsureLatestTemplates: %v", err)
