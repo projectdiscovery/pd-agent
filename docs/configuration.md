@@ -49,6 +49,8 @@ The agent keeps a small rolling log + metrics buffer at `~/.pd-agent/pd-agent-<a
 
 ### Scan-log upload
 
+See [docs/scan-log.md](scan-log.md) for what the log contains, what it cannot prove, and how to verify an upload.
+
 The scan log is the full per-chunk nuclei JSONL — every result, matched and unmatched — gzipped and shipped once per chunk. There are two independent destinations, so either, both, or neither can be on. Nothing is uploaded by default.
 
 To keep raw scan output off ProjectDiscovery infrastructure entirely, leave `PDCP_ENABLE_SCAN_LOG_UPLOAD` unset and configure a bucket below.
