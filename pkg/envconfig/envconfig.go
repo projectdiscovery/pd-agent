@@ -138,11 +138,15 @@ func ScanLogUploadEnabled() bool {
 }
 
 // RequireAllTemplates fails a chunk outright when any requested template
-// cannot be resolved, instead of dropping it and scanning the rest. Off by
-// default: losing one check beats losing the whole chunk. Turn it on where a
-// partial scan reported as complete is the worse outcome.
+// cannot be resolved, instead of dropping it and scanning the rest.
+//
+// On by default. Nothing the agent reports carries the dropped count, so a
+// scan that silently skipped most of its checks is indistinguishable from a
+// clean one — and for a vulnerability scanner a false negative nobody can see
+// is worse than a chunk that fails loudly. Set it false to accept partial
+// coverage, e.g. while a template set is being repaired.
 func RequireAllTemplates() bool {
-	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, false)
+	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, true)
 }
 
 // ---------- Observability ----------

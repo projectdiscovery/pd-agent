@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,11 +49,18 @@ func stubTemplates(t *testing.T, version string) string {
 	prevWrite := writeTemplatesConfig
 	writeTemplatesConfig = func() error { return nil }
 
+	// These tests assert install and swap behaviour, not the count floor, and
+	// writing a whole release per test would be absurd. TestHaveUsableTemplates
+	// covers the real threshold.
+	prevMin := minUsableTemplates
+	minUsableTemplates = 1
+
 	config.DefaultConfig.TemplatesDirectory = dir
 	config.DefaultConfig.TemplateVersion = version
 	resetLatestTagCache()
 
 	t.Cleanup(func() {
+		minUsableTemplates = prevMin
 		config.DefaultConfig.TemplatesDirectory = prevDir
 		config.DefaultConfig.TemplateVersion = prevVersion
 		config.DefaultConfig.LatestNucleiTemplatesVersion = prevLatest
@@ -393,6 +401,48 @@ func TestHaveUsableTemplates(t *testing.T) {
 	writeTemplate(t, dir, "http/cves/2024/CVE-2024-1.json")
 	if !HaveUsableTemplates() {
 		t.Error("a .json template is loadable and must count")
+	}
+}
+
+// The floor is what stops boot proceeding on a truncated set. A handful of
+// files left by an interrupted download must not read as a working release.
+func TestHaveUsableTemplatesNeedsAPlausibleCount(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	minUsableTemplates = 25 // stubTemplates lowered it to 1
+
+	for i := 0; i < 24; i++ {
+		writeTemplate(t, dir, fmt.Sprintf("http/cves/2024/CVE-2024-%d.yaml", i))
+	}
+	if HaveUsableTemplates() {
+		t.Errorf("24 templates passed a floor of %d; an interrupted download would boot", minUsableTemplates)
+	}
+
+	writeTemplate(t, dir, "http/cves/2024/CVE-2024-24.yaml")
+	if !HaveUsableTemplates() {
+		t.Error("a set at the floor must count as usable")
+	}
+}
+
+// A truncated download must not be swapped over a working set either.
+func TestInstallFreshSetRefusesATruncatedDownload(t *testing.T) {
+	dir := stubTemplates(t, "v10.4.8")
+	minUsableTemplates = 25
+	writeTemplate(t, dir, "http/keep.yaml")
+
+	freshInstall = func() error {
+		// Lands a handful, not a release.
+		for i := 0; i < 3; i++ {
+			writeTemplate(t, config.DefaultConfig.TemplatesDirectory, fmt.Sprintf("http/partial-%d.yaml", i))
+		}
+		return nil
+	}
+
+	err := installFreshSet()
+	if err == nil {
+		t.Fatal("installFreshSet() = nil, want a truncated download refused")
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "http", "keep.yaml")); statErr != nil {
+		t.Errorf("the working set was replaced by the truncated download: %v", statErr)
 	}
 }
 

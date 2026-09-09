@@ -280,27 +280,47 @@ func downloadInto(staging string) error {
 	return nil
 }
 
-// HaveUsableTemplates reports whether the live directory holds a template
-// nuclei could load. This is the only question boot needs answered.
+// minUsableTemplates is the floor for calling a directory a working set. A
+// published release carries several thousand; an interrupted download or a
+// half-finished swap leaves a handful. Counting to one cannot tell those apart,
+// and boot proceeding on a handful is how a scan reports clean having run
+// almost nothing.
+//
+// A var so tests need not write a whole release to disk.
+var minUsableTemplates = 100
+
+// HaveUsableTemplates reports whether the live directory holds enough templates
+// to be worth scanning with. Boot continues on a set that could not be
+// confirmed as newest, so this is what stands between a partial set and a
+// fleet-wide silent false negative.
 func HaveUsableTemplates() bool {
 	templateRW.RLock()
 	defer templateRW.RUnlock()
 	return dirHasTemplates(templateDir())
 }
 
-// dirHasTemplates reports whether dir holds at least one template, so an empty
-// download is never swapped over a working set. Matching is rooted at dir:
-// IsTemplate on its own skips nuclei's .git/.github/helpers exclusions for
-// absolute paths, counting leftover repo metadata as a usable set.
+// dirHasTemplates reports whether dir holds a plausible template set, so
+// neither an empty download nor a truncated one is swapped over a working set.
+// Matching is rooted at dir: IsTemplate on its own skips nuclei's
+// .git/.github/helpers exclusions for absolute paths, counting leftover repo
+// metadata as a usable set.
 func dirHasTemplates(dir string) bool {
-	found := false
+	return countTemplates(dir, minUsableTemplates) >= minUsableTemplates
+}
+
+// countTemplates counts loadable templates under dir, stopping at limit so a
+// full release is not walked to answer a threshold question.
+func countTemplates(dir string, limit int) int {
+	found := 0
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
 		if !d.IsDir() && config.IsTemplateWithRoot(path, dir) {
-			found = true
-			return fs.SkipAll
+			found++
+			if found >= limit {
+				return fs.SkipAll
+			}
 		}
 		return nil
 	})
