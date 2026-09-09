@@ -21,7 +21,7 @@ func TestWorkMessageValidate(t *testing.T) {
 		{"xid", "d35h1tee67qc73c71olg", false},
 		{"uuid", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", false},
 		{"dotted", "scan-abc.1", false},
-		{"empty", "", true},
+		{"empty is not unsafe", "", false},
 		{"traversal", "../../../../tmp/pwned", true},
 		{"separator", "a/b", true},
 		{"dotdot", "..", true},
@@ -46,7 +46,10 @@ func TestChunkMessageValidate(t *testing.T) {
 	if err := (&ChunkMessage{ChunkID: "c1"}).Validate(); err != nil {
 		t.Errorf("Validate() = %v for a normal id", err)
 	}
-	for _, bad := range []string{"", "..", "../../etc/cron.d/x", `a\b`, "c\x00"} {
+	if err := (&ChunkMessage{ChunkID: ""}).Validate(); err != nil {
+		t.Errorf("Validate() = %v for an absent id; execute.go falls back to \"nuclei\" so absent must not drop the chunk", err)
+	}
+	for _, bad := range []string{"..", "../../etc/cron.d/x", `a\b`, "c\x00"} {
 		if err := (&ChunkMessage{ChunkID: bad}).Validate(); err == nil {
 			t.Errorf("Validate() = nil for %q, want rejected", bad)
 		}
@@ -118,6 +121,49 @@ func TestIngestGateBlocksTraversalBeforeAnySink(t *testing.T) {
 			if err == nil {
 				t.Fatalf("decode accepted %q and would hand it to filepath.Join as %q",
 					chunkID, chunk.ChunkID)
+			}
+		})
+	}
+}
+
+// Enumeration chunks decode from plain protobuf, not ZSTD, and go through the
+// same gate. ChunkID is proto3 field 4 with no presence semantics, so an
+// absent one has to survive: decodeChunkMsg's error terminates the message
+// with no redelivery, which would discard the enumeration permanently.
+func TestDecodeEnrichmentChunk(t *testing.T) {
+	tests := []struct {
+		name       string
+		chunkID    string
+		wantReject bool
+	}{
+		{"normal id", "d35h1tf67qc73c71olh", false},
+		{"absent id must not drop the chunk", "", false},
+		{"traversal is still rejected", "../../../../tmp/pwned", true},
+		{"separator is still rejected", "a/b", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data, err := proto.Marshal(&agentproto.AssetEnrichmentRequest{
+				ChunkID:      tt.chunkID,
+				EnrichmentID: "e1",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			chunk, err := decodeChunkMsg(data)
+			if tt.wantReject {
+				if err == nil {
+					t.Fatalf("decodeChunkMsg accepted %q and would hand it to filepath.Join", tt.chunkID)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decodeChunkMsg: %v", err)
+			}
+			if chunk.ChunkID != tt.chunkID {
+				t.Errorf("ChunkID = %q, want %q", chunk.ChunkID, tt.chunkID)
 			}
 		})
 	}
