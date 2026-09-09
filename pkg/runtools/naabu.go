@@ -47,30 +47,22 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	defer bw.Flush()
 
 	var mu sync.Mutex
-	naabuOpts := &runner.Options{
-		Host:              goflags.StringSlice(hosts),
-		SkipHostDiscovery: opts.SkipHostDiscovery,
-		ServiceVersion:    opts.ServiceVersion,
-		ServiceDiscovery:  opts.ServiceDiscovery,
-		Silent:            true,
-		OnResult: func(hr *result.HostResult) {
-			if hr == nil || hr.Host == "" || len(hr.Ports) == 0 {
+	naabuOpts := newNaabuOptions(hosts, opts, func(hr *result.HostResult) {
+		if hr == nil || hr.Host == "" || len(hr.Ports) == 0 {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		for _, p := range hr.Ports {
+			line := net.JoinHostPort(hr.Host, strconv.Itoa(p.Port))
+			if _, err := bw.WriteString(line); err != nil {
 				return
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			for _, p := range hr.Ports {
-				line := net.JoinHostPort(hr.Host, strconv.Itoa(p.Port))
-				if _, err := bw.WriteString(line); err != nil {
-					return
-				}
-				if err := bw.WriteByte('\n'); err != nil {
-					return
-				}
+			if err := bw.WriteByte('\n'); err != nil {
+				return
 			}
-		},
-	}
-	setNaabuPorts(naabuOpts, opts.Ports)
+		}
+	})
 
 	r, err := runner.NewRunner(naabuOpts)
 	if err != nil {
@@ -83,6 +75,26 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 		return opts.OutputFile, fmt.Errorf("naabu enumeration: %w", err)
 	}
 	return opts.OutputFile, nil
+}
+
+// newNaabuOptions builds the runner options. Probe-denied ports (raw print
+// spoolers) are never contacted, not even for a handshake, and so never reach
+// inventory: they are removed from the port list via ExcludePorts, and inputs
+// already written as "host:<denied>" are reduced to the bare host, because
+// naabu scans a per-target port outside the ExcludePorts path.
+func newNaabuOptions(hosts []string, opts NaabuOptions, onResult func(*result.HostResult)) *runner.Options {
+	hosts = StripDeniedProbePorts(hosts)
+	o := &runner.Options{
+		Host:              goflags.StringSlice(hosts),
+		SkipHostDiscovery: opts.SkipHostDiscovery,
+		ServiceVersion:    opts.ServiceVersion,
+		ServiceDiscovery:  opts.ServiceDiscovery,
+		Silent:            true,
+		ExcludePorts:      goflags.StringSlice(DeniedProbePortStrings()),
+		OnResult:          onResult,
+	}
+	setNaabuPorts(o, opts.Ports)
+	return o
 }
 
 // setNaabuPorts routes the control-plane port spec to the right naabu field.

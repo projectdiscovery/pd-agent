@@ -18,6 +18,7 @@ import (
 	"github.com/projectdiscovery/naabu/v2/pkg/result"
 	"github.com/projectdiscovery/naabu/v2/pkg/runner"
 	"github.com/projectdiscovery/nuclei/v3/pkg/catalog/config"
+	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	mapsutil "github.com/projectdiscovery/utils/maps"
 	sliceutil "github.com/projectdiscovery/utils/slice"
 	syncutil "github.com/projectdiscovery/utils/sync"
@@ -147,9 +148,13 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 	var mu sync.Mutex
 	hostPorts := make(map[string][]string)
 
+	// Probe-denied ports are never contacted, even when a template or an
+	// explicit host:port input asks for them.
+	targets = runtools.StripDeniedProbePorts(targets)
 	options := &runner.Options{
 		Host:              goflags.StringSlice(targets),
 		Ports:             portStr,
+		ExcludePorts:      goflags.StringSlice(runtools.DeniedProbePortStrings()),
 		SkipHostDiscovery: true,
 		Silent:            true,
 		OnResult: func(hr *result.HostResult) {

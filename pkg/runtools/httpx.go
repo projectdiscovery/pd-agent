@@ -63,6 +63,12 @@ func RunHttpx(ctx context.Context, targets []string, opts HttpxOptions) (string,
 		MaxRedirects:       10,
 		DisableUpdateCheck: true,
 		Probe:              true,
+		// Exclude skips denied initial targets;
+		// redirect targets are stopped at dial time by the deny list installed
+		// on fastdialer.DefaultOptions (portpolicy.go); Chrome is fenced via
+		// host-resolver-rules.
+		Exclude:                   goflags.StringSlice(DeniedProbePortStrings()),
+		HeadlessOptionalArguments: goflags.StringSlice{"host-resolver-rules=" + ChromeHostResolverRules()},
 		OnResult: func(r runner.Result) {
 			if r.Err != nil || r.URL == "" {
 				return

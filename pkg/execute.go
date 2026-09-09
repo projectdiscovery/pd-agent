@@ -99,6 +99,17 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			}
 		}
 
+		// Probe-denied ports are already excluded from discovery; this catches
+		// anything that still arrives as host:<denied>
+		var deniedTargets []string
+		hostsWithOpenPorts, deniedTargets = runtools.FilterDeniedProbePorts(hostsWithOpenPorts)
+		if len(deniedTargets) > 0 {
+			slog.Info("skipping probe-denied ports",
+				"skipped", len(deniedTargets),
+				"targets", deniedTargets,
+				"enumeration_id", enumID)
+		}
+
 		if len(hostsWithOpenPorts) == 0 {
 			slog.Debug("port scan complete, no open ports, skipping downstream",
 				"original_hosts", len(hosts), "enumeration_id", enumID)
