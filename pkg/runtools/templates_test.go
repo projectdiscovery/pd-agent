@@ -19,10 +19,24 @@ import (
 
 // stubTemplates points nuclei's config at a temp dir and swaps the network and
 // installer hooks, then restores everything on cleanup.
+// tolerantTempDir is t.TempDir with a cleanup that tolerates removal failure.
+// nuclei's disk catalog opens every candidate template and never closes it
+// (catalog/disk/find.go, findFileMatches), and Windows refuses to unlink a file
+// with a live handle, so t.TempDir's strict cleanup fails tests that passed.
+func tolerantTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "pd-agent-templates-*")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func stubTemplates(t *testing.T, version string) string {
 	t.Helper()
 
-	dir := filepath.Join(t.TempDir(), "nuclei-templates")
+	dir := filepath.Join(tolerantTempDir(t), "nuclei-templates")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir template dir: %v", err)
 	}
@@ -875,14 +889,19 @@ func TestMissingTemplatesPreservesInputOrderAndDedupes(t *testing.T) {
 // Reinstalling the public set cannot produce a private template, so an absent
 // one must not queue a repair even though it is reported.
 func TestAnyPublic(t *testing.T) {
+	// Built from a real temp dir rather than a "/tmp/..." literal: private
+	// templates are materialized with os.MkdirTemp, and filepath.IsAbs says
+	// false for a unix-shaped path on Windows.
+	priv := filepath.Join(t.TempDir(), "pd-agent-priv-x", "my-check.yaml")
+
 	tests := []struct {
 		name  string
 		input []string
 		want  bool
 	}{
 		{name: "relative", input: []string{"http/x.yaml"}, want: true},
-		{name: "absolute only", input: []string{"/tmp/pd-agent-priv-x/my-check.yaml"}, want: false},
-		{name: "mixed", input: []string{"/tmp/priv/a.yaml", "http/x.yaml"}, want: true},
+		{name: "absolute only", input: []string{priv}, want: false},
+		{name: "mixed", input: []string{priv, "http/x.yaml"}, want: true},
 		{name: "empty", input: nil, want: false},
 	}
 	for _, tt := range tests {
