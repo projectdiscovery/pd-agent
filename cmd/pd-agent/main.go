@@ -47,6 +47,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
+	"github.com/projectdiscovery/pd-agent/pkg/validate"
 	fileutil "github.com/projectdiscovery/utils/file"
 	"github.com/rs/xid"
 	"github.com/tidwall/gjson"
@@ -56,11 +57,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// ensureNucleiTemplates installs or updates nuclei templates, exiting the
-// process on failure. Without a complete template set the agent would emit
-// "file not found" errors mid-scan for every cloud-sent path missing locally,
-// so a failed install/update is fatal rather than a silent degrade.
+// ensureNucleiTemplates installs or updates nuclei templates. Without a set the
+// agent would emit "file not found" errors mid-scan for every cloud-sent path
+// missing locally, so templateBootFatal decides what is worth aborting for.
 func ensureNucleiTemplates() {
+	// Claim the HTTP caps rather than depend on main's call order: an unbounded
+	// download here holds the template write lock and wedges every later scan.
+	runtools.InitNucleiProcess()
+
 	templateDir := pkg.GetNucleiDefaultTemplateDir()
 	if templateDir == "" {
 		slog.Error("Could not determine nuclei template directory")
@@ -68,33 +72,54 @@ func ensureNucleiTemplates() {
 	}
 
 	if info, err := os.Stat(templateDir); err == nil && info.IsDir() {
-		slog.Info("Nuclei templates directory exists, checking for updates...", "path", templateDir)
+		slog.Info("Nuclei templates directory exists, checking the newest release...", "path", templateDir)
 	} else {
 		slog.Info("Nuclei templates not found, downloading...", "path", templateDir)
 	}
 
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
-		slog.Error("Failed to update nuclei templates", "error", err)
+	from, to, err := runtools.EnsureLatestTemplates(context.Background())
+	if err != nil {
+		if !templateBootFatal(err, runtools.HaveUsableTemplates()) {
+			slog.Warn("Nuclei template update failed, continuing on the installed set",
+				"path", templateDir, "version", from, "error", err)
+			return
+		}
+		slog.Error("Failed to install nuclei templates", "error", err, "version", from)
 		os.Exit(1)
 	}
-	slog.Info("Nuclei templates are up to date", "path", templateDir)
+	if from == to {
+		slog.Info("Nuclei templates verified against the newest release", "path", templateDir, "version", to)
+	} else {
+		slog.Info("Nuclei templates updated", "path", templateDir, "from", from, "to", to)
+	}
 }
 
-// templateUpdateMu serializes template refreshes so concurrent scans
-// (ScanParallelism > 1) never rewrite the shared template dir at once.
-var templateUpdateMu sync.Mutex
+// templateBootFatal reports whether a boot-time template failure should stop
+// the agent. Only the absence of a usable set is worth grounding a fleet for:
+// which step failed says nothing about whether this agent can scan, and a
+// download failure leaves yesterday's working set untouched.
+func templateBootFatal(err error, haveTemplates bool) bool {
+	if err == nil {
+		return false
+	}
+	return !haveTemplates
+}
 
 // refreshTemplatesForScan pulls newer nuclei templates before a scan's chunks
 // run, so a long-lived agent picks up releases without a restart. Non-fatal:
 // boot already guaranteed a usable set, so a transient update failure logs and
 // proceeds on the existing templates rather than dropping the scan.
-func refreshTemplatesForScan(scanID string) {
-	templateUpdateMu.Lock()
-	defer templateUpdateMu.Unlock()
-
-	if err := runtools.UpdateNucleiTemplates(); err != nil {
+func refreshTemplatesForScan(ctx context.Context, scanID string) {
+	from, to, err := runtools.EnsureLatestTemplates(ctx)
+	if err != nil {
+		// An unreachable release API must not stall scanning; per-chunk
+		// verification still guarantees the templates this scan needs.
 		slog.Warn("Failed to refresh nuclei templates before scan, using existing set",
-			"scan_id", scanID, "error", err)
+			"scan_id", scanID, "version", from, "error", err)
+		return
+	}
+	if from != to {
+		slog.Info("Nuclei templates updated before scan", "scan_id", scanID, "from", from, "to", to)
 	}
 }
 
@@ -341,9 +366,11 @@ func NewRunner(options *Options) (*Runner, error) {
 	}
 
 	if r.options.AgentName == "" {
-		if hostname, err := os.Hostname(); err == nil && hostname != "" {
-			r.options.AgentName = hostname
-		} else {
+		// Hostnames routinely break the name rules (".local" suffix, spaces): coerce, never reject.
+		if hostname, err := os.Hostname(); err == nil {
+			r.options.AgentName = validate.SanitizeName(hostname)
+		}
+		if r.options.AgentName == "" {
 			r.options.AgentName = r.options.AgentId
 		}
 	}
@@ -1242,7 +1269,7 @@ func (r *Runner) processJetStreamScan(ctx context.Context, work *natsrpc.WorkMes
 		_ = r.agentDB.InsertTask(context.Background(), &agentdb.Task{Type: "scan", TaskID: work.ScanID})
 	}
 
-	refreshTemplatesForScan(work.ScanID)
+	refreshTemplatesForScan(ctx, work.ScanID)
 
 	err := func() error {
 		creds := r.GetNATSCredentials()
@@ -1537,18 +1564,18 @@ func (r *Runner) agentMode(ctx context.Context) error {
 // executeNucleiScan runs a single nuclei chunk. privateTemplates entries
 // (base64 YAML keyed by name) are written to a per-chunk temp dir, appended
 // to the template list, and cleaned up on return.
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, reportConfig string, historyID int64, templates []string, privateTemplates map[string]string, assets []string) {
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, chunkID, config, reportConfig string, historyID int64, templates []string, privateTemplates map[string]string, assets []string) {
 	var activeWorkers int32
 	if pool := r.jsPool.Load(); pool != nil {
 		activeWorkers = pool.ActiveWorkers()
 	}
-	startSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "start", activeWorkers)
+	startSnap := resourceprofile.TakeScanSnapshot(scanID, chunkID, "start", activeWorkers)
 	defer func() {
 		var aw int32
 		if pool := r.jsPool.Load(); pool != nil {
 			aw = pool.ActiveWorkers()
 		}
-		endSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "end", aw)
+		endSnap := resourceprofile.TakeScanSnapshot(scanID, chunkID, "end", aw)
 		resourceprofile.LogScanDelta(startSnap, endSnap)
 	}()
 
@@ -1558,28 +1585,28 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 	templatesToUse := append([]string(nil), templates...)
 
 	if len(privateTemplates) > 0 {
-		paths, cleanup, err := materializePrivateTemplates(scanID, metaID, privateTemplates)
+		paths, cleanup, err := materializePrivateTemplates(scanID, chunkID, privateTemplates)
 		if err != nil {
 			slog.Error("Failed to materialize private templates, continuing without them",
-				"scan_id", scanID, "chunk_id", metaID, "error", err)
+				"scan_id", scanID, "chunk_id", chunkID, "error", err)
 		} else {
 			defer cleanup()
 			templatesToUse = append(templatesToUse, paths...)
 			slog.Info("Materialized private templates",
-				"scan_id", scanID, "chunk_id", metaID, "count", len(paths))
+				"scan_id", scanID, "chunk_id", chunkID, "count", len(paths))
 		}
 	}
 
 	if len(templatesToUse) == 0 {
 		slog.Error("Refusing to run nuclei: chunk has no public or private templates",
-			"scan_id", scanID, "chunk_id", metaID,
+			"scan_id", scanID, "chunk_id", chunkID,
 			"public_count", len(templates), "private_count", len(privateTemplates))
 		return
 	}
 
 	var outputDir string
 	if r.options.AgentOutput != "" {
-		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+		outputDir = filepath.Join(r.options.AgentOutput, chunkID)
 	}
 
 	tmpInputFile, err := fileutil.GetTempFileName()
@@ -1612,7 +1639,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		return
 	}
 
-	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, metaID)
+	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, chunkID)
 	if err != nil {
 		slog.Warn("Error filtering targets by template ports, proceeding with all targets", "error", err)
 		filteredTargets = assets
@@ -1621,7 +1648,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 	if len(filteredTargets) == 0 {
 		slog.Info("Skipping nuclei execution - no hosts with open ports found after naabu scan",
 			"scan_id", scanID,
-			"chunk_id", metaID,
+			"chunk_id", chunkID,
 			"extracted_ports", extractedPorts)
 		return
 	}
@@ -1640,12 +1667,12 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 			TeamID:       r.options.TeamID,
 			Output:       outputDir,
 		},
-		Id: metaID,
+		Id: chunkID,
 	}
 
 	slog.Info("Starting nuclei scan",
 		"scan_id", scanID,
-		"chunk_id", metaID,
+		"chunk_id", chunkID,
 		"targets", len(filteredTargets),
 		"templates", len(templatesToUse),
 		"extracted_ports", extractedPorts,
@@ -1661,14 +1688,14 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		if scanCtx.Err() == context.DeadlineExceeded {
 			slog.Error("Nuclei scan timed out (20m hard cap)",
 				"scan_id", scanID,
-				"chunk_id", metaID,
+				"chunk_id", chunkID,
 				"targets", len(filteredTargets),
 			)
 			return
 		}
 		slog.Error("Nuclei scan execution failed",
 			"scan_id", scanID,
-			"chunk_id", metaID,
+			"chunk_id", chunkID,
 			"error", err,
 		)
 		return
@@ -1681,7 +1708,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 
 	slog.Info("Nuclei scan completed",
 		"scan_id", scanID,
-		"chunk_id", metaID,
+		"chunk_id", chunkID,
 		"output_files", len(outputFiles),
 	)
 
@@ -1690,27 +1717,27 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 			if err := os.Remove(outputFile); err != nil {
 				slog.Warn("Failed to delete scan output file", "file", outputFile, "error", err)
 			} else {
-				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", metaID)
+				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", chunkID)
 			}
 		} else {
-			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", metaID)
+			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", chunkID)
 		}
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scan_id=%s, chunk_id=%s", scanID, chunkID))
 	} else {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scan_id=%s, chunk_id=%s", scanID, chunkID))
 	}
 }
 
 // executeEnumeration runs an enumeration chunk through pkg.Run.
-func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string, ports string) {
-	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d, ports=%s", enumID, metaID, len(steps), len(assets), ports))
+func (r *Runner) executeEnumeration(ctx context.Context, enumID, chunkID string, steps, assets []string, ports string) {
+	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enum_id=%s, chunk_id=%s, steps=%d, assets=%d, ports=%s", enumID, chunkID, len(steps), len(assets), ports))
 
 	var outputDir string
 	if r.options.AgentOutput != "" {
-		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+		outputDir = filepath.Join(r.options.AgentOutput, chunkID)
 	}
 
 	// pkg.Run dispatches on EnumerationID, so the Tool field is irrelevant.
@@ -1725,7 +1752,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 			Output:           outputDir,
 			EnumerationPorts: ports,
 		},
-		Id: metaID,
+		Id: chunkID,
 	}
 
 	taskResult, outputFiles, err := pkg.Run(ctx, task)
@@ -1741,7 +1768,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 					if err := os.Remove(outputFile); err != nil {
 						slog.Warn("Failed to delete enumeration output file", "file", outputFile, "error", err)
 					} else {
-						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", metaID)
+						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", chunkID)
 					}
 				}
 			}
@@ -1749,14 +1776,14 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 			slog.Debug("Keeping enumeration output files (keep-output-files flag is set)",
 				"files", outputFiles,
 				"count", len(outputFiles),
-				"chunk_id", metaID)
+				"chunk_id", chunkID)
 		}
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enum_id=%s, chunk_id=%s", enumID, chunkID))
 	} else {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enum_id=%s, chunk_id=%s", enumID, chunkID))
 	}
 }
 
@@ -1791,6 +1818,23 @@ func (r *Runner) In(ctx context.Context) error {
 }
 
 var isRegistered bool
+
+// heartbeatQuery builds the /in query string. Every heartbeat carries the
+// running version so the platform can record which build an agent is on
+// without broadcasting a health-check RPC to ask.
+func heartbeatQuery(options *Options, version string, networkSubnets []string) url.Values {
+	q := url.Values{}
+	q.Set("os", runtime.GOOS)
+	q.Set("arch", runtime.GOARCH)
+	q.Set("id", options.AgentId)
+	q.Set("name", options.AgentName)
+	q.Set("agent_network", options.AgentNetwork)
+	q.Set("version", version)
+	if len(networkSubnets) > 0 {
+		q.Set("network_subnets", strings.Join(networkSubnets, ","))
+	}
+	return q
+}
 
 // inFunctionTickCallback runs one register/heartbeat cycle: GET /v1/agents/{id}
 // to sync server-authoritative state, then POST /v1/agents/in to refresh the
@@ -1827,12 +1871,21 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		} else {
 			agentInfo := response.Agent
 			if agentInfo.AgentNetwork != "" && agentInfo.AgentNetwork != r.options.AgentNetwork {
-				r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.AgentNetwork, r.options.AgentNetwork))
-				r.options.AgentNetwork = agentInfo.AgentNetwork
+				// Keep the local value rather than kill a running agent over a bad response.
+				if serverNetwork, err := validate.Name("agent_network", agentInfo.AgentNetwork); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent_network from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent_network from %s server: %s (was: %s)", envconfig.APIServer(), serverNetwork, r.options.AgentNetwork))
+					r.options.AgentNetwork = serverNetwork
+				}
 			}
 			if agentInfo.Name != "" && agentInfo.Name != r.options.AgentName {
-				r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), agentInfo.Name, r.options.AgentName))
-				r.options.AgentName = agentInfo.Name
+				if serverName, err := validate.Name("name", agentInfo.Name); err != nil {
+					r.logHelper("WARNING", fmt.Sprintf("ignoring agent name from %s server: %v", envconfig.APIServer(), err))
+				} else {
+					r.logHelper("INFO", fmt.Sprintf("Using agent name from %s server: %s (was: %s)", envconfig.APIServer(), serverName, r.options.AgentName))
+					r.options.AgentName = serverName
+				}
 			}
 			r.logHelper("DEBUG", fmt.Sprintf("Agent last updated at: %s", agentInfo.LastUpdate.Format(time.RFC3339)))
 		}
@@ -1856,22 +1909,14 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 		return err
 	}
 
-	q := req.URL.Query()
-	q.Add("os", runtime.GOOS)
-	q.Add("arch", runtime.GOARCH)
-	q.Add("id", r.options.AgentId)
-	q.Add("name", r.options.AgentName)
-	q.Add("agent_network", r.options.AgentNetwork)
-
 	networkSubnets := r.getAutoDiscoveredTargets()
 	if len(networkSubnets) > 0 {
 		r.logHelper("DEBUG", fmt.Sprintf("Discovered network subnets: %v", networkSubnets))
-		q.Add("network_subnets", strings.Join(networkSubnets, ","))
 	} else {
 		r.logHelper("INFO", "No network subnets discovered")
 	}
 
-	req.URL.RawQuery = q.Encode()
+	req.URL.RawQuery = heartbeatQuery(r.options, Version, networkSubnets).Encode()
 
 	inResp := r.makeRequest(inCtx, http.MethodPost, req.URL.String(), nil, nil)
 	if inResp.Error != nil {
@@ -1916,7 +1961,7 @@ func (r *Runner) inFunctionTickCallback(ctx context.Context) error {
 	}
 
 	if !isRegistered {
-		r.logHelper("INFO", "agent registered successfully")
+		r.logHelper("INFO", fmt.Sprintf("agent registered successfully (version=%s)", Version))
 		isRegistered = true
 	}
 
@@ -2358,6 +2403,22 @@ func parseOptions() *Options {
 	if options.AgentNetwork == "" {
 		options.AgentNetwork = "default"
 	}
+	agentNetwork, err := validate.Name("agent-network", options.AgentNetwork)
+	if err != nil {
+		slog.Error("invalid agent network", "error", err)
+		os.Exit(1)
+	}
+	options.AgentNetwork = agentNetwork
+
+	// An empty name is derived from the hostname later; only explicit input is checked here.
+	if options.AgentName != "" {
+		agentName, err := validate.Name("agent-name", options.AgentName)
+		if err != nil {
+			slog.Error("invalid agent name", "error", err)
+			os.Exit(1)
+		}
+		options.AgentName = agentName
+	}
 
 	// 0 = auto-detect for chunks.
 	if options.ChunkParallelism < 0 {
@@ -2426,8 +2487,6 @@ func main() {
 	}
 
 	ensureNucleiTemplates()
-
-	runtools.InitNucleiProcess()
 
 	var err error
 	pdcpRunner, err = NewRunner(options)

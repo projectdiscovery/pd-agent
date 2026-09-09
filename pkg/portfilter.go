@@ -321,6 +321,11 @@ var cachedTemplateDir string
 var templateDirOnce sync.Once
 
 // GetNucleiDefaultTemplateDir returns the default nuclei template directory, cached.
+//
+// The cache is primed at boot by ensureNucleiTemplates, before a staged install
+// can repoint the underlying global at a temporary directory. Calling this for
+// the first time during an install would cache a path that is about to be
+// deleted, so keep the boot-time call first.
 func GetNucleiDefaultTemplateDir() string {
 	templateDirOnce.Do(func() {
 		if cfg := config.DefaultConfig; cfg != nil && cfg.TemplatesDirectory != "" {

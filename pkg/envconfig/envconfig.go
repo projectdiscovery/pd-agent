@@ -32,6 +32,14 @@ func APIServer() string { return envutil.GetEnvOrDefault(KeyAPIServer, DefaultAP
 // UpdateURL overrides the self-update download URL; empty resolves via GitHub releases.
 func UpdateURL() string { return envutil.GetEnvOrDefault(KeyUpdateURL, "") }
 
+// KeyGitHubToken is read by projectdiscovery/utils/update for every
+// nuclei-templates download; the agent reuses it for the release lookup so a
+// fleet shares one 5000/hr budget instead of 60/hr per NAT egress IP.
+const KeyGitHubToken = "GITHUB_TOKEN"
+
+// GitHubToken returns GITHUB_TOKEN; empty means unauthenticated GitHub access.
+func GitHubToken() string { return envutil.GetEnvOrDefault(KeyGitHubToken, "") }
+
 // ---------- Agent identity & topology ----------
 
 const (
@@ -104,6 +112,7 @@ const (
 	KeyLocalK8s                = "LOCAL_K8S"
 	KeyDisableDiagnosticUpload = "PDCP_DISABLE_DIAGNOSTIC_UPLOAD"
 	KeyEnableScanLogUpload     = "PDCP_ENABLE_SCAN_LOG_UPLOAD"
+	KeyRequireAllTemplates     = "PDCP_REQUIRE_ALL_TEMPLATES"
 )
 
 // Verbose returns true when PDCP_VERBOSE is truthy.
@@ -126,6 +135,18 @@ func DisableDiagnosticUpload() bool {
 // provisioned don't hammer the API with rejected uploads.
 func ScanLogUploadEnabled() bool {
 	return envutil.GetEnvOrDefault(KeyEnableScanLogUpload, false)
+}
+
+// RequireAllTemplates fails a chunk outright when any requested template
+// cannot be resolved, instead of dropping it and scanning the rest.
+//
+// Off by default, and not for lack of caution: nuclei's loader logs
+// "Could not find template" for an entry it cannot resolve and then scans the
+// rest anyway (catalog/loader.logErroredTemplates), so aborting the chunk
+// prevents no partial scan. It only discards the coverage that did resolve.
+// Turn it on where a partial result reported as complete is the worse outcome.
+func RequireAllTemplates() bool {
+	return envutil.GetEnvOrDefault(KeyRequireAllTemplates, false)
 }
 
 // ---------- Observability ----------

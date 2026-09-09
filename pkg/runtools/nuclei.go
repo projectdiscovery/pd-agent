@@ -11,19 +11,8 @@ import (
 	"sync"
 
 	nuclei "github.com/projectdiscovery/nuclei/v3/lib"
-	"github.com/projectdiscovery/nuclei/v3/pkg/installer"
 	"github.com/projectdiscovery/nuclei/v3/pkg/output"
 )
-
-// UpdateNucleiTemplates installs nuclei-templates if missing, otherwise
-// updates them. Idempotent.
-func UpdateNucleiTemplates() error {
-	tm := &installer.TemplateManager{}
-	if err := tm.UpdateIfOutdated(); err != nil {
-		return fmt.Errorf("update nuclei templates: %w", err)
-	}
-	return nil
-}
 
 // NucleiOptions configures an embedded nuclei scan.
 type NucleiOptions struct {
@@ -31,7 +20,8 @@ type NucleiOptions struct {
 	OutputFile string
 	// Targets is the list of hosts/URLs to scan. Required.
 	Targets []string
-	// Templates lists template paths or IDs; empty runs the default set.
+	// Templates lists template file or directory paths, globs included; empty
+	// runs the default set. Template IDs are a separate nuclei option.
 	Templates []string
 	// ScanID and TeamID stamp dashboard-upload metadata into output.
 	ScanID               string
@@ -115,11 +105,22 @@ func RunNuclei(ctx context.Context, opts NucleiOptions) (string, error) {
 		sdkOpts = append(sdkOpts, nuclei.WithPDCPUpload(opts.ScanID, opts.TeamID))
 	}
 
+	// Templates are read from a directory a repair can replace. Hold the read
+	// lock across engine setup and the load so a swap cannot land mid-walk, and
+	// load explicitly: the SDK's lazy load discards its error and a partial set
+	// would otherwise scan clean.
+	templateRW.RLock()
 	ne, err := nuclei.NewNucleiEngineCtx(ctx, sdkOpts...)
 	if err != nil {
+		templateRW.RUnlock()
 		return opts.OutputFile, fmt.Errorf("init nuclei engine: %w", err)
 	}
 	defer ne.Close()
+	loadErr := ne.LoadAllTemplates()
+	templateRW.RUnlock()
+	if loadErr != nil {
+		return opts.OutputFile, fmt.Errorf("load templates: %w", loadErr)
+	}
 
 	ne.LoadTargets(opts.Targets, opts.ProbeNonHttp)
 
