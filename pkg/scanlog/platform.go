@@ -51,8 +51,10 @@ func (*PlatformUploader) Upload(ctx context.Context, m Meta, gzPath string, gzSi
 	}
 
 	reqBody, _ := json.Marshal(map[string]string{"filename": filename})
+	// PathEscape even though the id is validated upstream: this builds a URL
+	// against an endpoint that receives the agent's API key.
 	apiURL := fmt.Sprintf("%s/v1/scans/%s/scan_log/upload-url?history_id=%d",
-		envconfig.APIServer(), m.ScanID, m.HistoryID)
+		envconfig.APIServer(), url.PathEscape(m.ScanID), m.HistoryID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return "", fmt.Errorf("build upload-url request: %w", err)

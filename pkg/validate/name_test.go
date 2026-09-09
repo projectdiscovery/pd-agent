@@ -73,3 +73,49 @@ func TestSanitizeName(t *testing.T) {
 		})
 	}
 }
+
+func TestPathSegment(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{"xid", "d35h1tee67qc73c71olg", "d35h1tee67qc73c71olg", false},
+		{"uuid", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", "3f2504e0-4f89-11d3-9a0c-0305e82c3301", false},
+		{"dotted", "scan-abc.1", "scan-abc.1", false},
+		{"trimmed", "  scan-1  ", "scan-1", false},
+		{"underscore", "scan_1", "scan_1", false},
+		{"over 50 chars is fine here", strings.Repeat("a", 64), strings.Repeat("a", 64), false},
+		{"empty", "", "", true},
+		{"whitespace only", "   ", "", true},
+		{"dot", ".", "", true},
+		{"dotdot", "..", "", true},
+		{"traversal", "../../etc", "", true},
+		{"forward slash", "a/b", "", true},
+		{"back slash", `a\b`, "", true},
+		{"leading dash", "-rf", "", true},
+		{"newline", "a\nb", "", true},
+		{"null byte", "a\x00b", "", true},
+		{"del", "a\x7fb", "", true},
+		{"too long", strings.Repeat("a", MaxPathSegmentLength+1), "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := PathSegment("field", tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("PathSegment(%q) = nil error, want rejected", tt.value)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PathSegment(%q) = %v", tt.value, err)
+			}
+			if got != tt.want {
+				t.Errorf("PathSegment(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}

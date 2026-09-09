@@ -19,6 +19,7 @@ output/*
 !/docs/scaling.md
 !/docs/install.md
 !/docs/configuration.md
+!/docs/scan-log.md
 /pd-agent-deployment.yaml
 /pd-agent-deployment-prod.yaml
 

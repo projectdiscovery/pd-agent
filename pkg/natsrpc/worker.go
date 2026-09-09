@@ -145,6 +145,11 @@ func (wp *WorkerPool) processMessage(ctx context.Context, workerID int, msg jets
 		_ = msg.Term()
 		return
 	}
+	if err := work.Validate(); err != nil {
+		slog.Error("jetstream worker: rejecting work message", "worker", workerID, "error", err)
+		_ = msg.Term()
+		return
+	}
 
 	meta, _ := msg.Metadata()
 	var streamSeq, numDelivered uint64
@@ -406,10 +411,18 @@ func init() {
 // ZSTD-compressed ScanRequest protobufs; enumeration chunks are plain
 // AssetEnrichmentRequest. Discriminated by the ZSTD magic in the first 4 bytes.
 func decodeChunkMsg(data []byte) (*ChunkMessage, error) {
+	decode := decodeEnrichmentChunk
 	if len(data) >= 4 && data[0] == zstdMagic[0] && data[1] == zstdMagic[1] && data[2] == zstdMagic[2] && data[3] == zstdMagic[3] {
-		return decodeScanChunk(data)
+		decode = decodeScanChunk
 	}
-	return decodeEnrichmentChunk(data)
+	chunk, err := decode(data)
+	if err != nil {
+		return nil, err
+	}
+	if err := chunk.Validate(); err != nil {
+		return nil, err
+	}
+	return chunk, nil
 }
 
 func decodeScanChunk(data []byte) (*ChunkMessage, error) {

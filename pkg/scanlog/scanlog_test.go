@@ -79,24 +79,45 @@ func TestGzipFileMissingSource(t *testing.T) {
 	}
 }
 
+// The platform toggle and a customer bucket are independent, so all four
+// combinations are pinned. Every subtest sets both vars: t.Setenv only clears
+// what it names, so a developer with either exported would otherwise see a
+// green suite fail locally for no reason.
 func TestDestinations(t *testing.T) {
-	t.Run("off by default", func(t *testing.T) {
-		t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", "")
-		if got := Destinations(); len(got) != 0 {
-			t.Errorf("Destinations() = %d, want 0 when the toggle is unset", len(got))
-		}
-	})
+	tests := []struct {
+		name     string
+		platform string
+		bucket   string
+		want     []string
+	}{
+		{"off by default", "", "", nil},
+		{"platform only", "true", "", []string{"pdcp"}},
+		{"customer s3 only", "", "acme-logs", []string{"s3"}},
+		{"both during a cutover", "true", "acme-logs", []string{"pdcp", "s3"}},
+	}
 
-	t.Run("platform when enabled", func(t *testing.T) {
-		t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", "true")
-		got := Destinations()
-		if len(got) != 1 {
-			t.Fatalf("Destinations() = %d, want 1", len(got))
-		}
-		if got[0].Name() != "pdcp" {
-			t.Errorf("destination = %q, want pdcp", got[0].Name())
-		}
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", tt.platform)
+			t.Setenv("PDCP_SCAN_LOG_S3_BUCKET", tt.bucket)
+			// A bucket alone is not a usable config, and Destinations now
+			// skips one that cannot work. Supply the rest so these cases test
+			// destination selection rather than validation.
+			t.Setenv("PDCP_SCAN_LOG_S3_REGION", "us-east-1")
+			t.Setenv("PDCP_SCAN_LOG_S3_ACCESS_KEY_ID", "k")
+			t.Setenv("PDCP_SCAN_LOG_S3_SECRET_ACCESS_KEY", "s")
+
+			got := Destinations()
+			if len(got) != len(tt.want) {
+				t.Fatalf("Destinations() = %d destinations, want %d", len(got), len(tt.want))
+			}
+			for i, want := range tt.want {
+				if got[i].Name() != want {
+					t.Errorf("destination %d = %q, want %q", i, got[i].Name(), want)
+				}
+			}
+		})
+	}
 }
 
 // fakeUploader records what the orchestrator handed it.
@@ -176,5 +197,48 @@ func TestUploadRemovesGzTempOnFailure(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".gz") {
 			t.Errorf("leftover gz temp after a failed upload: %s", e.Name())
 		}
+	}
+}
+
+// Second boundary: natsrpc rejects these at ingest, but a destination added
+// later must not be able to be the one that forgets.
+func TestUploadRejectsUnsafeMeta(t *testing.T) {
+	dest := &fakeUploader{name: "fake"}
+	outputFile := writeOutput(t, "line\n")
+
+	for _, m := range []Meta{
+		{ScanID: "../../etc", ChunkID: "c1", HistoryID: 1},
+		{ScanID: "scan-9", ChunkID: "../../root", HistoryID: 1},
+		{ScanID: "", ChunkID: "c1", HistoryID: 1},
+		{ScanID: "scan-9", ChunkID: "", HistoryID: 1},
+	} {
+		err := Upload(context.Background(), []Uploader{dest}, m, outputFile)
+		if err == nil {
+			t.Errorf("Upload() = nil for %+v, want rejected", m)
+		}
+	}
+	if dest.calls != 0 {
+		t.Errorf("destination was called %d times, want 0", dest.calls)
+	}
+}
+
+func TestMetaValidate(t *testing.T) {
+	if err := (Meta{ScanID: "scan-9", ChunkID: "chunk-abc123"}).Validate(); err != nil {
+		t.Errorf("Validate() = %v for a normal meta", err)
+	}
+}
+
+// Destinations builds the uploader, and the config invariant it relies on is
+// enforced in cmd/. A config that slipped past boot must not produce a
+// destination that can only fail.
+func TestDestinationsSkipsInvalidS3Config(t *testing.T) {
+	t.Setenv("PDCP_ENABLE_SCAN_LOG_UPLOAD", "")
+	t.Setenv("PDCP_SCAN_LOG_S3_BUCKET", "acme-logs")
+	t.Setenv("PDCP_SCAN_LOG_S3_REGION", "") // required alongside a bucket
+	t.Setenv("PDCP_SCAN_LOG_S3_ACCESS_KEY_ID", "k")
+	t.Setenv("PDCP_SCAN_LOG_S3_SECRET_ACCESS_KEY", "s")
+
+	if got := Destinations(); len(got) != 0 {
+		t.Errorf("Destinations() = %d, want 0 for a config that cannot work", len(got))
 	}
 }

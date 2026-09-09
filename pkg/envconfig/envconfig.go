@@ -171,3 +171,53 @@ const KeyReportingConfig = "PDCP_REPORTING_CONFIG"
 // overrides the reporting config in the work message, keeping tracker
 // credentials off the platform.
 func ReportingConfigPath() string { return envutil.GetEnvOrDefault(KeyReportingConfig, "") }
+
+// ---------- Scan-log destinations ----------
+//
+// Independent of KeyEnableScanLogUpload: a bucket ships to customer-owned
+// storage, the toggle ships to PD-managed storage, and either, both or neither
+// can be on.
+
+const (
+	KeyScanLogS3Bucket       = "PDCP_SCAN_LOG_S3_BUCKET"
+	KeyScanLogS3Region       = "PDCP_SCAN_LOG_S3_REGION"
+	KeyScanLogS3AccessKeyID  = "PDCP_SCAN_LOG_S3_ACCESS_KEY_ID"
+	KeyScanLogS3SecretKey    = "PDCP_SCAN_LOG_S3_SECRET_ACCESS_KEY"
+	KeyScanLogS3Endpoint     = "PDCP_SCAN_LOG_S3_ENDPOINT"
+	KeyScanLogS3UsePathStyle = "PDCP_SCAN_LOG_S3_USE_PATH_STYLE"
+	KeyScanLogS3Prefix       = "PDCP_SCAN_LOG_S3_PREFIX"
+
+	DefaultScanLogS3Prefix = "scan-logs"
+)
+
+// ScanLogS3Bucket returns the customer-owned bucket. Empty disables the
+// destination, so this one key decides whether the others are read at all.
+func ScanLogS3Bucket() string { return envutil.GetEnvOrDefault(KeyScanLogS3Bucket, "") }
+
+// ScanLogS3Region returns the bucket region. Required alongside a bucket:
+// SigV4 binds the region into the signature, so a wrong or empty one fails
+// every request rather than degrading.
+func ScanLogS3Region() string { return envutil.GetEnvOrDefault(KeyScanLogS3Region, "") }
+
+// ScanLogS3AccessKeyID returns the static access key id.
+func ScanLogS3AccessKeyID() string { return envutil.GetEnvOrDefault(KeyScanLogS3AccessKeyID, "") }
+
+// ScanLogS3SecretKey returns the static secret access key.
+func ScanLogS3SecretKey() string { return envutil.GetEnvOrDefault(KeyScanLogS3SecretKey, "") }
+
+// ScanLogS3Endpoint overrides the endpoint for S3-compatible storage. Empty
+// lets the SDK resolve the regional AWS endpoint; a derived-but-blank host is
+// how you end up requesting https://.example.com.
+func ScanLogS3Endpoint() string { return envutil.GetEnvOrDefault(KeyScanLogS3Endpoint, "") }
+
+// ScanLogS3UsePathStyle addresses buckets as <endpoint>/<bucket> instead of
+// <bucket>.<endpoint>. Needed by MinIO and most in-cluster stores, where the
+// per-bucket hostname does not resolve.
+func ScanLogS3UsePathStyle() bool {
+	return envutil.GetEnvOrDefault(KeyScanLogS3UsePathStyle, false)
+}
+
+// ScanLogS3Prefix returns the key prefix scan logs are written under.
+func ScanLogS3Prefix() string {
+	return envutil.GetEnvOrDefault(KeyScanLogS3Prefix, DefaultScanLogS3Prefix)
+}
