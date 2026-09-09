@@ -1564,18 +1564,18 @@ func (r *Runner) agentMode(ctx context.Context) error {
 // executeNucleiScan runs a single nuclei chunk. privateTemplates entries
 // (base64 YAML keyed by name) are written to a per-chunk temp dir, appended
 // to the template list, and cleaned up on return.
-func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, reportConfig string, historyID int64, templates []string, privateTemplates map[string]string, assets []string) {
+func (r *Runner) executeNucleiScan(ctx context.Context, scanID, chunkID, config, reportConfig string, historyID int64, templates []string, privateTemplates map[string]string, assets []string) {
 	var activeWorkers int32
 	if pool := r.jsPool.Load(); pool != nil {
 		activeWorkers = pool.ActiveWorkers()
 	}
-	startSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "start", activeWorkers)
+	startSnap := resourceprofile.TakeScanSnapshot(scanID, chunkID, "start", activeWorkers)
 	defer func() {
 		var aw int32
 		if pool := r.jsPool.Load(); pool != nil {
 			aw = pool.ActiveWorkers()
 		}
-		endSnap := resourceprofile.TakeScanSnapshot(scanID, metaID, "end", aw)
+		endSnap := resourceprofile.TakeScanSnapshot(scanID, chunkID, "end", aw)
 		resourceprofile.LogScanDelta(startSnap, endSnap)
 	}()
 
@@ -1585,28 +1585,28 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 	templatesToUse := append([]string(nil), templates...)
 
 	if len(privateTemplates) > 0 {
-		paths, cleanup, err := materializePrivateTemplates(scanID, metaID, privateTemplates)
+		paths, cleanup, err := materializePrivateTemplates(scanID, chunkID, privateTemplates)
 		if err != nil {
 			slog.Error("Failed to materialize private templates, continuing without them",
-				"scan_id", scanID, "chunk_id", metaID, "error", err)
+				"scan_id", scanID, "chunk_id", chunkID, "error", err)
 		} else {
 			defer cleanup()
 			templatesToUse = append(templatesToUse, paths...)
 			slog.Info("Materialized private templates",
-				"scan_id", scanID, "chunk_id", metaID, "count", len(paths))
+				"scan_id", scanID, "chunk_id", chunkID, "count", len(paths))
 		}
 	}
 
 	if len(templatesToUse) == 0 {
 		slog.Error("Refusing to run nuclei: chunk has no public or private templates",
-			"scan_id", scanID, "chunk_id", metaID,
+			"scan_id", scanID, "chunk_id", chunkID,
 			"public_count", len(templates), "private_count", len(privateTemplates))
 		return
 	}
 
 	var outputDir string
 	if r.options.AgentOutput != "" {
-		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+		outputDir = filepath.Join(r.options.AgentOutput, chunkID)
 	}
 
 	tmpInputFile, err := fileutil.GetTempFileName()
@@ -1639,7 +1639,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		return
 	}
 
-	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, metaID)
+	filteredTargets, extractedPorts, err := pkg.FilterTargetsByTemplatePorts(ctx, tmpInputFile, tmpTemplatesFile, scanID, chunkID)
 	if err != nil {
 		slog.Warn("Error filtering targets by template ports, proceeding with all targets", "error", err)
 		filteredTargets = assets
@@ -1648,7 +1648,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 	if len(filteredTargets) == 0 {
 		slog.Info("Skipping nuclei execution - no hosts with open ports found after naabu scan",
 			"scan_id", scanID,
-			"chunk_id", metaID,
+			"chunk_id", chunkID,
 			"extracted_ports", extractedPorts)
 		return
 	}
@@ -1667,12 +1667,12 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 			TeamID:       r.options.TeamID,
 			Output:       outputDir,
 		},
-		Id: metaID,
+		Id: chunkID,
 	}
 
 	slog.Info("Starting nuclei scan",
 		"scan_id", scanID,
-		"chunk_id", metaID,
+		"chunk_id", chunkID,
 		"targets", len(filteredTargets),
 		"templates", len(templatesToUse),
 		"extracted_ports", extractedPorts,
@@ -1688,14 +1688,14 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 		if scanCtx.Err() == context.DeadlineExceeded {
 			slog.Error("Nuclei scan timed out (20m hard cap)",
 				"scan_id", scanID,
-				"chunk_id", metaID,
+				"chunk_id", chunkID,
 				"targets", len(filteredTargets),
 			)
 			return
 		}
 		slog.Error("Nuclei scan execution failed",
 			"scan_id", scanID,
-			"chunk_id", metaID,
+			"chunk_id", chunkID,
 			"error", err,
 		)
 		return
@@ -1708,7 +1708,7 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 
 	slog.Info("Nuclei scan completed",
 		"scan_id", scanID,
-		"chunk_id", metaID,
+		"chunk_id", chunkID,
 		"output_files", len(outputFiles),
 	)
 
@@ -1717,27 +1717,27 @@ func (r *Runner) executeNucleiScan(ctx context.Context, scanID, metaID, config, 
 			if err := os.Remove(outputFile); err != nil {
 				slog.Warn("Failed to delete scan output file", "file", outputFile, "error", err)
 			} else {
-				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", metaID)
+				slog.Debug("Deleted scan output file after processing", "file", outputFile, "chunk_id", chunkID)
 			}
 		} else {
-			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", metaID)
+			slog.Debug("Keeping scan output file (keep-output-files flag is set)", "file", outputFile, "chunk_id", chunkID)
 		}
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scan_id=%s, chunk_id=%s", scanID, chunkID))
 	} else {
-		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scanID=%s, metaID=%s", scanID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed nuclei scan for scan_id=%s, chunk_id=%s", scanID, chunkID))
 	}
 }
 
 // executeEnumeration runs an enumeration chunk through pkg.Run.
-func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, steps, assets []string, ports string) {
-	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enumID=%s, metaID=%s, steps=%d, assets=%d, ports=%s", enumID, metaID, len(steps), len(assets), ports))
+func (r *Runner) executeEnumeration(ctx context.Context, enumID, chunkID string, steps, assets []string, ports string) {
+	r.logHelper("INFO", fmt.Sprintf("Starting enumeration for enum_id=%s, chunk_id=%s, steps=%d, assets=%d, ports=%s", enumID, chunkID, len(steps), len(assets), ports))
 
 	var outputDir string
 	if r.options.AgentOutput != "" {
-		outputDir = filepath.Join(r.options.AgentOutput, metaID)
+		outputDir = filepath.Join(r.options.AgentOutput, chunkID)
 	}
 
 	// pkg.Run dispatches on EnumerationID, so the Tool field is irrelevant.
@@ -1752,7 +1752,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 			Output:           outputDir,
 			EnumerationPorts: ports,
 		},
-		Id: metaID,
+		Id: chunkID,
 	}
 
 	taskResult, outputFiles, err := pkg.Run(ctx, task)
@@ -1768,7 +1768,7 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 					if err := os.Remove(outputFile); err != nil {
 						slog.Warn("Failed to delete enumeration output file", "file", outputFile, "error", err)
 					} else {
-						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", metaID)
+						slog.Debug("Deleted enumeration output file after processing", "file", outputFile, "chunk_id", chunkID)
 					}
 				}
 			}
@@ -1776,14 +1776,14 @@ func (r *Runner) executeEnumeration(ctx context.Context, enumID, metaID string, 
 			slog.Debug("Keeping enumeration output files (keep-output-files flag is set)",
 				"files", outputFiles,
 				"count", len(outputFiles),
-				"chunk_id", metaID)
+				"chunk_id", chunkID)
 		}
 	}
 
 	if taskResult != nil {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enum_id=%s, chunk_id=%s", enumID, chunkID))
 	} else {
-		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enumID=%s, metaID=%s", enumID, metaID))
+		r.logHelper("INFO", fmt.Sprintf("Completed enumeration for enum_id=%s, chunk_id=%s", enumID, chunkID))
 	}
 }
 
