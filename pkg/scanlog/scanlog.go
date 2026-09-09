@@ -11,10 +11,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/projectdiscovery/pd-agent/pkg/envconfig"
 	"github.com/projectdiscovery/pd-agent/pkg/validate"
 )
+
+// uploadTimeout bounds shipping one chunk's log to all destinations. Generous
+// enough for a large object on a slow link, bounded so a silent backend cannot
+// consume the rest of the scan's deadline.
+const uploadTimeout = 5 * time.Minute
 
 // Meta identifies the chunk a scan log belongs to.
 type Meta struct {
@@ -43,13 +49,46 @@ type Uploader interface {
 }
 
 // Destinations resolves the configured upload targets. An empty slice means
-// scan-log upload is off.
+// scan-log upload is off. The platform toggle and a customer-owned bucket are
+// independent, so either, both or neither can be active.
 func Destinations() []Uploader {
 	var dests []Uploader
 	if envconfig.ScanLogUploadEnabled() {
 		dests = append(dests, NewPlatformUploader())
 	}
+	if cfg := S3ConfigFromEnv(); cfg.Enabled() {
+		dests = append(dests, NewS3Uploader(cfg))
+	}
 	return dests
+}
+
+// LogDestinations records the resolved destinations once at boot. Without it
+// the only evidence of a misconfigured bucket is a per-chunk upload warning
+// during the first scan, which nobody is watching for.
+func LogDestinations() {
+	dests := Destinations()
+	if len(dests) == 0 {
+		slog.Info("scan-log: upload disabled, no destinations configured")
+		return
+	}
+	names := make([]string, 0, len(dests))
+	for _, dest := range dests {
+		names = append(names, dest.Name())
+	}
+	attrs := []any{"destinations", names}
+	if cfg := S3ConfigFromEnv(); cfg.Enabled() {
+		// Bucket shape, never the credentials.
+		attrs = append(attrs,
+			"s3_bucket", cfg.Bucket,
+			"s3_region", cfg.Region,
+			"s3_endpoint", cfg.Endpoint,
+			"s3_path_style", cfg.UsePathStyle,
+			"s3_prefix", cfg.Prefix)
+		if warning := cfg.PlaintextWarning(); warning != "" {
+			slog.Warn("scan-log: " + warning)
+		}
+	}
+	slog.Info("scan-log: upload enabled", attrs...)
 }
 
 // Upload gzips outputFile once and ships it to every destination. An empty
@@ -92,9 +131,16 @@ func Upload(ctx context.Context, dests []Uploader, m Meta, outputFile string) er
 		"scan_id", m.ScanID, "chunk_id", m.ChunkID,
 		"raw_bytes", info.Size(), "gz_bytes", gzSize)
 
+	// The caller's context is the scan's 20-minute budget, shared with the
+	// nuclei run that just finished, so a slow destination would spend
+	// whatever nuclei left and hold a worker slot. Cancellation still
+	// propagates from ctx, so shutdown is unaffected.
+	uploadCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
+	defer cancel()
+
 	var errs []error
 	for _, dest := range dests {
-		location, err := dest.Upload(ctx, m, gzPath, gzSize)
+		location, err := dest.Upload(uploadCtx, m, gzPath, gzSize)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", dest.Name(), err))
 			continue

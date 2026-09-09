@@ -45,6 +45,7 @@ import (
 	"github.com/projectdiscovery/pd-agent/pkg/prereq"
 	"github.com/projectdiscovery/pd-agent/pkg/resourceprofile"
 	"github.com/projectdiscovery/pd-agent/pkg/runtools"
+	"github.com/projectdiscovery/pd-agent/pkg/scanlog"
 	"github.com/projectdiscovery/pd-agent/pkg/selfupdate"
 	"github.com/projectdiscovery/pd-agent/pkg/types"
 	"github.com/projectdiscovery/pd-agent/pkg/validate"
@@ -2420,6 +2421,11 @@ func parseOptions() *Options {
 		options.AgentName = agentName
 	}
 
+	if err := scanlog.ValidateS3Config(); err != nil {
+		slog.Error("invalid scan-log S3 config", "error", err)
+		os.Exit(1)
+	}
+
 	// 0 = auto-detect for chunks.
 	if options.ChunkParallelism < 0 {
 		options.ChunkParallelism = 0
@@ -2487,6 +2493,7 @@ func main() {
 	}
 
 	ensureNucleiTemplates()
+	scanlog.LogDestinations()
 
 	var err error
 	pdcpRunner, err = NewRunner(options)
