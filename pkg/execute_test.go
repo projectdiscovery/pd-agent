@@ -1,6 +1,7 @@
 package pkg
 
 import (
+	"path/filepath"
 	"slices"
 	"testing"
 )
@@ -8,6 +9,10 @@ import (
 // The policy this pins: an unresolved template drops and the chunk scans the
 // rest, rather than the chunk aborting and losing coverage the agent does have.
 func TestResolveRequestedTemplates(t *testing.T) {
+	// A real absolute path: a "/tmp/..." literal is not private on Windows,
+	// where filepath.IsAbs calls it relative.
+	priv := filepath.Join(t.TempDir(), "chunk", "private.yaml")
+
 	tests := []struct {
 		name       string
 		requested  []string
@@ -38,8 +43,8 @@ func TestResolveRequestedTemplates(t *testing.T) {
 		},
 		{
 			name:      "private templates drop like any other",
-			requested: []string{"/tmp/chunk/private.yaml", "http/a.yaml"},
-			missing:   []string{"/tmp/chunk/private.yaml"},
+			requested: []string{priv, "http/a.yaml"},
+			missing:   []string{priv},
 			wantKept:  []string{"http/a.yaml"},
 		},
 		{
@@ -82,7 +87,14 @@ func TestResolveRequestedTemplatesDroppedCountSurvivesDuplicates(t *testing.T) {
 }
 
 func TestCountPrivate(t *testing.T) {
-	got := countPrivate([]string{"http/a.yaml", "/tmp/chunk/p1.yaml", "/tmp/chunk/p2.yaml"})
+	// Real temp paths, not "/tmp/..." literals: countPrivate keys off
+	// filepath.IsAbs, which calls a unix-shaped path relative on Windows.
+	dir := t.TempDir()
+	got := countPrivate([]string{
+		"http/a.yaml",
+		filepath.Join(dir, "chunk", "p1.yaml"),
+		filepath.Join(dir, "chunk", "p2.yaml"),
+	})
 	if got != 2 {
 		t.Errorf("countPrivate = %d, want 2", got)
 	}
