@@ -15,7 +15,7 @@ func openTestDB(t *testing.T) *SQLiteStore {
 	if err != nil {
 		t.Fatalf("Open(%s): %v", dbPath, err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -26,7 +26,7 @@ func TestOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open: %v", err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 
 		// file should exist on disk
 		size, err := store.DBSizeBytes()
@@ -46,7 +46,7 @@ func TestOpen(t *testing.T) {
 		if err != nil {
 			t.Fatalf("query sqlite_master: %v", err)
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			var name string
 			if err := rows.Scan(&name); err != nil {

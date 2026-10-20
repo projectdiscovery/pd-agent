@@ -17,11 +17,11 @@ jobs:
     if: "${{ !endsWith(github.actor, '[bot]') }}"
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: projectdiscovery/actions/setup/go@v1
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v5
+        uses: golangci/golangci-lint-action@v9
         with:
           version: latest
           install-mode: goinstall
@@ -36,7 +36,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: projectdiscovery/actions/setup/go@v1
       - run: go build .
         working-directory: cmd/pd-agent/
@@ -54,7 +54,7 @@ jobs:
     needs: [lint]
     runs-on: ubuntu-latest-16-cores
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

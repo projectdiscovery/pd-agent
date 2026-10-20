@@ -129,9 +129,8 @@ func TestRunNaabu_NeverConnectsToDeniedPort(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	_, err := RunNaabu(ctx, []string{"127.0.0.1", deniedAddr}, NaabuOptions{
-		OutputFile:        out,
-		SkipHostDiscovery: true,
-		Ports:             deniedPort + "," + controlPort,
+		OutputFile: out,
+		Ports:      deniedPort + "," + controlPort,
 	})
 	if err != nil {
 		t.Logf("RunNaabu returned %v (non-fatal: naabu errors when nothing is open)", err)
@@ -160,7 +159,7 @@ func TestRunNaabu_WhitespaceDeniedTargetNeverConnects(t *testing.T) {
 	// TopPorts leaves naabu's per-target port path active, unlike a literal
 	// Ports list. A padded denied target must not escape through that path.
 	_, err := RunNaabu(ctx, []string{deniedAddr + " \t", controlAddr}, NaabuOptions{
-		OutputFile: out, SkipHostDiscovery: true, Ports: "top-100",
+		OutputFile: out, Ports: "top-100",
 	})
 	if err != nil {
 		t.Fatalf("RunNaabu: %v", err)

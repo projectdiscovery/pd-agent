@@ -65,10 +65,9 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 			}
 			of, err := runEmbeddedTool(ctx, task, "naabu", func(ctx context.Context, outputFile string) error {
 				_, err := runtools.RunNaabu(ctx, hosts, runtools.NaabuOptions{
-					OutputFile:        outputFile,
-					SkipHostDiscovery: true,
-					ServiceVersion:    serviceVersion,
-					Ports:             ports,
+					OutputFile:     outputFile,
+					ServiceVersion: serviceVersion,
+					Ports:          ports,
 				})
 				// naabu returns an error when no ports are found; downstream
 				// steps short-circuit on an empty hostsWithOpenPorts list.
@@ -81,11 +80,11 @@ func Run(ctx context.Context, task *types.Task) (*types.TaskResult, []string, er
 				return nil, nil, err
 			}
 			if of != "" {
-				c, err := fileutil.ReadFile(of)
-				if err == nil {
-					for line := range c {
-						hostsWithOpenPorts = append(hostsWithOpenPorts, line)
+				for line, err := range fileutil.Lines(of) {
+					if err != nil {
+						break
 					}
+					hostsWithOpenPorts = append(hostsWithOpenPorts, line)
 				}
 			}
 		} else {

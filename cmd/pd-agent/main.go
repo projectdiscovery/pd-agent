@@ -609,9 +609,9 @@ func (r *Runner) handleHTTPX(ctx context.Context, method string, data []byte) (a
 	if err != nil {
 		return nil, fmt.Errorf("httpx: create temp file: %w", err)
 	}
-	defer os.Remove(f.Name())
-	fmt.Fprintln(f, req.Target)
-	f.Close()
+	defer func() { _ = os.Remove(f.Name()) }()
+	_, _ = fmt.Fprintln(f, req.Target)
+	_ = f.Close()
 
 	var mu sync.Mutex
 	var results []httpxrunner.Result
@@ -675,7 +675,7 @@ func (r *Runner) handlePortProbe(ctx context.Context, method string, data []byte
 
 	open := err == nil
 	if open {
-		conn.Close()
+		_ = conn.Close()
 	}
 
 	return map[string]any{
@@ -732,12 +732,12 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		if err != nil {
 			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
 		}
-		defer os.Remove(f.Name())
+		defer func() { _ = os.Remove(f.Name()) }()
 		if _, err := f.Write(decoded); err != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
 		}
-		f.Close()
+		_ = f.Close()
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{f.Name()},
 		}))
@@ -747,7 +747,7 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		if err != nil {
 			return nil, fmt.Errorf("nuclei-retest: fetch template url: %w", err)
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("nuclei-retest: template url returned %d", resp.StatusCode)
 		}
@@ -759,12 +759,12 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		if err != nil {
 			return nil, fmt.Errorf("nuclei-retest: create temp file: %w", err)
 		}
-		defer os.Remove(f.Name())
+		defer func() { _ = os.Remove(f.Name()) }()
 		if _, err := f.Write(body); err != nil {
-			f.Close()
+			_ = f.Close()
 			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
 		}
-		f.Close()
+		_ = f.Close()
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{f.Name()},
 		}))
@@ -2525,7 +2525,7 @@ func main() {
 	// is safe before upload.
 	if pdcpRunner.agentDB != nil {
 		pdcpRunner.uploadDebugDB()
-		pdcpRunner.agentDB.Close()
+		_ = pdcpRunner.agentDB.Close()
 		pdcpRunner.agentDB = nil
 	}
 
@@ -2579,7 +2579,7 @@ func (r *Runner) uploadDebugDB() {
 		slog.Warn("agentdb: failed to open DB for upload", "error", err)
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {
@@ -2605,7 +2605,7 @@ func (r *Runner) uploadDebugDB() {
 		slog.Warn("agentdb: debug DB upload failed", "error", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
@@ -2639,7 +2639,7 @@ func warnOrphanDBs(dir, myAgentID string) {
 		}
 		if time.Since(fi.ModTime()) > 7*24*time.Hour {
 			for _, suffix := range []string{"", "-wal", "-shm"} {
-				os.Remove(m + suffix)
+				_ = os.Remove(m + suffix)
 			}
 			slog.Info("agentdb: deleted orphan DB", "file", base,
 				"age", time.Since(fi.ModTime()).Round(time.Hour))

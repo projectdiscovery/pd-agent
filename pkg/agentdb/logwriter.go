@@ -130,7 +130,7 @@ func (w *LogWriter) flush(entries []LogEntry) {
 		slog.Debug("agentdb: logwriter prepare", "error", err)
 		return
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for _, e := range entries {
 		if _, err := stmt.Exec(e.Timestamp.UTC().Format(time.RFC3339Nano), e.Line); err != nil {

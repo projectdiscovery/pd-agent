@@ -90,7 +90,7 @@ func Open(dbPath string) (*SQLiteStore, error) {
 
 	// Verify the connection is usable (catches bad paths).
 	if err := db.Ping(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("agentdb: ping %s: %w", dbPath, err)
 	}
 
@@ -101,7 +101,7 @@ func Open(dbPath string) (*SQLiteStore, error) {
 	}
 	for _, p := range pragmas {
 		if _, err := db.Exec(p); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("agentdb: %s: %w", p, err)
 		}
 	}
@@ -112,7 +112,7 @@ func Open(dbPath string) (*SQLiteStore, error) {
 	var avMode int
 	if err := db.QueryRow("PRAGMA auto_vacuum").Scan(&avMode); err == nil && avMode == 0 {
 		if _, err := db.Exec("PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("agentdb: set auto_vacuum: %w", err)
 		}
 		// VACUUM converts the file to incremental auto_vacuum mode.
@@ -123,7 +123,7 @@ func Open(dbPath string) (*SQLiteStore, error) {
 	}
 
 	if _, err := db.Exec(schema); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("agentdb: create schema: %w", err)
 	}
 
@@ -286,7 +286,7 @@ func (s *SQLiteStore) QueryLogs(ctx context.Context, filter LogFilter) ([]LogEnt
 	if err != nil {
 		return nil, fmt.Errorf("agentdb: query logs: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var entries []LogEntry
 	for rows.Next() {
@@ -335,7 +335,7 @@ func (s *SQLiteStore) QueryMetrics(ctx context.Context, since, until time.Time, 
 	if err != nil {
 		return nil, fmt.Errorf("agentdb: query metrics: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var samples []MetricSample
 	for rows.Next() {
@@ -404,7 +404,7 @@ func (s *SQLiteStore) queryTasks(ctx context.Context, q string) ([]Task, error) 
 	if err != nil {
 		return nil, fmt.Errorf("agentdb: query tasks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var tasks []Task
 	for rows.Next() {

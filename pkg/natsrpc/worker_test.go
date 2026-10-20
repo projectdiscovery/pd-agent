@@ -93,7 +93,7 @@ func publishChunk(t *testing.T, js jetstream.JetStream, subject string, req *age
 		t.Fatalf("zstd encoder: %v", err)
 	}
 	compressed := enc.EncodeAll(data, nil)
-	enc.Close()
+	_ = enc.Close()
 	if _, err := js.Publish(context.Background(), subject, compressed); err != nil {
 		t.Fatalf("publish chunk to %s: %v", subject, err)
 	}
@@ -545,7 +545,7 @@ func TestDecodeScanChunk_PrivateTemplatesRoundTrip(t *testing.T) {
 		t.Fatalf("zstd: %v", err)
 	}
 	compressed := enc.EncodeAll(raw, nil)
-	enc.Close()
+	_ = enc.Close()
 
 	chunk, err := decodeScanChunk(compressed)
 	if err != nil {
@@ -590,7 +590,7 @@ func TestDecodeScanChunk_PrivateTemplatesAbsent(t *testing.T) {
 		t.Fatalf("zstd: %v", err)
 	}
 	compressed := enc.EncodeAll(raw, nil)
-	enc.Close()
+	_ = enc.Close()
 
 	chunk, err := decodeScanChunk(compressed)
 	if err != nil {
