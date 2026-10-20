@@ -2,6 +2,8 @@ module github.com/projectdiscovery/pd-agent
 
 go 1.27.1
 
+toolchain go1.27.3
+
 require (
 	github.com/aws/aws-sdk-go-v2 v1.41.5
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.20
