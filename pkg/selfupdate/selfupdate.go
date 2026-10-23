@@ -93,7 +93,7 @@ func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion str
 	}
 
 	if err := verifyBinary(newBinary); err != nil {
-		os.Remove(newBinary)
+		_ = os.Remove(newBinary)
 		return "", fmt.Errorf("verify: %w", err)
 	}
 
@@ -209,7 +209,7 @@ func resolveLatest() (version, downloadURL string, err error) {
 	if err != nil {
 		return "", "", fmt.Errorf("fetch latest release: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse))
 	if err != nil {
@@ -238,7 +238,7 @@ func resolveVersion(tag string) (downloadURL string, err error) {
 	if err != nil {
 		return "", fmt.Errorf("fetch release %s: %w", tag, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAPIResponse))
 	if err != nil {
@@ -291,7 +291,7 @@ func downloadBinary(ctx context.Context, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download returned %d", resp.StatusCode)
@@ -301,13 +301,13 @@ func downloadBinary(ctx context.Context, url string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer os.Remove(tmpZip.Name())
+	defer func() { _ = os.Remove(tmpZip.Name()) }()
 
 	if _, err := io.Copy(tmpZip, io.LimitReader(resp.Body, maxDownloadSize)); err != nil {
-		tmpZip.Close()
+		_ = tmpZip.Close()
 		return "", err
 	}
-	tmpZip.Close()
+	_ = tmpZip.Close()
 
 	return extractBinaryFromZip(tmpZip.Name())
 }
@@ -317,7 +317,7 @@ func extractBinaryFromZip(zipPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open zip: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	for _, f := range r.File {
 		name := filepath.Base(f.Name)
@@ -329,7 +329,7 @@ func extractBinaryFromZip(zipPath string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("open %s in zip: %w", name, err)
 		}
-		defer rc.Close()
+		defer func() { _ = rc.Close() }()
 
 		tmpBin, err := os.CreateTemp("", "pd-agent-new-*")
 		if err != nil {
@@ -337,14 +337,14 @@ func extractBinaryFromZip(zipPath string) (string, error) {
 		}
 
 		if _, err := io.Copy(tmpBin, rc); err != nil {
-			tmpBin.Close()
-			os.Remove(tmpBin.Name())
+			_ = tmpBin.Close()
+			_ = os.Remove(tmpBin.Name())
 			return "", err
 		}
-		tmpBin.Close()
+		_ = tmpBin.Close()
 
 		if err := os.Chmod(tmpBin.Name(), 0755); err != nil {
-			os.Remove(tmpBin.Name())
+			_ = os.Remove(tmpBin.Name())
 			return "", err
 		}
 
@@ -377,7 +377,7 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 
 	dir := filepath.Dir(dst)
 	tmp, err := os.CreateTemp(dir, ".pd-agent-install-*")
@@ -386,11 +386,11 @@ func copyFile(src, dst string) error {
 	}
 
 	if _, err := io.Copy(tmp, in); err != nil {
-		tmp.Close()
-		os.Remove(tmp.Name())
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
 		return err
 	}
-	tmp.Close()
+	_ = tmp.Close()
 
 	return os.Rename(tmp.Name(), dst)
 }

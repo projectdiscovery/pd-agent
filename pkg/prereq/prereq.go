@@ -54,14 +54,14 @@ func warmupBrowser() error {
 		return fmt.Errorf("warmup tmp file: %w", err)
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	defer os.Remove(tmpPath)
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
 
 	storeDir, err := os.MkdirTemp("", "httpx-warmup-store-*")
 	if err != nil {
 		return fmt.Errorf("warmup store dir: %w", err)
 	}
-	defer os.RemoveAll(storeDir)
+	defer func() { _ = os.RemoveAll(storeDir) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
@@ -115,7 +115,7 @@ func readFirstScreenshotPath(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 	for scanner.Scan() {

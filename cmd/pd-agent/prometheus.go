@@ -98,12 +98,12 @@ func (r *Runner) servePrometheusMetrics(w http.ResponseWriter, _ *http.Request) 
 }
 
 func writeGauge(w io.Writer, name, help string, value float64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %s\n",
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %s\n",
 		name, help, name, name, formatFloat(value))
 }
 
 func writeCounter(w io.Writer, name, help string, value float64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %s\n",
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n%s %s\n",
 		name, help, name, name, formatFloat(value))
 }
 

@@ -22,8 +22,7 @@ type NaabuOptions struct {
 	OutputFile string
 	// Ports is the control-plane port spec: "top-<N>" (e.g. "top-100"), "full",
 	// or a literal list/range ("80,443", "1-1000"). Empty uses naabu's default.
-	Ports             string
-	SkipHostDiscovery bool
+	Ports string
 	// ServiceVersion enables nmap-service-probes scanning (no external nmap binary).
 	ServiceVersion bool
 	// ServiceDiscovery enables port-number-to-service mapping (cheaper than ServiceVersion).
@@ -41,10 +40,10 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	if err != nil {
 		return "", fmt.Errorf("create output file: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	bw := bufio.NewWriter(out)
-	defer bw.Flush()
+	defer func() { _ = bw.Flush() }()
 
 	var mu sync.Mutex
 	naabuOpts := newNaabuOptions(hosts, opts, func(hr *result.HostResult) {
@@ -68,7 +67,7 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 	if err != nil {
 		return "", fmt.Errorf("init naabu runner: %w", err)
 	}
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// RunEnumeration returns an error when no ports are found; treat at call site.
 	if err := r.RunEnumeration(ctx); err != nil {
@@ -85,13 +84,12 @@ func RunNaabu(ctx context.Context, hosts []string, opts NaabuOptions) (string, e
 func newNaabuOptions(hosts []string, opts NaabuOptions, onResult func(*result.HostResult)) *runner.Options {
 	hosts = StripDeniedProbePorts(hosts)
 	o := &runner.Options{
-		Host:              goflags.StringSlice(hosts),
-		SkipHostDiscovery: opts.SkipHostDiscovery,
-		ServiceVersion:    opts.ServiceVersion,
-		ServiceDiscovery:  opts.ServiceDiscovery,
-		Silent:            true,
-		ExcludePorts:      goflags.StringSlice(DeniedProbePortStrings()),
-		OnResult:          onResult,
+		Host:             goflags.StringSlice(hosts),
+		ServiceVersion:   opts.ServiceVersion,
+		ServiceDiscovery: opts.ServiceDiscovery,
+		Silent:           true,
+		ExcludePorts:     goflags.StringSlice(DeniedProbePortStrings()),
+		OnResult:         onResult,
 	}
 	setNaabuPorts(o, opts.Ports)
 	return o

@@ -152,11 +152,10 @@ func runNaabuScan(ctx context.Context, targets []string, ports []string, scanID,
 	// explicit host:port input asks for them.
 	targets = runtools.StripDeniedProbePorts(targets)
 	options := &runner.Options{
-		Host:              goflags.StringSlice(targets),
-		Ports:             portStr,
-		ExcludePorts:      goflags.StringSlice(runtools.DeniedProbePortStrings()),
-		SkipHostDiscovery: true,
-		Silent:            true,
+		Host:         goflags.StringSlice(targets),
+		Ports:        portStr,
+		ExcludePorts: goflags.StringSlice(runtools.DeniedProbePortStrings()),
+		Silent:       true,
 		OnResult: func(hr *result.HostResult) {
 			if hr.Host == "" || len(hr.Ports) == 0 {
 				return

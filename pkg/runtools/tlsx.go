@@ -64,10 +64,10 @@ func RunTlsx(ctx context.Context, targets []string, opts TlsxOptions) (string, e
 	if err != nil {
 		return "", fmt.Errorf("create output file: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	bw := bufio.NewWriter(out)
-	defer bw.Flush()
+	defer func() { _ = bw.Flush() }()
 
 	var (
 		mu       sync.Mutex

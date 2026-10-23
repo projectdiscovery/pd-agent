@@ -154,7 +154,7 @@ func TestSubscribeRequests_Dispatch(t *testing.T) {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	nc.Flush()
+	_ = nc.Flush()
 
 	// Send a request
 	reqData, _ := json.Marshal(HTTPXRequest{
@@ -200,7 +200,7 @@ func TestSubscribeRequests_UnknownMethod(t *testing.T) {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	nc.Flush()
+	_ = nc.Flush()
 
 	msg, err := nc.Request(prefix+".unknown-tool", nil, 2*time.Second)
 	if err != nil {
@@ -239,7 +239,7 @@ func TestSubscribeRequests_HandlerError(t *testing.T) {
 		t.Fatalf("SubscribeRequests failed: %v", err)
 	}
 	defer func() { _ = sub.Unsubscribe() }()
-	nc.Flush()
+	_ = nc.Flush()
 
 	msg, err := nc.Request(prefix+".fail", nil, 2*time.Second)
 	if err != nil {
@@ -290,7 +290,7 @@ func TestSubscribeBroadcast_AllReceive(t *testing.T) {
 			t.Fatalf("SubscribeBroadcast failed for agent %d: %v", i, err)
 		}
 		subs[i] = sub
-		nc.Flush()
+		_ = nc.Flush()
 	}
 
 	defer func() {
@@ -307,7 +307,7 @@ func TestSubscribeBroadcast_AllReceive(t *testing.T) {
 	if err := publisher.Publish(prefix+".health-check", nil); err != nil {
 		t.Fatalf("publish failed: %v", err)
 	}
-	publisher.Flush()
+	_ = publisher.Flush()
 
 	// Collect results - all agents should receive the broadcast
 	seen := make(map[string]bool)
@@ -356,7 +356,7 @@ func TestSubscribeRequests_QueueGroupLoadBalancing(t *testing.T) {
 			t.Fatalf("SubscribeRequests failed for agent %d: %v", i, err)
 		}
 		subs[i] = sub
-		nc.Flush()
+		_ = nc.Flush()
 	}
 
 	defer func() {

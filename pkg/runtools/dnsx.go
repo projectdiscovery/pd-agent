@@ -62,10 +62,10 @@ func RunDnsx(ctx context.Context, hosts []string, opts DnsxOptions) (string, err
 	if err != nil {
 		return "", fmt.Errorf("create output file: %w", err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 
 	bw := bufio.NewWriter(out)
-	defer bw.Flush()
+	defer func() { _ = bw.Flush() }()
 
 	var (
 		mu       sync.Mutex
