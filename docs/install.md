@@ -4,6 +4,8 @@ Install `pd-agent` on a machine inside the network you want to scan. Once it's r
 
 **Before you start:** grab your `PDCP_API_KEY` and `PDCP_TEAM_ID` from <https://cloud.projectdiscovery.io>.
 
+**Before you scan:** internal ranges usually contain printers, OT controllers, and VoIP phones. Some Nuclei templates reach these over raw print protocols or SNMP and can print pages or hang the device. Read [safety considerations](https://docs.projectdiscovery.io/cloud/scanning/internal-scan#safety-considerations) before the first scan.
+
 Pick the install path that matches where the agent will live:
 
 | Method | Best for |
