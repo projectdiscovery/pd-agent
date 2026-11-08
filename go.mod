@@ -8,7 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.99.0
 	github.com/go-rod/rod v0.116.2
 	github.com/json-iterator/go v1.1.12
-	github.com/klauspost/compress v1.18.7
+	github.com/klauspost/compress v1.20.2
 	github.com/miekg/dns v1.1.73
 	github.com/nats-io/nats-server/v2 v2.12.6
 	github.com/nats-io/nats.go v1.49.0
@@ -27,9 +27,9 @@ require (
 	github.com/shirou/gopsutil/v3 v3.24.5
 	github.com/tidwall/gjson v1.18.0
 	go.uber.org/automaxprocs v1.6.0
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.62.0
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.49.0
 	google.golang.org/protobuf v1.36.11
 	k8s.io/apimachinery v0.34.2
 	k8s.io/client-go v0.34.2
@@ -87,7 +87,7 @@ require (
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137 // indirect
 	github.com/alexsnet/go-vnc v0.1.0 // indirect
 	github.com/alitto/pond v1.9.2 // indirect
-	github.com/andybalholm/brotli v1.2.0 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/andybalholm/cascadia v1.3.4 // indirect
 	github.com/andygrunwald/go-jira v1.16.1 // indirect
 	github.com/antchfx/htmlquery v1.3.5 // indirect
@@ -478,14 +478,14 @@ require (
 	go4.org v0.0.0-20230225012048-214862532bf5 // indirect
 	goftp.io/server/v2 v2.0.1 // indirect
 	golang.org/x/arch v0.3.0 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/exp v0.0.0-20260527015227-08cc5374adb3 // indirect
-	golang.org/x/mod v0.39.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.41.0 // indirect
+	golang.org/x/mod v0.41.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
+	golang.org/x/term v0.47.0 // indirect
+	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 	google.golang.org/api v0.264.0 // indirect
 	google.golang.org/genproto v0.0.0-20260128011058-8636f8732409 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260526163538-3dc84a4a5aaa // indirect
