@@ -285,6 +285,9 @@ func runNucleiScan(ctx context.Context, task *types.Task) (*types.TaskResult, []
 		if err != nil {
 			slog.Warn("nuclei scan: failed to base64-decode task.Options.ReportConfig; reporting disabled for this scan",
 				"scan_id", task.Options.ScanID, "error", err)
+		} else if err := checkMessageReportingConfig(decoded); err != nil {
+			slog.Warn("nuclei scan: refusing reporting config from work message; reporting disabled for this scan",
+				"scan_id", task.Options.ScanID, "error", err)
 		} else {
 			opts.ReportingConfigYAML = decoded
 			slog.Info("nuclei scan: loaded reporting config from work message",
