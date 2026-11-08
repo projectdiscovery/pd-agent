@@ -152,6 +152,7 @@ func TestMessageReportConfigNeverWritesLocalFiles(t *testing.T) {
 		{name: "markdown", cfg: "markdown:\n  directory: %q\n"},
 		{name: "jsonl", cfg: "jsonl:\n  file: %q\n"},
 		{name: "sarif", cfg: "sarif:\n  file: %q\n"},
+		{name: "jsonl through a merge key", cfg: "<<: {jsonl: {file: %q}}\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -190,6 +191,10 @@ func TestCheckMessageReportingConfig(t *testing.T) {
 		{name: "markdown exporter", cfg: "markdown:\n  directory: /tmp/x\n", wantErr: true},
 		{name: "json exporter", cfg: "json:\n  file: /tmp/x\n", wantErr: true},
 		{name: "pdf exporter", cfg: "pdf:\n  file: /tmp/x\n", wantErr: true},
+		{name: "binary tag hides an env reference", cfg: "gitlab:\n  token: !!binary JFBEQ1BfQVBJX0tFWQ==\n", wantErr: true},
+		{name: "local tag hides an env reference", cfg: "gitlab:\n  token: !x $PDCP_API_KEY\n", wantErr: true},
+		{name: "merge key adds a file exporter", cfg: "<<: {jsonl: {file: /tmp/x}}\n", wantErr: true},
+		{name: "alias key names a file exporter", cfg: "name: &k jsonl\n*k : {file: /tmp/x}\n", wantErr: true},
 		{name: "not yaml", cfg: "jira: [", wantErr: true},
 	}
 	for _, tt := range tests {
