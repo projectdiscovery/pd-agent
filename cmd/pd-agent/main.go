@@ -713,7 +713,6 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 		nuclei.WithVerbosity(nuclei.VerbosityOptions{Silent: true}),
 		nuclei.WithSandboxOptions(false, false),
 		nuclei.EnableCodeTemplates(),
-		nuclei.EnableHeadlessWithOpts(nil),
 		nuclei.EnableSelfContainedTemplates(),
 		// Emits a ResultEvent on no-match too, so the response carries
 		// real severity/template-id instead of empty strings.
@@ -738,6 +737,9 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
 		}
 		_ = f.Close()
+		if retestNeedsHeadless(decoded) {
+			sdkOpts = append(sdkOpts, retestHeadlessOption())
+		}
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{f.Name()},
 		}))
@@ -765,11 +767,16 @@ func (r *Runner) handleNucleiRetest(ctx context.Context, method string, data []b
 			return nil, fmt.Errorf("nuclei-retest: write template: %w", err)
 		}
 		_ = f.Close()
+		if retestNeedsHeadless(body) {
+			sdkOpts = append(sdkOpts, retestHeadlessOption())
+		}
 		sdkOpts = append(sdkOpts, nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
 			Templates: []string{f.Name()},
 		}))
 
 	default:
+		// The template is not in hand, so it may be headless.
+		sdkOpts = append(sdkOpts, retestHeadlessOption())
 		sdkOpts = append(sdkOpts, nuclei.WithTemplateFilters(nuclei.TemplateFilters{
 			IDs: []string{req.TemplateID},
 		}))
