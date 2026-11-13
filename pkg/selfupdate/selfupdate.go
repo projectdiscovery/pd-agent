@@ -140,7 +140,7 @@ func Prevalidate(newBinaryPath, agentID string) error {
 	select {
 	case <-ok:
 		_ = cmd.Process.Kill()
-		<-done
+		_ = <-done // killed on purpose; its exit error says nothing
 		slog.Info("selfupdate: preflight passed", "path", newBinaryPath)
 		return nil
 	case err := <-done:
@@ -157,7 +157,7 @@ func Prevalidate(newBinaryPath, agentID string) error {
 		return fmt.Errorf("preflight: new binary exited without printing %q (stderr: %s)", PreflightOK, out)
 	case <-time.After(preflightWindow):
 		_ = cmd.Process.Kill()
-		<-done
+		_ = <-done // killed on purpose; its exit error says nothing
 		return fmt.Errorf("preflight: new binary did not print %q within %s, likely an older build", PreflightOK, preflightWindow)
 	}
 }
