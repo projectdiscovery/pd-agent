@@ -22,9 +22,21 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// PreflightEnvVar signals the new binary to exit 0 after flag parsing so the
-// caller can detect a broken update before swapping the live binary.
+// PreflightEnvVar asks the new binary to parse its flags, print PreflightOK and
+// stop before touching shared state, so the caller can detect a broken update
+// before swapping the live binary.
 const PreflightEnvVar = "PDCP_PREFLIGHT"
+
+// PreflightOK is what a binary that honors PreflightEnvVar prints on stdout.
+const PreflightOK = "preflight ok"
+
+// preflightWindow is how long Prevalidate waits for PreflightOK.
+var preflightWindow = 30 * time.Second
+
+// PreflightHold is how long the binary stays up after printing PreflightOK.
+// Updaters up to v0.2.3 passed the preflight only when the new binary was still
+// running after 15s, so it must outlast that window for them to accept it.
+const PreflightHold = 20 * time.Second
 
 const (
 	githubRepo      = "projectdiscovery/pd-agent"
@@ -101,14 +113,11 @@ func DownloadAndVerify(ctx context.Context, currentVersion, requestedVersion str
 	return newBinary, nil
 }
 
-// Prevalidate runs the new binary with the Apply-time args and
-// PDCP_PREFLIGHT=1, aborting if it exits inside preflightWindow. A binary that
-// honors PreflightEnvVar exits 0 quickly; an older binary either runs normally
-// (and clashes with the live NATS session) or dies on flag mismatches, so any
-// early exit fails the preflight.
+// Prevalidate runs the new binary with the Apply-time args and PDCP_PREFLIGHT=1
+// and passes once it prints PreflightOK. A binary that exits or keeps running
+// without printing it fails: it is broken, or too old to honor the preflight
+// and would start a second agent on the live NATS session.
 func Prevalidate(newBinaryPath, agentID string) error {
-	const preflightWindow = 15 * time.Second
-
 	args := ensureArg(os.Args, "--agent-id", agentID)
 	if len(args) == 0 {
 		return fmt.Errorf("preflight: empty restart args")
@@ -117,7 +126,8 @@ func Prevalidate(newBinaryPath, agentID string) error {
 	cmd := exec.Command(newBinaryPath, args[1:]...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cmd.Stdout = io.Discard
+	ok := make(chan struct{})
+	cmd.Stdout = &markerWriter{marker: PreflightOK, found: ok}
 	cmd.Env = append(os.Environ(), PreflightEnvVar+"=1")
 
 	if err := cmd.Start(); err != nil {
@@ -128,18 +138,58 @@ func Prevalidate(newBinaryPath, agentID string) error {
 	go func() { done <- cmd.Wait() }()
 
 	select {
+	case <-ok:
+		_ = cmd.Process.Kill()
+		waitErr := <-done
+		slog.Debug("selfupdate: preflight process stopped", "err", waitErr)
+		slog.Info("selfupdate: preflight passed", "path", newBinaryPath)
+		return nil
 	case err := <-done:
+		select {
+		case <-ok:
+			slog.Info("selfupdate: preflight passed", "path", newBinaryPath)
+			return nil
+		default:
+		}
 		out := strings.TrimSpace(stderr.String())
 		if err != nil {
 			return fmt.Errorf("preflight: new binary exited early: %v (stderr: %s)", err, out)
 		}
-		return fmt.Errorf("preflight: new binary exited cleanly without honoring %s, likely an older build (stderr: %s)", PreflightEnvVar, out)
+		return fmt.Errorf("preflight: new binary exited without printing %q (stderr: %s)", PreflightOK, out)
 	case <-time.After(preflightWindow):
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		slog.Info("selfupdate: preflight passed", "path", newBinaryPath, "window", preflightWindow)
-		return nil
+		waitErr := <-done
+		slog.Debug("selfupdate: preflight process stopped", "err", waitErr)
+		return fmt.Errorf("preflight: new binary did not print %q within %s, likely an older build", PreflightOK, preflightWindow)
 	}
+}
+
+// markerWriter closes found once a written line equals marker.
+type markerWriter struct {
+	marker string
+	found  chan struct{}
+	line   []byte
+	seen   bool
+}
+
+func (w *markerWriter) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if w.seen {
+			break
+		}
+		if b != '\n' {
+			if len(w.line) < 4096 {
+				w.line = append(w.line, b)
+			}
+			continue
+		}
+		if strings.TrimSpace(string(w.line)) == w.marker {
+			w.seen = true
+			close(w.found)
+		}
+		w.line = w.line[:0]
+	}
+	return len(p), nil
 }
 
 // Apply replaces the running binary and restarts via syscall.Exec. Call only

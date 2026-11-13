@@ -2487,10 +2487,12 @@ func main() {
 	options := parseOptions()
 
 	// Self-update preflight: parent process is probing the new binary with the
-	// restart args. Exit 0 before touching shared state (DB, NATS) so the
-	// still-running agent isn't disturbed.
+	// restart args. Stop before touching shared state (DB, NATS) so the
+	// still-running agent isn't disturbed; stay up for PreflightHold so older
+	// updaters, which only accept a binary still running after 15s, take it.
 	if os.Getenv(selfupdate.PreflightEnvVar) == "1" {
-		fmt.Println("preflight ok")
+		fmt.Println(selfupdate.PreflightOK)
+		time.Sleep(selfupdate.PreflightHold)
 		os.Exit(0)
 	}
 
