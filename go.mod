@@ -10,9 +10,9 @@ require (
 	github.com/json-iterator/go v1.1.12
 	github.com/klauspost/compress v1.20.2
 	github.com/miekg/dns v1.1.73
-	github.com/nats-io/nats-server/v2 v2.12.6
-	github.com/nats-io/nats.go v1.49.0
-	github.com/nats-io/nkeys v0.4.15
+	github.com/nats-io/nats-server/v2 v2.12.12
+	github.com/nats-io/nats.go v1.51.0
+	github.com/nats-io/nkeys v0.4.16
 	github.com/projectdiscovery/dnsx v1.3.0
 	github.com/projectdiscovery/fastdialer v0.5.25
 	github.com/projectdiscovery/goflags v0.2.1
@@ -95,7 +95,7 @@ require (
 	github.com/antchfx/htmlquery v1.3.5 // indirect
 	github.com/antchfx/xmlquery v1.4.4 // indirect
 	github.com/antchfx/xpath v1.3.6 // indirect
-	github.com/antithesishq/antithesis-sdk-go v0.6.0-default-no-op // indirect
+	github.com/antithesishq/antithesis-sdk-go v0.7.0-default-no-op // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.8 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.31.16 // indirect
@@ -312,7 +312,7 @@ require (
 	github.com/microcosm-cc/bluemonday v1.0.27 // indirect
 	github.com/microsoft/go-mssqldb v1.9.2 // indirect
 	github.com/mikelolasagasti/xz v1.0.1 // indirect
-	github.com/minio/highwayhash v1.0.4-0.20251030100505-070ab1a87a76 // indirect
+	github.com/minio/highwayhash v1.0.4 // indirect
 	github.com/minio/minlz v1.0.1 // indirect
 	github.com/minio/selfupdate v0.6.1-0.20230907112617-f11e74f84ca7 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
@@ -327,7 +327,7 @@ require (
 	github.com/muesli/reflow v0.3.0 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/nats-io/jwt/v2 v2.8.1 // indirect
+	github.com/nats-io/jwt/v2 v2.8.2 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
